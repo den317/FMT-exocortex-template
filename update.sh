@@ -1736,16 +1736,23 @@ if [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
     fi
 fi
 
-validate_no_install_values_in_tracked_files() {
-    local env_file="$WORKSPACE_DIR/.exocortex.env" key value hit failed=0
+validate_no_install_values_in_staged_additions() {
+    local env_file="$WORKSPACE_DIR/.exocortex.env" key value hit failed=0 staged_additions
     [ -f "$env_file" ] || return 0
+    [ "${#APPLIED_PATHS[@]}" -gt 0 ] || return 0
+
+    # Guard the material introduced by this update, not every historical line in
+    # the repository. Common cloud values such as /root legitimately occur in
+    # container documentation and used to make every update fail. Diff headers
+    # are excluded so an install value in a path cannot create a false positive.
+    staged_additions=$(git -C "$SCRIPT_DIR" diff --cached --no-color --unified=0 -- "${APPLIED_PATHS[@]}" |
+        sed -n '/^+++ /d; /^+/s/^+//p')
     for key in WORKSPACE_DIR HOME_DIR CLAUDE_PATH IWE_TEMPLATE IWE_RUNTIME; do
         value=$(grep -E "^${key}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2- | sed -E 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')
         [ -n "$value" ] || continue
-        hit=$(git -C "$SCRIPT_DIR" grep -l -F -- "$value" -- ':(exclude).exocortex.env' 2>/dev/null || true)
+        hit=$(printf '%s\n' "$staged_additions" | grep -F -- "$value" || true)
         if [ -n "$hit" ]; then
-            echo "  ✗ install-value $key найден в tracked-файлах:" >&2
-            printf '    %s\n' "$hit" >&2
+            echo "  ✗ install-value $key найден в добавленных строках обновления" >&2
             failed=1
         fi
     done
@@ -1759,7 +1766,7 @@ if ! $SKIP_COMMIT; then
         for fpath in "${APPLIED_PATHS[@]}"; do
             git -C "$SCRIPT_DIR" add -- "$fpath" 2>/dev/null || true
         done
-        if ! validate_no_install_values_in_tracked_files; then
+        if ! validate_no_install_values_in_staged_additions; then
             echo "  ОШИБКА: автокоммит остановлен, чтобы не опубликовать install paths." >&2
             exit 1
         fi
