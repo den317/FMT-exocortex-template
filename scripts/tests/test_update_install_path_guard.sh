@@ -53,8 +53,25 @@ if validate_no_install_values_in_staged_additions 2>"$TMP/guard.err"; then
     exit 1
 fi
 grep -Fq 'install-value WORKSPACE_DIR' "$TMP/guard.err"
+grep -Fq 'leak.md' "$TMP/guard.err"
 if grep -Fq -- "$WORKSPACE_DIR" "$TMP/guard.err"; then
     echo 'guard disclosed the install value in diagnostics' >&2
+    exit 1
+fi
+
+# Content beginning with "++ " appears as "+++ " in a patch. It must not be
+# mistaken for the file header; a spaced filename also exercises path handling.
+printf '++ %s/no-newline' "$WORKSPACE_DIR" >"$SCRIPT_DIR/prefix leak.md"
+git -C "$SCRIPT_DIR" add 'prefix leak.md'
+APPLIED_PATHS=(leak.md 'prefix leak.md')
+if validate_no_install_values_in_staged_additions 2>"$TMP/prefix-guard.err"; then
+    echo 'guard accepted header-like content containing an install value' >&2
+    exit 1
+fi
+grep -Fq 'leak.md' "$TMP/prefix-guard.err"
+grep -Fq 'prefix leak.md' "$TMP/prefix-guard.err"
+if grep -Fq -- "$WORKSPACE_DIR" "$TMP/prefix-guard.err"; then
+    echo 'guard disclosed the header-like install value in diagnostics' >&2
     exit 1
 fi
 

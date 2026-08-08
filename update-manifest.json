@@ -2317,7 +2317,7 @@
     },
     {
       "path": "update.sh",
-      "sha256": "6516582fe731c8da57a04ec9721f03cadfc2ab7e7fa8d28eded4b20f432a8eb5"
+      "sha256": "2765c32744e76a4c6702e9aa6325c09dc1411b446da9ef23f662cceaf7d7a754"
     }
   ],
   "excluded_paths": [
@@ -2354,6 +2354,7 @@
     "scripts/tests/test_skill_promote.py",
     "scripts/tests/test_translate_delta.py",
     "scripts/tests/test_translate_parse.py",
+    "scripts/tests/test_update_install_path_guard.sh",
     "scripts/translate.py",
     "scripts/verify-template-integrity.sh",
     "sessions/2026-06/2026-06-17-01-kimi-setup/00-writer.md",

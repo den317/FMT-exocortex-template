@@ -1737,24 +1737,39 @@ if [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
 fi
 
 validate_no_install_values_in_staged_additions() {
-    local env_file="$WORKSPACE_DIR/.exocortex.env" key value hit failed=0 staged_additions
+    local env_file="$WORKSPACE_DIR/.exocortex.env" key value failed=0 fpath staged_additions i
+    local -a install_keys=() install_values=()
     [ -f "$env_file" ] || return 0
     [ "${#APPLIED_PATHS[@]}" -gt 0 ] || return 0
 
-    # Guard the material introduced by this update, not every historical line in
-    # the repository. Common cloud values such as /root legitimately occur in
-    # container documentation and used to make every update fail. Diff headers
-    # are excluded so an install value in a path cannot create a false positive.
-    staged_additions=$(git -C "$SCRIPT_DIR" diff --cached --no-color --unified=0 -- "${APPLIED_PATHS[@]}" |
-        sed -n '/^+++ /d; /^+/s/^+//p')
     for key in WORKSPACE_DIR HOME_DIR CLAUDE_PATH IWE_TEMPLATE IWE_RUNTIME; do
         value=$(grep -E "^${key}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2- | sed -E 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')
         [ -n "$value" ] || continue
-        hit=$(printf '%s\n' "$staged_additions" | grep -F -- "$value" || true)
-        if [ -n "$hit" ]; then
-            echo "  ✗ install-value $key найден в добавленных строках обновления" >&2
-            failed=1
-        fi
+        install_keys+=("$key")
+        install_values+=("$value")
+    done
+
+    # Guard only the lines introduced in files handled by this update. Parse
+    # additions inside @@ hunks instead of filtering +++ headers by prefix:
+    # content beginning with "++ " also appears as "+++ " in a patch.
+    # Iterating paths separately keeps the diagnostic filename authoritative
+    # without parsing quoted/renamed diff headers or disclosing the matched value.
+    for fpath in "${APPLIED_PATHS[@]}"; do
+        staged_additions=$(git -C "$SCRIPT_DIR" diff --cached --no-color --no-ext-diff --no-textconv --unified=0 -- "$fpath" |
+            awk '
+                /^diff --git / { in_hunk=0; next }
+                /^@@ / { in_hunk=1; next }
+                in_hunk && /^\+/ { print substr($0, 2) }
+            ')
+        [ -n "$staged_additions" ] || continue
+
+        for i in "${!install_keys[@]}"; do
+            if grep -Fq -- "${install_values[$i]}" <<<"$staged_additions"; then
+                echo "  ✗ install-value ${install_keys[$i]} найден в добавленных строках обновления:" >&2
+                printf '    %s\n' "$fpath" >&2
+                failed=1
+            fi
+        done
     done
     [ "$failed" -eq 0 ]
 }

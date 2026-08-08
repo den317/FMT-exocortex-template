@@ -387,6 +387,11 @@ jobs:
       - name: Run update.sh edge-case regression tests (T1-T17)
         run: bash setup/test-update-edge-cases.sh
 
+      # PR #385: cloud install paths may occur legitimately in old tracked text;
+      # only additions made by the current updater run are publication blockers.
+      - name: Test staged install-path guard
+        run: bash scripts/tests/test_update_install_path_guard.sh
+
       # issue #310/#323: хук-страж, не зарегистрированный ни в одном событии, не
       # срабатывает никогда — и «не сработал» неотличимо от «нарушений не было».
       - name: Check every hook is actually wired (orphan-hook guard)
