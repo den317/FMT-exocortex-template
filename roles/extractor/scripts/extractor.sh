@@ -43,25 +43,41 @@ else
 fi
 
 LOG_DIR="$HOME/logs/extractor"
-if [ -n "${CLAUDE_CLI_PATH:-}" ]; then
-    CLAUDE_PATH="$CLAUDE_CLI_PATH"
-elif command -v claude &>/dev/null; then
-    CLAUDE_PATH="$(command -v claude)"
-elif [ -x "$HOME/.local/bin/claude" ]; then
-    CLAUDE_PATH="$HOME/.local/bin/claude"
-elif [ -x "$HOME/.npm-global/bin/claude" ]; then
-    CLAUDE_PATH="$HOME/.npm-global/bin/claude"
-else
-    CLAUDE_PATH="{{CLAUDE_PATH}}"  # fallback: build-runtime должен был подставить
-fi
-if [ ! -x "$CLAUDE_PATH" ]; then
-    echo "[$(date '+%H:%M:%S')] ERROR: claude CLI не найден (CLAUDE_CLI_PATH/PATH/~/.local/bin/~/.npm-global/fallback='$CLAUDE_PATH')." >&2
-    exit 127
-fi
 ENV_FILE="$HOME/.config/aist/env"
 
-# AI CLI: переопределение через переменные окружения (см. strategist.sh)
-AI_CLI="${AI_CLI:-$CLAUDE_PATH}"
+# build-runtime substitutes the legacy CLAUDE_PATH key from .exocortex.env.
+# It may be either a path or a PATH-resolved command name such as "codex".
+TEMPLATE_AI_CLI="{{CLAUDE_PATH}}"
+UNSUBSTITUTED_TEMPLATE_AI_CLI='{''{CLAUDE_PATH}''}'
+
+resolve_ai_cli() {
+    local candidate="${AI_CLI:-${CLAUDE_CLI_PATH:-}}"
+
+    if [ -z "$candidate" ] && [ "$TEMPLATE_AI_CLI" != "$UNSUBSTITUTED_TEMPLATE_AI_CLI" ]; then
+        candidate="$TEMPLATE_AI_CLI"
+    fi
+    if [ -z "$candidate" ] && command -v claude >/dev/null 2>&1; then
+        candidate="claude"
+    elif [ -z "$candidate" ] && [ -x "$HOME/.local/bin/claude" ]; then
+        candidate="$HOME/.local/bin/claude"
+    elif [ -z "$candidate" ] && [ -x "$HOME/.npm-global/bin/claude" ]; then
+        candidate="$HOME/.npm-global/bin/claude"
+    elif [ -z "$candidate" ] && command -v codex >/dev/null 2>&1; then
+        candidate="codex"
+    fi
+
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+    elif [ -n "$candidate" ] && command -v "$candidate" >/dev/null 2>&1; then
+        command -v "$candidate"
+    else
+        echo "[$(date '+%H:%M:%S')] ERROR: AI CLI не найден (AI_CLI/CLAUDE_CLI_PATH/PATH/template='$candidate')." >&2
+        return 127
+    fi
+}
+
+# Claude-compatible custom CLIs still use these overrides.  Codex ignores them
+# and is invoked through its supported `exec` interface below.
 AI_CLI_PROMPT_FLAG="${AI_CLI_PROMPT_FLAG:--p}"
 AI_CLI_EXTRA_FLAGS="${AI_CLI_EXTRA_FLAGS:---dangerously-skip-permissions --allowedTools Read,Write,Edit,Glob,Grep,Bash}"
 
@@ -166,10 +182,35 @@ $extra_args"
 
     cd "$WORKSPACE"
 
-    # Запуск AI CLI с промптом
-    "$AI_CLI" $AI_CLI_EXTRA_FLAGS \
-        $AI_CLI_PROMPT_FLAG "$prompt" \
-        >> "$LOG_FILE" 2>&1
+    local ai_cli
+    if ! ai_cli="$(resolve_ai_cli)"; then
+        log "ERROR: AI CLI unavailable; process not started: $command_file"
+        return 127
+    fi
+
+    # Codex has a different non-interactive interface from Claude.  Keep the
+    # sandbox at workspace-write and use automatic review; do not bypass either
+    # the sandbox or the trusted hook checks for scheduled runs.
+    if [ "$(basename "$ai_cli")" = "codex" ]; then
+        local codex_model="${IWE_EXTRACTOR_MODEL:-}"
+        local model_args=()
+        if [ -n "$codex_model" ]; then
+            model_args=(--model "$codex_model")
+            log "Codex model override: $codex_model"
+        fi
+        "$ai_cli" exec \
+            --ephemeral \
+            --sandbox workspace-write \
+            --approve-for-me \
+            -C "$WORKSPACE" \
+            "${model_args[@]}" \
+            "$prompt" \
+            >> "$LOG_FILE" 2>&1
+    else
+        "$ai_cli" $AI_CLI_EXTRA_FLAGS \
+            $AI_CLI_PROMPT_FLAG "$prompt" \
+            >> "$LOG_FILE" 2>&1
+    fi
 
     log "Completed process: $command_file"
 

@@ -2,7 +2,7 @@
 Description=IWE Strategist — weekly review в понедельник 00:00
 
 [Timer]
-OnCalendar=Mon *-*-* 00:00:00
+OnCalendar=Mon *-*-* 00:00:00 UTC
 Persistent=true
 Unit=iwe-strategist-weekreview.service
 

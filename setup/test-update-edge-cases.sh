@@ -25,7 +25,8 @@
 #   T21: legacy owner:user protocols migrate once with backup; other user files stay protected (issue #354)
 #   T22: Quick Close requires a runner card only when the runner and graph exist (issue #356)
 #   T23: wp-sync-bundle prefers folder cards and reads structured open phase statuses
-#   T24-T26: update safety, bootstrap/path contracts, multiplier opt-out
+#   T24-T27: update safety, bootstrap/path contracts, multiplier opt-out,
+#             and day-close ownership/source selection
 #
 # Exit: 0 = all PASS, N = N tests failed
 #
@@ -708,7 +709,8 @@ else
             "$T12_DST/extensions" \
             "$T12_DST/agent-fault-profile/audit" \
             "$T12_DST/hindsight" \
-            "$T12_DST/decisions"
+            "$T12_DST/decisions" \
+            "$T12_DST/ai-builds"
         echo "top-level" > "$T12_SRC/navigation.md"
         echo "nested" > "$T12_SRC/reference/agent-core.md"
         echo "blob" > "$T12_SRC/.git/objects/ab/deadbeef"
@@ -717,6 +719,7 @@ else
         echo "fault audit" > "$T12_DST/agent-fault-profile/audit/faults.md"
         echo "hindsight" > "$T12_DST/hindsight/notes.md"
         echo "legacy decision" > "$T12_DST/decisions/decision-log.md"
+        echo "independent archive" > "$T12_DST/ai-builds/build.md"
 
         rsync "${T12_FLAGS[@]}" "$T12_SRC/" "$T12_DST/" >/dev/null 2>&1
 
@@ -739,7 +742,8 @@ else
             extensions/day-close.after.md \
             agent-fault-profile/audit/faults.md \
             hindsight/notes.md \
-            decisions/decision-log.md; do
+            decisions/decision-log.md \
+            ai-builds/build.md; do
             [ -f "$T12_DST/$foreign" ] || T12_FOREIGN_MISSING=$((T12_FOREIGN_MISSING + 1))
         done
         if [ "$T12_FOREIGN_MISSING" -eq 0 ]; then
@@ -754,6 +758,41 @@ else
             fail "T12: ownership protection disabled stale-memory pruning"
         fi
     fi
+fi
+
+# ============================================================
+# T27: day-close prefers workspace memory and preserves foreign archives
+# ============================================================
+echo "--- T27: day-close source and ownership boundaries ---"
+T27_ROOT="$TEST_WS/t27-workspace"
+T27_HOME="$TEST_WS/t27-home"
+T27_AUTO_SLUG=$(printf '%s' "$T27_ROOT" | tr '/_ ' '-')
+mkdir -p \
+  "$T27_ROOT/memory" \
+  "$T27_ROOT/DS-strategy/exocortex/ai-builds" \
+  "$T27_HOME/.claude/projects/$T27_AUTO_SLUG/memory"
+printf 'workspace-current\n' > "$T27_ROOT/memory/current.md"
+printf 'auto-stale\n' > "$T27_HOME/.claude/projects/$T27_AUTO_SLUG/memory/stale.md"
+printf 'independent archive\n' > "$T27_ROOT/DS-strategy/exocortex/ai-builds/build.md"
+
+if HOME="$T27_HOME" WORKSPACE_DIR="$T27_ROOT" IWE_GOVERNANCE_REPO=DS-strategy \
+    bash "$TEMPLATE_DIR/scripts/day-close.sh" --backup >/dev/null 2>&1 && \
+   [ -f "$T27_ROOT/DS-strategy/exocortex/current.md" ] && \
+   ! [ -e "$T27_ROOT/DS-strategy/exocortex/stale.md" ] && \
+   [ -f "$T27_ROOT/DS-strategy/exocortex/ai-builds/build.md" ]; then
+    pass "T27: day-close uses workspace memory and preserves non-memory archives"
+else
+    fail "T27: day-close did not select workspace memory or deleted ai-builds"
+fi
+
+# ============================================================
+# T28: Codex role runners use codex exec without unsafe bypass flags
+# ============================================================
+echo "--- T28: Codex role runners ---"
+if bash "$TEMPLATE_DIR/setup/test-codex-role-runners.sh" >/dev/null; then
+    pass "T28: compiled strategist and extractor use safe Codex exec"
+else
+    fail "T28: Codex role runner regression"
 fi
 
 # ============================================================
@@ -1597,10 +1636,20 @@ T25_NATIVE_PLISTS=$(grep -l '{{HOME_DIR}}/.local/bin:' \
   "$TEMPLATE_DIR/roles/extractor/scripts/launchd/com.extractor.inbox-check.plist" \
   "$TEMPLATE_DIR/roles/synchronizer/scripts/launchd/com.exocortex.scheduler.plist" | wc -l | tr -d ' ')
 T25_FAILFAST=$(grep -l 'exit 127' "$TEMPLATE_DIR/roles/strategist/scripts/strategist.sh" "$TEMPLATE_DIR/roles/extractor/scripts/extractor.sh" | wc -l | tr -d ' ')
-if [ "$T25_NATIVE_RUNNERS" -eq 2 ] && [ "$T25_NATIVE_PLISTS" -eq 4 ] && [ "$T25_FAILFAST" -eq 2 ]; then
-    pass "T25: both runners and all four plists support native Claude; runners fail with 127"
+T25_UTC_TIMER_LINES=$(grep -hE '^OnCalendar=' \
+  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-morning.timer" \
+  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-weekreview.timer" \
+  "$TEMPLATE_DIR/roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.timer" | grep -c ' UTC$' || true)
+T25_UTC_SERVICES=$(grep -l '^Environment=TZ=UTC$' \
+  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-morning.service" \
+  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-weekreview.service" \
+  "$TEMPLATE_DIR/roles/extractor/scripts/systemd/iwe-extractor-inbox-check.service" \
+  "$TEMPLATE_DIR/roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.service" | wc -l | tr -d ' ')
+if [ "$T25_NATIVE_RUNNERS" -eq 2 ] && [ "$T25_NATIVE_PLISTS" -eq 4 ] && [ "$T25_FAILFAST" -eq 2 ] && \
+   [ "$T25_UTC_TIMER_LINES" -eq 12 ] && [ "$T25_UTC_SERVICES" -eq 4 ]; then
+    pass "T25: runners, plists and systemd timers preserve the declared UTC contract"
 else
-    fail "T25: native Claude runners=$T25_NATIVE_RUNNERS/2 plists=$T25_NATIVE_PLISTS/4 fail-fast=$T25_FAILFAST/2"
+    fail "T25: native runners=$T25_NATIVE_RUNNERS/2 plists=$T25_NATIVE_PLISTS/4 fail-fast=$T25_FAILFAST/2 utc-timers=$T25_UTC_TIMER_LINES/12 utc-services=$T25_UTC_SERVICES/4"
 fi
 
 # ============================================================

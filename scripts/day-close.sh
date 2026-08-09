@@ -24,10 +24,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
 GOVERNANCE_REPO="${GOVERNANCE_REPO:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
 DS_STRATEGY="$WORKSPACE_DIR/$GOVERNANCE_REPO"
-# Slug derived from WORKSPACE_DIR (not $HOME) so it matches Claude's project key
-# regardless of workspace location. Override via IWE_MEMORY_SRC if needed.
+# Prefer workspace memory when it exists: it may be the checked-in, current
+# source while Claude's private auto-memory is only a seed from installation.
+# Otherwise derive the auto-memory slug from WORKSPACE_DIR (not $HOME) so it
+# matches Claude's project key regardless of workspace location. An explicit
+# IWE_MEMORY_SRC remains the highest-priority override.
 WORKSPACE_SLUG=$(echo "$WORKSPACE_DIR" | tr '/_ ' '-')
-MEMORY_SRC="${IWE_MEMORY_SRC:-$HOME/.claude/projects/${WORKSPACE_SLUG}/memory}"
+if [ -n "${IWE_MEMORY_SRC:-}" ]; then
+  MEMORY_SRC="$IWE_MEMORY_SRC"
+elif [ -d "$WORKSPACE_DIR/memory" ]; then
+  MEMORY_SRC="$WORKSPACE_DIR/memory"
+else
+  MEMORY_SRC="$HOME/.claude/projects/${WORKSPACE_SLUG}/memory"
+fi
 EXOCORTEX_DST="$DS_STRATEGY/exocortex"
 # MCP reindex — опциональный компонент (WP-187 iwe-knowledge Gateway заменяет локальный knowledge-mcp).
 # Переопределить путь можно через env IWE_SELECTIVE_REINDEX.
@@ -75,7 +84,7 @@ do_backup() {
     rm -rf "$EXOCORTEX_DST/memory"
   fi
 
-  # Mirror *.md/*.yaml/*.yml from auto-memory; --delete prunes files removed upstream.
+  # Mirror memory-owned *.md/*.yaml/*.yml; --delete prunes files removed upstream.
   # exocortex/ is a multi-writer destination: extensions/, fault-profile, hindsight,
   # and legacy decision logs are primary data written by other platform mechanisms.
   # Root-anchored excludes are therefore ownership boundaries, not copy masks. Rsync
@@ -99,6 +108,7 @@ do_backup() {
     --exclude='/hindsight/***' \
     --exclude='/decisions/***' \
     --exclude='/rules/***' \
+    --exclude='/ai-builds/***' \
     --include='*/' \
     --include='*.md' --include='*.yaml' --include='*.yml' \
     --exclude='*' \
