@@ -1409,7 +1409,7 @@
     },
     {
       "path": "roles/extractor/scripts/extractor.sh",
-      "sha256": "0745ce19bb3dbb5b1c1d7cb3164c07a0bc1b2d8cb9544fd69e061c76c8dcd284"
+      "sha256": "6915ef9e951130aa8cd3d04b5534e9b644658a5fb470b38e44619e0e550a0d22"
     },
     {
       "path": "roles/extractor/scripts/launchd/com.extractor.inbox-check.plist",
@@ -1417,7 +1417,7 @@
     },
     {
       "path": "roles/extractor/scripts/systemd/iwe-extractor-inbox-check.service",
-      "sha256": "f99b4c0accd17a2498587226fbb775f6e535ed968e6d5722854e5300bcadce49"
+      "sha256": "b6b67cce2d34595debc21e1f349af533c2d1bab55e38afc933f04fbeea5cd133"
     },
     {
       "path": "roles/extractor/scripts/systemd/iwe-extractor-inbox-check.timer",
@@ -1577,23 +1577,23 @@
     },
     {
       "path": "roles/strategist/scripts/strategist.sh",
-      "sha256": "f8dda04ae17b71b7315cf0cef2932df978b9e1c6f6ae391b9409605b564bfd80"
+      "sha256": "508e6decb3fc9398c7d3081388bcf0b4b6465e629973044dd62207ebfc9377db"
     },
     {
       "path": "roles/strategist/scripts/systemd/iwe-strategist-morning.service",
-      "sha256": "977321695ba576f19214ccf219f98e6101cd94eae5c0de54fe374ad3738c2577"
+      "sha256": "6ce0af54c5c0f944d3b4d76a9c56ce8494ec2a994e5792d8c80a692e5dec21b8"
     },
     {
       "path": "roles/strategist/scripts/systemd/iwe-strategist-morning.timer",
-      "sha256": "b724ec2c2d77638613664a1febfde418f55f6ddc89b091fd170d5f7af9e438fc"
+      "sha256": "1036e95003d6c7296005f6b108a583d3e7dd81e0e91fc50ddb18f9940cff1e02"
     },
     {
       "path": "roles/strategist/scripts/systemd/iwe-strategist-weekreview.service",
-      "sha256": "f300d3ea098e2bb653e1d3b8ba7c544811a7deaa65ecb51d81d9d55cbf270b49"
+      "sha256": "7d9154e28ea1e542477180092b6971974a55b1e3744b9be0c78d5c949ef91592"
     },
     {
       "path": "roles/strategist/scripts/systemd/iwe-strategist-weekreview.timer",
-      "sha256": "cb0decae15fd9c0d093486c3d3696e2580e73492ec6700efd74742685945ed0e"
+      "sha256": "4064724d4d74a34e9f45c1e54ca60b3f0a908e87085977dc7cf42f5457293491"
     },
     {
       "path": "roles/synchronizer/README.md",
@@ -1649,11 +1649,11 @@
     },
     {
       "path": "roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.service",
-      "sha256": "d80079cce7ea8f26d4d3b8d6490487a526e809f99b9538dc7badae0e2dba8eba"
+      "sha256": "7a3ab157a816a022d024efc8c9d1f5303a5bb1704d5de6307d3ce214b227a380"
     },
     {
       "path": "roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.timer",
-      "sha256": "c82c53025bd93cbf7aece9133ba39f31e753c0830d7f994da80cbe8faf2fdfcf"
+      "sha256": "572301c4eb819542ee3b6d4a85d3579bac6d9574672b1899bffb017db30f0240"
     },
     {
       "path": "roles/synchronizer/scripts/templates/extractor.sh",
@@ -1757,7 +1757,7 @@
     },
     {
       "path": "scripts/check-manifest-coverage.py",
-      "sha256": "4b65ffb6107a16f4e5a759b8b791d884beaef15b972a78fb0f9f7b50e6058415"
+      "sha256": "e4888f288897bc5e365947535e6ea5b4a83c44d8c75b4fd3674bd67a09cebe2e"
     },
     {
       "path": "scripts/check-open-sessions.sh",
@@ -1841,7 +1841,7 @@
     },
     {
       "path": "scripts/day-close.sh",
-      "sha256": "c6dabf44b699019f939d7e7094bc6ace2dd5def9b00eee62463ca0833fc16d00"
+      "sha256": "f5c05d178a9a3140f7af785493cc3c3735f9d89b74fad12676823156104cc7f2"
     },
     {
       "path": "scripts/day-open-budget-patch.py",
@@ -1929,7 +1929,7 @@
     },
     {
       "path": "scripts/hot-files.list",
-      "sha256": "19780ebdac77af24e345d17a1e9799e5dd3db56c97cd50dd53001860d0e3cfe2"
+      "sha256": "a363e257e556a359a5c080772e71af43e1c4cfaca5236a609994f707e909dec5"
     },
     {
       "path": "scripts/iwe-agent-dispatcher.py",
@@ -2228,6 +2228,10 @@
       "sha256": "99c99c821223e70a8a0b1cb89ce9a72f2bd1e5eebd011c2f42eadde056125491"
     },
     {
+      "path": "scripts/tests/test_update_install_path_guard.sh",
+      "sha256": "2297fc514a695eb2015e996959df6a4522efeaeb4b5d54596c037671e909a294"
+    },
+    {
       "path": "scripts/tests/test_upgrade_worktree_cleanup.sh",
       "sha256": "fffd6c65017455af0cee8af1d05595d773cdc8776738286aa488b0086a972192"
     },
@@ -2322,11 +2326,7 @@
   ],
   "excluded_paths": [
     "AGENTS-agent-blocks.md",
-    "docs/developer/README.md",
-    "docs/developer/card-template.md",
     "docs/developer/code-style.md",
-    "docs/developer/developer-guide.md",
-    "docs/developer/testing-as-spec.md",
     "docs/developer/working-with-claude.md",
     "promotion-status.yaml",
     "scripts/agent-dashboard.py",
@@ -2354,15 +2354,8 @@
     "scripts/tests/test_skill_promote.py",
     "scripts/tests/test_translate_delta.py",
     "scripts/tests/test_translate_parse.py",
-    "scripts/tests/test_update_install_path_guard.sh",
     "scripts/translate.py",
-    "scripts/verify-template-integrity.sh",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/00-writer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/01-peer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/02-writer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/03-peer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/meta.yaml",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/report.md"
+    "scripts/verify-template-integrity.sh"
   ],
   "deprecated_files": [
     {

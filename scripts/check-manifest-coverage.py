@@ -84,6 +84,9 @@ _EXCLUDED_EXACT_PATHS = frozenset({
     "setup/optional/setup-calendar.sh",
     "setup/release-audit-prompt.md",
     "setup/smoke-test-fresh-install.sh",
+    # Developer-only mock for the two role runners.  It is invoked by the
+    # adjacent edge-case suite and is not part of an installed IWE workspace.
+    "setup/test-codex-role-runners.sh",
     "setup/test-detectors.sh",
     "setup/test-update-edge-cases.sh",
     "setup/test-update-issue-226.sh",

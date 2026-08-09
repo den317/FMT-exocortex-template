@@ -140,6 +140,7 @@ SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
     "scripts/tests/test_day_close_lock_timezone.sh"
     "scripts/tests/test_fresh_seed_reproduction.sh"
     "scripts/tests/test_hook_classification.sh"
+    "scripts/tests/test_update_install_path_guard.sh"
     "scripts/tests/test_upgrade_worktree_cleanup.sh"
 )
 
