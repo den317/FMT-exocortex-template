@@ -84,6 +84,7 @@ _EXCLUDED_EXACT_PATHS = frozenset({
     "setup/optional/setup-calendar.sh",
     "setup/release-audit-prompt.md",
     "setup/smoke-test-fresh-install.sh",
+    "setup/test-codex-role-runners.sh",
     "setup/test-detectors.sh",
     "setup/test-update-edge-cases.sh",
     "setup/test-update-issue-226.sh",

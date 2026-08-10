@@ -166,10 +166,17 @@ $extra_args"
 
     cd "$WORKSPACE"
 
-    # Запуск AI CLI с промптом
-    "$AI_CLI" $AI_CLI_EXTRA_FLAGS \
-        $AI_CLI_PROMPT_FLAG "$prompt" \
-        >> "$LOG_FILE" 2>&1
+    # Codex и Claude Code используют разные неинтерактивные контракты.
+    # Claude-флаги не передаются Codex: они несовместимы и могут снять sandbox.
+    if [ "$(basename "$AI_CLI")" = "codex" ]; then
+        "$CLAUDE_PATH" exec --ephemeral --sandbox workspace-write --approve-for-me \
+            -C "$WORKSPACE" "$prompt" \
+            >> "$LOG_FILE" 2>&1
+    else
+        "$AI_CLI" $AI_CLI_EXTRA_FLAGS \
+            $AI_CLI_PROMPT_FLAG "$prompt" \
+            >> "$LOG_FILE" 2>&1
+    fi
 
     log "Completed process: $command_file"
 

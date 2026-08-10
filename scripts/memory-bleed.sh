@@ -20,8 +20,6 @@ set -eu
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
-# shellcheck source=lib/common.sh
-source "$SCRIPT_DIR/lib/common.sh"
 MEMORY_DIR="$IWE_ROOT/memory"
 HOT_LIMIT=150
 HOT_DOWNGRADE_DAYS=14   # HOT → WARM если не упоминался N дней
@@ -161,7 +159,7 @@ for f in $(find "$MEMORY_DIR/" -maxdepth 1 -name "*.md" | sort); do
     [ -z "$vf" ] && continue
 
     # Используем mtime как прокси для "последнего обращения"
-    mtime=$(iwe_file_mtime_date "$f" 2>/dev/null || echo "$vf")
+    mtime=$(stat -f "%Sm" -t "%Y-%m-%d" "$f" 2>/dev/null || date -r "$f" +%Y-%m-%d 2>/dev/null || echo "$vf")
     age=$(days_since "$mtime")
 
     rec=""

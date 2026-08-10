@@ -55,7 +55,7 @@ assert_codex_args() {
     fi
 }
 
-bash "$BUILD_RUNTIME" --workspace "$WORKSPACE" --env-file "$ENV_FILE" --quiet
+PATH="$FAKE_BIN:$PATH" bash "$BUILD_RUNTIME" --workspace "$WORKSPACE" --env-file "$ENV_FILE" --quiet
 
 env PATH="$FAKE_BIN:$PATH" \
     HOME="$TEST_HOME" \
@@ -64,6 +64,7 @@ env PATH="$FAKE_BIN:$PATH" \
     IWE_RUNTIME="$WORKSPACE/.iwe-runtime" \
     IWE_GOVERNANCE_REPO="DS-strategy" \
     AI_CLI="codex" \
+    CLAUDE_CLI_PATH="$FAKE_BIN/codex" \
     MOCK_ARGS="$MOCK_ARGS" \
     bash "$WORKSPACE/.iwe-runtime/roles/strategist/scripts/strategist.sh" day-plan
 assert_codex_args strategist "$WORKSPACE/DS-strategy"
@@ -76,6 +77,7 @@ env PATH="$FAKE_BIN:$PATH" \
     IWE_RUNTIME="$WORKSPACE/.iwe-runtime" \
     IWE_GOVERNANCE_REPO="DS-strategy" \
     AI_CLI="codex" \
+    CLAUDE_CLI_PATH="$FAKE_BIN/codex" \
     MOCK_ARGS="$MOCK_ARGS" \
     bash "$WORKSPACE/.iwe-runtime/roles/extractor/scripts/extractor.sh" on-demand
 assert_codex_args extractor "$WORKSPACE"

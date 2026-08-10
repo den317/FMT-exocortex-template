@@ -57,6 +57,7 @@ if [ ! -x "$CLAUDE_PATH" ]; then
     echo "[$(date '+%H:%M:%S')] ERROR: claude CLI не найден (CLAUDE_CLI_PATH/PATH/~/.local/bin/~/.npm-global/fallback='$CLAUDE_PATH')." >&2
     exit 127
 fi
+AI_CLI="${AI_CLI:-$CLAUDE_PATH}"
 CLAUDE_TIMEOUT=1800  # 30 мин — защита от зависания Claude CLI
 
 # macOS не имеет GNU timeout — используем perl fallback
@@ -171,13 +172,22 @@ ${prompt}"
         model_args=(--model "$model_override")
         log "Model override: $model_override"
     fi
-    # NB: --dangerously-skip-permissions не используется — Claude Code блокирует флаг
-    # под root/sudo (Linux cron). --allowedTools задаёт явный whitelist, чего достаточно.
-    timeout "$CLAUDE_TIMEOUT" "$CLAUDE_PATH" \
-        "${model_args[@]}" \
-        --allowedTools "Read,Write,Edit,Glob,Grep,Bash" \
-        -p "$prompt" \
-        >> "$LOG_FILE" 2>&1 || rc=$?
+    if [ "$(basename "$AI_CLI")" = "codex" ]; then
+        # Codex не поддерживает Claude-флаги. В ephemeral-режиме ему нужны
+        # явные sandbox/cwd, а Claude-модель из IWE_STRATEGIST_MODEL неприменима.
+        timeout "$CLAUDE_TIMEOUT" "$CLAUDE_PATH" \
+            exec --ephemeral --sandbox workspace-write --approve-for-me \
+            -C "$WORKSPACE" "$prompt" \
+            >> "$LOG_FILE" 2>&1 || rc=$?
+    else
+        # NB: --dangerously-skip-permissions не используется — Claude Code блокирует флаг
+        # под root/sudo (Linux cron). --allowedTools задаёт явный whitelist, чего достаточно.
+        timeout "$CLAUDE_TIMEOUT" "$CLAUDE_PATH" \
+            "${model_args[@]}" \
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash" \
+            -p "$prompt" \
+            >> "$LOG_FILE" 2>&1 || rc=$?
+    fi
 
     if [ $rc -eq 124 ]; then
         log "WARN: Claude CLI timed out after ${CLAUDE_TIMEOUT}s for scenario: $command_file"

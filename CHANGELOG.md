@@ -117,7 +117,6 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 
 
-
 ## [0.38.2] — 2026-08-09
 
 ### Changed
