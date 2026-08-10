@@ -125,6 +125,15 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/dry-run-gate.sh"
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/residency-gate-skill-adapter.sh"
+          }
+        ]
       }
     ],
     "PostToolUse": [
