@@ -633,7 +633,7 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "dbd53ddae1ac708b21402976fd3658d15ed603e27feab6695144885440364b77"
+      "sha256": "f61931ab4d7dd58774d922a4e1157e1d3b1973cf19d33e788cd2ce8698e1540c"
     },
     {
       "path": "CLAUDE.md",
@@ -933,7 +933,7 @@
     },
     {
       "path": "guide-kit/FORMAT-topic.yaml.md",
-      "sha256": "ec5fbe07b496fb45c6e5cb6eecaa5fc90d19e89eb00020f3dac82b2e3e090a9d"
+      "sha256": "00486a873ff001d86d6440583fa58eaf007ae95849f80c36db02f45a9389b693"
     },
     {
       "path": "guide-kit/FORMAT.md",
@@ -1789,7 +1789,7 @@
     },
     {
       "path": "scripts/build-active-wp.py",
-      "sha256": "5d57d1de52c3124a4c1c095a4a1677aafc0415fdce5d8f15abc697edb9d83c24"
+      "sha256": "a0c8516167c5aa8b67fcb8eb9d460898940c3d9d616e9b261420973b08d4d592"
     },
     {
       "path": "scripts/changelog-append.sh",
@@ -2085,7 +2085,7 @@
     },
     {
       "path": "scripts/memory-bleed.sh",
-      "sha256": "b9a74648959ad49da45b64cbf67886b4b1a7956aa6c0c043e62dcca5f086cb06"
+      "sha256": "179645de69277a6abf82cce9673fce70df9b0ccdf8825a2910633cf80b46b94a"
     },
     {
       "path": "scripts/memory-health.sh",
@@ -2232,6 +2232,10 @@
       "sha256": "68354ecd9583fcf1e02f1570c28552fd495f4a5da7bf58c99e43f86a879bf17e"
     },
     {
+      "path": "scripts/tests/test_build_active_wp_registry_columns.py",
+      "sha256": "e60dcd82f807e76b53e52be5856f97bd21507e9f61c4849828ce8b37945f3da8"
+    },
+    {
       "path": "scripts/tests/test_capture_bus_contract.sh",
       "sha256": "41afdb00139193c82c34626884407018c2c76f5ad1adf6e908a726101c6788ba"
     },
@@ -2278,10 +2282,6 @@
     {
       "path": "scripts/tests/test_hook_classification.sh",
       "sha256": "99c99c821223e70a8a0b1cb89ce9a72f2bd1e5eebd011c2f42eadde056125491"
-    },
-    {
-      "path": "scripts/tests/test_build_active_wp_registry_columns.py",
-      "sha256": "f13382a8bec383a34c78f426be0234e85acba018e4108f887134f2e20ce9afbc"
     },
     {
       "path": "scripts/tests/test_update_install_path_guard.sh",
@@ -2382,11 +2382,7 @@
   ],
   "excluded_paths": [
     "AGENTS-agent-blocks.md",
-    "docs/developer/README.md",
-    "docs/developer/card-template.md",
     "docs/developer/code-style.md",
-    "docs/developer/developer-guide.md",
-    "docs/developer/testing-as-spec.md",
     "docs/developer/working-with-claude.md",
     "promotion-status.yaml",
     "scripts/agent-dashboard.py",
@@ -2411,18 +2407,11 @@
     "scripts/tests/test_dry_run_gate.py",
     "scripts/tests/test_install_hooks.py",
     "scripts/tests/test_manifest_coverage_local.py",
-    "scripts/tests/test_residency_gate_skill_adapter.py",
     "scripts/tests/test_skill_promote.py",
     "scripts/tests/test_translate_delta.py",
     "scripts/tests/test_translate_parse.py",
     "scripts/translate.py",
-    "scripts/verify-template-integrity.sh",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/00-writer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/01-peer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/02-writer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/03-peer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/meta.yaml",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/report.md"
+    "scripts/verify-template-integrity.sh"
   ],
   "deprecated_files": [
     {

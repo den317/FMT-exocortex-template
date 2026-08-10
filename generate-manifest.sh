@@ -142,6 +142,7 @@ SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
     "scripts/tests/test_hook_classification.sh"
     "scripts/tests/test_update_install_path_guard.sh"
     "scripts/tests/test_upgrade_worktree_cleanup.sh"
+    "scripts/tests/test_build_active_wp_registry_columns.py"
 )
 
 is_explicit_include() {
