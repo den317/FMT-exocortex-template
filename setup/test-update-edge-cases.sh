@@ -1635,7 +1635,7 @@ T25_NATIVE_PLISTS=$(grep -l '{{HOME_DIR}}/.local/bin:' \
   "$TEMPLATE_DIR/roles/strategist/scripts/launchd/com.strategist.weekreview.plist" \
   "$TEMPLATE_DIR/roles/extractor/scripts/launchd/com.extractor.inbox-check.plist" \
   "$TEMPLATE_DIR/roles/synchronizer/scripts/launchd/com.exocortex.scheduler.plist" | wc -l | tr -d ' ')
-T25_FAILFAST=$(grep -l 'exit 127' "$TEMPLATE_DIR/roles/strategist/scripts/strategist.sh" "$TEMPLATE_DIR/roles/extractor/scripts/extractor.sh" | wc -l | tr -d ' ')
+T25_FAILFAST=$(grep -l 'return 127' "$TEMPLATE_DIR/roles/strategist/scripts/strategist.sh" "$TEMPLATE_DIR/roles/extractor/scripts/extractor.sh" | wc -l | tr -d ' ' || true)
 T25_UTC_TIMER_LINES=$(grep -hE '^OnCalendar=' \
   "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-morning.timer" \
   "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-weekreview.timer" \
@@ -1647,7 +1647,7 @@ T25_UTC_SERVICES=$(grep -l '^Environment=TZ=UTC$' \
   "$TEMPLATE_DIR/roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.service" | wc -l | tr -d ' ')
 if [ "$T25_NATIVE_RUNNERS" -eq 2 ] && [ "$T25_NATIVE_PLISTS" -eq 4 ] && [ "$T25_FAILFAST" -eq 2 ] && \
    [ "$T25_UTC_TIMER_LINES" -eq 12 ] && [ "$T25_UTC_SERVICES" -eq 4 ]; then
-    pass "T25: runners, plists and systemd timers preserve the declared UTC contract"
+    pass "T25: runners fail with return 127; plists and systemd timers preserve the declared UTC contract"
 else
     fail "T25: native runners=$T25_NATIVE_RUNNERS/2 plists=$T25_NATIVE_PLISTS/4 fail-fast=$T25_FAILFAST/2 utc-timers=$T25_UTC_TIMER_LINES/12 utc-services=$T25_UTC_SERVICES/4"
 fi
