@@ -2,8 +2,13 @@
 name: templates-dayplan
 description: Шаблоны DayPlan и WeekPlan — единый источник для day-open и day-close
 type: reference
+horizon: warm
+domains: [reference, planning]
+status: active
 valid_from: 2026-04-13
 updated: 2026-04-21
+owner: platform
+schema_version: 1
 ---
 
 # Шаблоны DayPlan и WeekPlan

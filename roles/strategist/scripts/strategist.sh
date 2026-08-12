@@ -41,42 +41,23 @@ else
 fi
 
 LOG_DIR="$HOME/logs/strategist"
-
-# build-runtime substitutes the legacy CLAUDE_PATH key from .exocortex.env.
-# It may name either CLI (for example, "claude" or "codex"), so resolve a
-# command name through PATH instead of requiring an absolute executable path.
-TEMPLATE_AI_CLI="{{CLAUDE_PATH}}"
-UNSUBSTITUTED_TEMPLATE_AI_CLI='{''{CLAUDE_PATH}''}'
-
-resolve_ai_cli() {
-    local candidate="${AI_CLI:-${CLAUDE_CLI_PATH:-}}"
-
-    if [ -z "$candidate" ] && [ "$TEMPLATE_AI_CLI" != "$UNSUBSTITUTED_TEMPLATE_AI_CLI" ]; then
-        candidate="$TEMPLATE_AI_CLI"
-    fi
-    if [ -z "$candidate" ] && command -v claude >/dev/null 2>&1; then
-        candidate="claude"
-    elif [ -z "$candidate" ] && [ -x "$HOME/.local/bin/claude" ]; then
-        candidate="$HOME/.local/bin/claude"
-    elif [ -z "$candidate" ] && [ -x "$HOME/.npm-global/bin/claude" ]; then
-        candidate="$HOME/.npm-global/bin/claude"
-    elif [ -z "$candidate" ] && command -v codex >/dev/null 2>&1; then
-        candidate="codex"
-    fi
-
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-        printf '%s\n' "$candidate"
-    elif [ -n "$candidate" ] && command -v "$candidate" >/dev/null 2>&1; then
-        command -v "$candidate"
-    else
-        echo "[$(date '+%H:%M:%S')] ERROR: AI CLI не найден (AI_CLI/CLAUDE_CLI_PATH/PATH/template='$candidate')." >&2
-        return 127
-    fi
-}
-
-AI_CLI="$(resolve_ai_cli)" || exit $?
-AI_CLI_KIND="$(basename "$AI_CLI")"
-AI_TIMEOUT=1800  # 30 мин — защита от зависания headless AI CLI
+# На Mac: build-runtime подставляет {{CLAUDE_PATH}}. На сервере — резолв через env/PATH/known paths.
+if [ -n "${CLAUDE_CLI_PATH:-}" ]; then
+    CLAUDE_PATH="$CLAUDE_CLI_PATH"
+elif command -v claude &>/dev/null; then
+    CLAUDE_PATH="$(command -v claude)"
+elif [ -x "$HOME/.local/bin/claude" ]; then
+    CLAUDE_PATH="$HOME/.local/bin/claude"
+elif [ -x "$HOME/.npm-global/bin/claude" ]; then
+    CLAUDE_PATH="$HOME/.npm-global/bin/claude"
+else
+    CLAUDE_PATH="{{CLAUDE_PATH}}"  # fallback: build-runtime должен был подставить
+fi
+if [ ! -x "$CLAUDE_PATH" ]; then
+    echo "[$(date '+%H:%M:%S')] ERROR: claude CLI не найден (CLAUDE_CLI_PATH/PATH/~/.local/bin/~/.npm-global/fallback='$CLAUDE_PATH')." >&2
+    exit 127
+fi
+CLAUDE_TIMEOUT=1800  # 30 мин — защита от зависания Claude CLI
 
 # macOS не имеет GNU timeout — используем perl fallback
 if ! command -v timeout &>/dev/null; then
@@ -183,46 +164,25 @@ ${prompt}"
 
     cd "$WORKSPACE"
 
-    # Запуск AI CLI с содержимым команды как промпт (с timeout-защитой).
-    # Codex uses `exec`, not Claude's `-p` / `--allowedTools` interface.
+    # Запуск Claude Code с содержимым команды как промпт (с timeout-защитой)
     local rc=0
     local model_args=()
-    if [ "$AI_CLI_KIND" = "codex" ]; then
-        # Scenario defaults are Claude model IDs.  Passing one to Codex would
-        # fail, so use Codex's configured model unless an explicit Codex model
-        # was supplied via IWE_STRATEGIST_MODEL or the second argument.
-        if [ -n "$model_override" ] && [[ "$model_override" != claude-* ]]; then
-            model_args=(--model "$model_override")
-            log "Codex model override: $model_override"
-        elif [ -n "$model_override" ]; then
-            log "Codex: skipping incompatible Claude model override: $model_override"
-        fi
-        timeout "$AI_TIMEOUT" "$AI_CLI" exec \
-            --ephemeral \
-            --sandbox workspace-write \
-            --approve-for-me \
-            -C "$WORKSPACE" \
-            "${model_args[@]}" \
-            "$prompt" \
-            >> "$LOG_FILE" 2>&1 || rc=$?
-    else
-        if [ -n "$model_override" ]; then
-            model_args=(--model "$model_override")
-            log "Model override: $model_override"
-        fi
-        # NB: --dangerously-skip-permissions не используется — Claude Code блокирует флаг
-        # под root/sudo (Linux cron). --allowedTools задаёт явный whitelist, чего достаточно.
-        timeout "$AI_TIMEOUT" "$AI_CLI" \
-            "${model_args[@]}" \
-            --allowedTools "Read,Write,Edit,Glob,Grep,Bash" \
-            -p "$prompt" \
-            >> "$LOG_FILE" 2>&1 || rc=$?
+    if [ -n "$model_override" ]; then
+        model_args=(--model "$model_override")
+        log "Model override: $model_override"
     fi
+    # NB: --dangerously-skip-permissions не используется — Claude Code блокирует флаг
+    # под root/sudo (Linux cron). --allowedTools задаёт явный whitelist, чего достаточно.
+    timeout "$CLAUDE_TIMEOUT" "$CLAUDE_PATH" \
+        "${model_args[@]}" \
+        --allowedTools "Read,Write,Edit,Glob,Grep,Bash" \
+        -p "$prompt" \
+        >> "$LOG_FILE" 2>&1 || rc=$?
 
     if [ $rc -eq 124 ]; then
-        log "WARN: AI CLI timed out after ${AI_TIMEOUT}s for scenario: $command_file"
+        log "WARN: Claude CLI timed out after ${CLAUDE_TIMEOUT}s for scenario: $command_file"
     elif [ $rc -ne 0 ]; then
-        log "WARN: AI CLI exited with code $rc for scenario: $command_file"
+        log "WARN: Claude CLI exited with code $rc for scenario: $command_file"
     fi
 
     if [ $rc -eq 0 ]; then

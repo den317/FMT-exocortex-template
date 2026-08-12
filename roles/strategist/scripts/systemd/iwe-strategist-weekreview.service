@@ -11,7 +11,6 @@ Environment=IWE_TEMPLATE={{IWE_TEMPLATE}}
 Environment=IWE_WORKSPACE={{WORKSPACE_DIR}}
 Environment=IWE_RUNTIME={{IWE_RUNTIME}}
 Environment=IWE_GOVERNANCE_REPO={{GOVERNANCE_REPO}}
-Environment=TZ=UTC
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
 StandardOutput=append:{{HOME_DIR}}/logs/strategist/systemd-weekreview.log
 StandardError=append:{{HOME_DIR}}/logs/strategist/systemd-weekreview-error.log

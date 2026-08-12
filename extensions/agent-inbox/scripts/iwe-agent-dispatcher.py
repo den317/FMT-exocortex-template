@@ -1251,6 +1251,11 @@ SESSION_DB_PATH = os.path.expanduser(
 )
 TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "") or os.environ.get("TG_BOT_TOKEN", "")
 SESSION_IDLE_TIMEOUT_MIN = int(os.environ.get("IWE_SESSION_IDLE_TIMEOUT_MIN", "60"))
+# bug-2026-07-27-session-dispatcher-duplicate-turn-race: the same TTL family as
+# LOCK_TTL_MIN above, for the same reason -- long enough to cover a legitimate
+# turn (invoke_claude_with_heartbeat + push-retry loop can run several minutes),
+# short enough that a crashed holder (kill -9, OOM) doesn't block retries forever.
+TURN_RESERVATION_TTL_MIN = int(os.environ.get("IWE_DISPATCHER_TURN_RESERVATION_TTL_MIN", "30"))
 
 # Allowlist for session_id values — prevents path traversal via crafted GitHub files
 _SESSION_ID_RE = re.compile(r'^SESSION-[A-Za-z0-9-]+$')
@@ -1283,6 +1288,23 @@ def _get_session_db() -> sqlite3.Connection:
             last_ping  TEXT NOT NULL
         )
     """)
+    # bug-2026-07-27-session-dispatcher-duplicate-turn-race: processed_turns was
+    # only ever written AFTER a turn's full work (agent call + push) succeeded,
+    # so two overlapping runs on the same session_id/turn_n both saw "not yet
+    # processed" and both did the work -- confirmed live: commit `turn 1→3`
+    # (should have been `2→3`) from a second run that started 4s after the
+    # first one's turn 2 had already landed. This table is a short-lived claim
+    # taken BEFORE the work starts, so a concurrent run backs off instead of
+    # duplicating it; see _try_reserve_turn/_release_turn_reservation below.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS turn_in_progress (
+            session_id TEXT NOT NULL,
+            turn_n     INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            holder_pid INTEGER NOT NULL,
+            PRIMARY KEY (session_id, turn_n)
+        )
+    """)
     conn.commit()
     return conn
 
@@ -1302,6 +1324,53 @@ def _mark_turn_processed(conn: sqlite3.Connection, session_id: str, turn_n: int)
     conn.execute(
         "INSERT OR IGNORE INTO processed_turns (session_id, turn_n, processed_at) VALUES (?,?,?)",
         (session_id, turn_n, now_utc().isoformat()),
+    )
+    conn.commit()
+
+
+def _try_reserve_turn(
+    conn: sqlite3.Connection, session_id: str, turn_n: int,
+    ttl_min: int = TURN_RESERVATION_TTL_MIN,
+) -> bool:
+    """Claim (session_id, turn_n) before starting the actual work.
+
+    True: this call holds the claim, proceed. False: someone else holds a
+    fresh claim (genuinely concurrent run) -- the caller must skip, not retry
+    in a loop; the next dispatcher tick will see the same state honestly. A
+    stale claim (holder crashed mid-turn without reaching the release in
+    `finally`) is reclaimed by age, same TTL-by-mtime pattern as the existing
+    file-based acquire_lock() above -- not a new mechanism, the same one
+    scoped to a single turn instead of the whole process.
+    """
+    now = now_utc()
+    row = conn.execute(
+        "SELECT started_at FROM turn_in_progress WHERE session_id=? AND turn_n=?",
+        (session_id, turn_n),
+    ).fetchone()
+    if row is not None:
+        started_at = dt.datetime.fromisoformat(row[0])
+        age_min = (now - started_at).total_seconds() / 60
+        if age_min < ttl_min:
+            return False
+        log(f"Stale turn reservation {session_id}/{turn_n} (age={age_min:.0f}m > "
+            f"ttl={ttl_min}m) — reclaiming", "WARN")
+    conn.execute(
+        "INSERT OR REPLACE INTO turn_in_progress "
+        "(session_id, turn_n, started_at, holder_pid) VALUES (?,?,?,?)",
+        (session_id, turn_n, now.isoformat(), os.getpid()),
+    )
+    conn.commit()
+    return True
+
+
+def _release_turn_reservation(conn: sqlite3.Connection, session_id: str, turn_n: int) -> None:
+    """Always called in a `finally` around the reserved work — on success the
+    permanent processed_turns row already makes this row irrelevant; on
+    failure this is what lets the NEXT tick retry instead of waiting out the
+    full TTL."""
+    conn.execute(
+        "DELETE FROM turn_in_progress WHERE session_id=? AND turn_n=?",
+        (session_id, turn_n),
     )
     conn.commit()
 
@@ -1776,6 +1845,16 @@ def session_mode_main(workdir: Path, dry_run: bool) -> None:
         log(f"Pending session turns: {len(pending)}")
 
         for session_id, thread_file, meta_file, fm, turn_n in pending:
+            # bug-2026-07-27-session-dispatcher-duplicate-turn-race: reserve
+            # BEFORE calling into the (possibly minutes-long) turn processor,
+            # not just check _is_turn_processed inside it after the fact --
+            # see _try_reserve_turn for why. dry_run never does real work, so
+            # it skips the reservation dance entirely rather than blocking a
+            # real concurrent attempt for no reason.
+            if not dry_run and not _try_reserve_turn(db_conn, session_id, turn_n):
+                log(f"Turn {turn_n} reservation held by a concurrent run "
+                    f"for {session_id} — skip", "WARN")
+                continue
             try:
                 _process_session_turn(
                     session_id=session_id,
@@ -1791,6 +1870,9 @@ def session_mode_main(workdir: Path, dry_run: bool) -> None:
                 log(f"Error session {session_id} turn {turn_n}: {exc}", "ERROR")
                 import traceback
                 log(traceback.format_exc(), "ERROR")
+            finally:
+                if not dry_run:
+                    _release_turn_reservation(db_conn, session_id, turn_n)
     finally:
         db_conn.close()
     log("Session mode dispatcher done")
@@ -2372,17 +2454,34 @@ def session_mode_main_api(dry_run: bool) -> None:
                     continue
                 turns = _parse_thread(thread_text)
                 for turn in turns:
-                    if (turn["role"] == "pilot"
-                            and not _is_turn_processed(db_conn, session_id, turn["n"])):
+                    if turn["role"] != "pilot" or _is_turn_processed(db_conn, session_id, turn["n"]):
+                        continue
+                    turn_n = turn["n"]
+                    # bug-2026-07-27-session-dispatcher-duplicate-turn-race: this
+                    # is the exact call site the incident traced back to -- a
+                    # concurrent tick's GitHub Contents API read of thread_text
+                    # can lag a just-pushed commit, so the _is_turn_processed
+                    # check two lines up is not enough on its own (both ticks
+                    # read "not yet processed" from their own stale/fresh view).
+                    # Reserving here, before the minutes-long agent call, closes
+                    # that window regardless of which side was stale.
+                    if not dry_run and not _try_reserve_turn(db_conn, session_id, turn_n):
+                        log(f"Turn {turn_n} reservation held by a concurrent run "
+                            f"for {session_id} — skip", "WARN")
+                        break  # another run already owns this session's next turn
+                    try:
                         _process_session_turn_api(
                             session_id=session_id,
                             fm=fm,
-                            turn_n=turn["n"],
+                            turn_n=turn_n,
                             thread_text=thread_text,
                             db_conn=db_conn,
                             dry_run=dry_run,
                         )
-                        break  # one turn at a time per session
+                    finally:
+                        if not dry_run:
+                            _release_turn_reservation(db_conn, session_id, turn_n)
+                    break  # one turn at a time per session
             except Exception as exc:
                 log(f"Error session {session_id}: {exc}", "ERROR")
                 import traceback
