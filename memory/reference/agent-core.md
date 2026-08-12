@@ -4,7 +4,7 @@ type: reference
 horizon: warm
 domains: [agent-core]
 status: active
-owner: user
+owner: platform
 schema_version: 1
 name: "Agent Core — элаборация"
 description: "Полные формулировки блоков SYNC-CORE/CLAUDE.md §1-2, свёрнутых при M2-слиме (WP-7 HOTBUDGET-M2). Восстановлено из git-истории (commit fee0f85^) — issue #283."

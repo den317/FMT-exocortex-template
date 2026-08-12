@@ -9,11 +9,20 @@
 #   open --wp WP-N [--task "..."] [--files "a,b"] [--slug "..."] [--agent claude-code|kimi|hermes] [--personality <unassigned|UUID>]
 #   open --housekeeping <reason> [--agent ...]        # фоновая housekeeping-сессия без ORZ
 #   close [--wp WP-N] [--slug "..."] [--agent ...]
+#   close ... --force-no-reflection "<причина>"       # закрыть без ответа на рефлексию —
+#                                                      # только если раннер стоит именно на
+#                                                      # blocked-witness-unavailable И push уже
+#                                                      # подтверждён (all_pushed: true)
 #   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans]
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
+#   lock-hot-file <path> [--agent ...]    # WP-7 SessionGitRaceIsolation: короткий
+#   unlock-hot-file <path>                # mkdir-замок на файл, который часто
+#                                          # коллизирует между параллельными сессиями
+#                                          # (DayPlan, активная карточка РП, hypotheses-log,
+#                                          # MEMORY.md) — не на всё рабочее дерево
 #
 # Аренда (WP-484 Ф49): существование сессии и её право разрешать коммит — разные
 # вещи. Возраст отзывает только право (по умолчанию 4h, `IWE_SESSION_LEASE_SEC`);
@@ -235,6 +244,7 @@ HOUSEKEEPING=""
 PERSONALITY=""
 SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
+FORCE_NO_REFLECTION=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -248,6 +258,7 @@ while [[ $# -gt 0 ]]; do
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
+    --force-no-reflection) FORCE_NO_REFLECTION="$2"; shift 2 ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     -*)       shift ;;
     *)        POSITIONAL+=("$1"); shift ;;
@@ -300,7 +311,13 @@ if [ "$CMD" = "open" ]; then
       # ambiguous for note-file/close — --slug has nothing to match against.
       echo "slug: $HOUSEKEEPING"
       echo "created_at: $(now_iso)"
-      echo "pid: $$"
+      # $$ here is session-guard.sh's own transient process — already dead by
+      # the time anyone checks it (verified live 08.08: recorded pid was dead
+      # within the same second). $CLAUDE_PID is the actual long-lived Claude
+      # Code process that stays alive for the whole session; other agents keep
+      # today's behavior (transient $$, harmless — dead-pid check just never
+      # fires for them, same as before this fix).
+      echo "pid: ${CLAUDE_PID:-$$}"
       echo "---"
     } > "$HK_FILE"
     echo "Housekeeping OPEN: $HK_FILE (reason: $HOUSEKEEPING)"
@@ -308,6 +325,23 @@ if [ "$CMD" = "open" ]; then
   fi
 
   [ -z "$WP" ] && fail "--wp обязателен для open" 2
+
+  # WP-518: создание РП и начало работы — разные решения. Новый создатель
+  # карточек пишет `hypothesis_relation: unclassified`, пока пилот не выбрал
+  # смысл работы в контуре ставок. Такой РП можно зарегистрировать и
+  # обсудить, но нельзя открыть для изменения файлов: иначе значение
+  # обязательного поля превращается в необязательную пометку.
+  #
+  # Отсутствующее поле намеренно не блокируется: это карточка, созданная до
+  # введения контракта, и массовое дообогащение исторических РП не является
+  # безопасным побочным эффектом открытия одной сессии.
+  WP_CARD="$IWE_ROOT/$GOV_REPO/inbox/$WP/$WP.md"
+  if [ ! -f "$WP_CARD" ]; then
+    WP_CARD="$IWE_ROOT/$GOV_REPO/inbox/$WP.md"
+  fi
+  if [ -f "$WP_CARD" ] && grep -qE "^hypothesis_relation:[[:space:]]*['\"]?unclassified['\"]?[[:space:]]*$" "$WP_CARD"; then
+    fail "РП $WP не классифицирована по гипотезе. До открытия выберите tests, enables, responds, researches или operational в $WP_CARD" 1
+  fi
 
   # Report stale semaphores of the same agent — WITHOUT quarantining them.
   #
@@ -394,6 +428,17 @@ if [ "$CMD" = "open" ]; then
     echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
     echo "orz_file: $ORZ_BASENAME"
+    # WP-484 (08.08, Kimi diagnosis + pilot report): regular sessions never
+    # recorded a pid at all, so sweep_orphaned_semaphores()'s dead-pid check —
+    # the only auto-detection left since age-based quarantine was retired
+    # 04.08 — had nothing to grab onto; abandoned semaphores just hung open
+    # forever (48 found live 08.08). $CLAUDE_PID is the long-lived Claude Code
+    # process (stable for the whole session, verified live) — NOT $$, which
+    # is session-guard.sh's own transient subprocess, already dead the moment
+    # this script returns (verified live: recorded pid was dead within the
+    # same second). Other agents get no pid line, same as before this fix —
+    # strictly not worse, dead-pid check simply still can't fire for them.
+    [ -n "${CLAUDE_PID:-}" ] && echo "pid: $CLAUDE_PID"
     echo "---"
     # initial --files CSV → append-log entries (git-root-relative expected from caller)
     if [ -n "${FILES:-}" ]; then
@@ -452,7 +497,8 @@ EOF
   printf "%s | %s | %s | %s\n" "$(date '+%Y-%m-%d %H:%M')" "$WP" "$AGENT" "${TASK:-standalone}" >> "$OPEN_LOG"
   # agent status (fail-safe)
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
-    "$AGENT_STATUS_SCRIPT" "$AGENT" working "${WP}: ${TASK:-standalone}" "${FILES:-}" 2>/dev/null || true
+    "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY" \
+      "$AGENT" working "${WP}: ${TASK:-standalone}" "${FILES:-}" 2>/dev/null || true
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
   exit 0
@@ -535,6 +581,8 @@ if [ "$CMD" = "close" ]; then
   TASK_FROM_SEM=$(grep "^task: " "$SEM_FILE" | cut -d' ' -f2- || true)
   TASK="${TASK:-$TASK_FROM_SEM}"
   SESSION_ID=$(grep "^session_id: " "$SEM_FILE" | cut -d' ' -f2- || echo "unknown")
+  PERSONALITY_FROM_SEM=$(grep "^personality: " "$SEM_FILE" | cut -d' ' -f2- || true)
+  PERSONALITY_FROM_SEM="${PERSONALITY_FROM_SEM:-unassigned}"
 
   ORZ_BASENAME=$(grep "^orz_file: " "$SEM_FILE" | cut -d' ' -f2- || true)
   if [ -z "$ORZ_BASENAME" ]; then
@@ -550,31 +598,55 @@ if [ "$CMD" = "close" ]; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5
   fi
 
-  # issue #356: the public template does not ship process-runner.py or its graph.
-  # Enforce the terminal card only in installations where the complete runner is
-  # actually available. The manual fallback is visible rather than a silent bypass.
-  PROCESS_RUNNER="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
-  QUICK_CLOSE_GRAPH="$IWE_ROOT/$GOV_REPO/scripts/processes/quick-close.yaml"
-  if [ -f "$PROCESS_RUNNER" ] && [ -f "$QUICK_CLOSE_GRAPH" ]; then
-    RUNNER_CARD="$IWE_ROOT/$GOV_REPO/inbox/agent/tasks/RUN-quick-close-${SLUG}"'*.md'
-    RUNNER_OK=""
+  # Quick Close — не текстовая декларация: именно терминальная карточка раннера
+  # доказывает, что эта сессия прошла обязательный процесс. Сопоставление по slug
+  # не даёт чужой параллельной карточке закрыть текущую сессию.
+  RUNNER_CARD="$IWE_ROOT/$GOV_REPO/inbox/agent/tasks/RUN-quick-close-${SLUG}"'*.md'
+  RUNNER_OK=""
+  for card in $RUNNER_CARD; do
+    [ -f "$card" ] || continue
+    grep -q '^process_id: quick-close$' "$card" || continue
+    grep -q '^status: completed$' "$card" || continue
+    RUNNER_OK="$card"
+    break
+  done
+
+  # --force-no-reflection (WP-484, 08.08, пилот): рефлексия про настроение дня
+  # блокирует close, даже когда содержательная работа (commit+push) уже
+  # подтверждена картой раннера — живой разбор показал, что вопрос рефлексии
+  # часто рендерится ПОСЛЕ команды «закрывай», пилот её физически не видит.
+  # Bypass узкий и предметный, не общий «пропусти карту раннера»: требует
+  # ИМЕННО блокировку на этом шаге и подтверждённый push — другой сбой раннера
+  # (упавший push, отменённый до commit-push прогон) этим флагом не спрятать.
+  if [ -z "$RUNNER_OK" ] && [ -n "$FORCE_NO_REFLECTION" ]; then
     for card in $RUNNER_CARD; do
       [ -f "$card" ] || continue
       grep -q '^process_id: quick-close$' "$card" || continue
-      grep -q '^status: completed$' "$card" || continue
+      grep -q '^current_step: blocked-witness-unavailable$' "$card" || continue
+      grep -qE '^[[:space:]]*all_pushed: true$' "$card" || continue
       RUNNER_OK="$card"
+      FORCED_CARD="$card"
       break
     done
     if [ -z "$RUNNER_OK" ]; then
-      fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md. Сначала запусти process-runner.py start quick-close с тем же --slug." 7
+      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step=blocked-witness-unavailable и all_pushed=true — этот флаг обходит только эту конкретную блокировку, не любой сбой раннера." 7
     fi
-  else
-    echo "Session CLOSE: runner_check=not_applicable (process-runner.py или quick-close.yaml не установлен); карточка не требуется, действует ручной режим протокола"
+    FORCE_EVENT=$(python3 -c '
+import json, sys
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "card": sys.argv[4], "reason": sys.argv[5]}))
+' "$WP" "$SLUG" "$AGENT" "$FORCED_CARD" "$FORCE_NO_REFLECTION")
+    bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_no_reflection "$FORCE_EVENT" session-guard
+    echo "force-no-reflection: закрываю без рефлексии ($FORCED_CARD) — причина записана в ledger" >&2
+  fi
+
+  if [ -z "$RUNNER_OK" ]; then
+    fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md. Сначала запусти process-runner.py start quick-close с тем же --slug." 7
   fi
 
   # agent status idle
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
-    "$AGENT_STATUS_SCRIPT" "$AGENT" idle "" "" 2>/dev/null || true
+    "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY_FROM_SEM" \
+      "$AGENT" idle "" "" 2>/dev/null || true
   fi
   mv "$SEM_FILE" "$SEM_FILE.closed" 2>/dev/null || rm -f "$SEM_FILE"
   rm -f "$SEM_FILE.lease"
@@ -668,12 +740,96 @@ print(os.path.relpath(f, r))
       echo "note-file: WARNING — '$REL_PATH' пока не существует в репо '$REPO_NAME' (ни на диске, ни в индексе, ни в HEAD); записан как будущий файл. Если это опечатка — scope gate не пропустит staged-файл." >&2
     fi
   fi
+  # A directory is registered as a directory (QUICKCLOSE-GAPS1 п.2): the trailing
+  # slash is what tells the scope gate to cover everything underneath, including
+  # files this session has not written yet. Without it a peer session had to
+  # re-register each of its own files by hand right before committing.
+  if [ -d "$FILE_PATH" ]; then
+    case "$REL_PATH" in
+      */) ;;
+      *) REL_PATH="${REL_PATH}/" ;;
+    esac
+  fi
   # Avoid duplicate consecutive entries
   LAST=$(tail -1 "$SEM_FILE" 2>/dev/null || true)
   if [ "$LAST" != "file: $REL_PATH" ]; then
     echo "file: $REL_PATH" >> "$SEM_FILE"
   fi
   echo "Noted in scope: $REL_PATH"
+  exit 0
+fi
+
+# --- HOT-FILE LOCK (WP-7 SessionGitRaceIsolation, 09.08) ---
+#
+# ArchGate verdict (09.08.2026): a git worktree per session was proposed to stop
+# the repeated collisions on the SAME small set of files (DayPlan, an active WP
+# card, hypotheses-log.md, MEMORY.md — 18+ documented cases in July, 5 more in
+# this single session today, including this very WP-7 card getting clobbered
+# mid-edit). Measured live: worktree creation on this repo (21000+ files) costs
+# several seconds of "Updating files" AND requires updating every script that
+# hardcodes a single $IWE_ROOT/$GOV_REPO path — too much cost for a class of
+# collision confined to ~4 files, not the whole tree. This is the cheaper fix
+# the ArchGate recommended instead: lock only the files that actually keep
+# colliding, not the working tree they live in.
+#
+# Deliberately a session-guard.sh command, not a Claude-Code-only hook: Kimi and
+# Codex peer sessions call this same script for open/close/note-file already
+# (its own header: "единый gate ... для всех агентов"), so a lock here is the
+# one place that can actually be cross-agent. A PreToolUse:Edit hook would only
+# ever see Claude Code's own edits -- today's collisions came from a mix of
+# agent types, so a Claude-only mechanism would have caught a fraction of them.
+# Enforcement is cognitive for Kimi/Codex until their own instructions call it
+# (same class as several findings in GateEnforcement-Audit) -- the FMT hook
+# below is defense-in-depth for the one agent type that supports it, not the
+# whole fix.
+HOT_LOCK_DIR="$IWE_ROOT/.iwe-runtime/hot-file-locks"
+HOT_LOCK_TTL_SEC="${IWE_HOT_LOCK_TTL_SEC:-600}"  # 10 min -- long enough for a real edit+commit, short enough that a crashed holder doesn't block the file for a whole session
+
+_hot_lock_slug() {  # _hot_lock_slug <repo-relative-path> -- filesystem-safe lock dirname
+  echo "$1" | tr '/' '_'
+}
+
+if [ "$CMD" = "lock-hot-file" ]; then
+  HOT_PATH="${POSITIONAL[0]:-}"
+  [ -z "$HOT_PATH" ] && fail "lock-hot-file: missing path argument" 1
+  LOCK_HOLDER_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
+  mkdir -p "$HOT_LOCK_DIR"
+  LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
+  ATTEMPT=0
+  while ! mkdir "$LOCK_PATH" 2>/dev/null; do
+    if [ -f "$LOCK_PATH/meta" ]; then
+      HELD_AT=$(grep '^locked_at: ' "$LOCK_PATH/meta" 2>/dev/null | cut -d' ' -f2-)
+      HELD_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$HELD_AT" +%s 2>/dev/null \
+        || date -u -d "$HELD_AT" +%s 2>/dev/null || echo 0)
+      AGE=$(( $(date +%s) - HELD_EPOCH ))
+      if [ "$AGE" -gt "$HOT_LOCK_TTL_SEC" ]; then
+        echo "lock-hot-file: stale lock on '$HOT_PATH' (age ${AGE}s > ttl ${HOT_LOCK_TTL_SEC}s) — reclaiming" >&2
+        rm -rf "$LOCK_PATH"
+        continue
+      fi
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+    if [ "$ATTEMPT" -gt 30 ]; then
+      HOLDER=$(cat "$LOCK_PATH/agent" 2>/dev/null || echo "unknown")
+      fail "lock-hot-file: '$HOT_PATH' held by '$HOLDER' for >30s, giving up — retry shortly" 1
+    fi
+    sleep 1
+  done
+  {
+    echo "locked_at: $(now_iso)"
+    echo "agent: $LOCK_HOLDER_AGENT"
+  } > "$LOCK_PATH/meta"
+  echo "$LOCK_HOLDER_AGENT" > "$LOCK_PATH/agent"
+  echo "Locked: $HOT_PATH"
+  exit 0
+fi
+
+if [ "$CMD" = "unlock-hot-file" ]; then
+  HOT_PATH="${POSITIONAL[0]:-}"
+  [ -z "$HOT_PATH" ] && fail "unlock-hot-file: missing path argument" 1
+  LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
+  rm -rf "$LOCK_PATH"
+  echo "Unlocked: $HOT_PATH"
   exit 0
 fi
 
@@ -853,6 +1009,25 @@ print(json.dumps({
   exit 0
 fi
 
+# A registered directory covers everything under it (QUICKCLOSE-GAPS1 п.2, found
+# live 04.08): a peer-conversation opens ONE session directory and then writes a
+# dozen files into it as the run goes on. Before this, every one of those files
+# needed its own note-file call right before the commit -- 13 calls for a single
+# session, and the gate blocked whatever was forgotten, even though `open` had
+# already claimed that exact directory. A directory entry is stored with a
+# trailing slash, so it can never be confused with a file of the same name.
+scope_has_path() {  # scope_has_path <semaphore> <repo-relative-path>
+  local sem="$1" path="$2" entry
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    [ "$entry" = "$path" ] && return 0
+    case "$entry" in
+      */) case "$path" in "$entry"*) return 0 ;; esac ;;
+    esac
+  done < <(sed -n 's/^file: //p' "$sem")
+  return 1
+}
+
 # --- GIT PRE-COMMIT CHECK ---
 if [ "$CMD" = "pre-commit-check" ]; then
   # WP-484 Ф49: право разрешать коммит истекает по аренде и отзывается у ВСЕГО
@@ -925,7 +1100,7 @@ EOF
       # Deleted file: check append-log across all active semaphores
       FOUND=0
       for sem in $ACTIVE; do
-        if grep -qF "file: $f" "$sem"; then
+        if scope_has_path "$sem" "$f"; then
           FOUND=1
           break
         fi
@@ -946,7 +1121,7 @@ EOF
       # be explicitly declared via note-file.
       FOUND=0
       for sem in $ACTIVE; do
-        if grep -qF "file: $f" "$sem"; then
+        if scope_has_path "$sem" "$f"; then
           FOUND=1
           break
         fi
@@ -972,7 +1147,7 @@ EOF
     done
     if [ "$PASS" -eq 0 ]; then
       for sem in $ACTIVE; do
-        if grep -qF "file: $f" "$sem"; then
+        if scope_has_path "$sem" "$f"; then
           PASS=1
           break
         fi

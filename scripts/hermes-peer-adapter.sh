@@ -30,8 +30,20 @@ MAX_TURNS="${HERMES_MAX_TURNS:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --session-id) SESSION_ID="$2"; shift 2 ;;
-    *)            shift ;;
+    --session-id)
+      [ $# -ge 2 ] || { echo "ERROR: --session-id requires a value" >&2; exit 1; }
+      SESSION_ID="$2"; shift 2 ;;
+    # WP-516 Ф5 (§0в.1): межвендорские флаги, которые hermes не поддерживает
+    # (таблица §0в), отклоняются с явной диагностикой, не молчаливым игнором.
+    -p|--model|--add-dir|--permission-mode)
+      echo "ERROR: flag '$1' is not supported by hermes adapter (see vendor table §0в). Supported: --session-id" >&2
+      exit 1
+      ;;
+    # Неизвестный флаг — явная ошибка (§0в.1).
+    *)
+      echo "ERROR: unknown flag '$1'. Known: --session-id" >&2
+      exit 1
+      ;;
   esac
 done
 
@@ -50,14 +62,37 @@ fi
 
 # === Запуск Hermes headless: `hermes chat -q ... -Q --max-turns 1` + 5min timeout ===
 # -Q (quiet) убирает баннер/спиннер; --max-turns 1 ограничивает рамку одним ответом.
-# Запрос обрезается до 4000 символов — симметрия с оригинальным MCP-адаптером.
+#
+# WP-516 Ф5 (peer-session 2026-08-11-22-wp516-f5-contract-adapter): лимит
+# транспорта hermes — 4000 символов (симметрия с оригинальным MCP-адаптером).
+# Раньше промпт молча обрезался (head -c 4000) — напарник отвечал не на тот
+# контекст, который отправил писатель (нарушение сохранности промпта, §0в.1).
+# Теперь — явный отказ ДО запуска с диагностикой, без усечения.
+# Override через HERMES_PROMPT_LIMIT возможен только ВНИЗ: лимит транспорта
+# 4000 — свойство CLI, а не настройка; нечисловое значение → дефолт.
+HERMES_PROMPT_LIMIT="${HERMES_PROMPT_LIMIT:-4000}"
+case "$HERMES_PROMPT_LIMIT" in
+  ''|*[!0-9]*) HERMES_PROMPT_LIMIT=4000 ;;
+esac
+# Снятие ведущих нулей + проверка длины ДО числового сравнения: огромное
+# десятичное значение не должно уронить '[ -gt ]' переполнением (review-02).
+HERMES_PROMPT_LIMIT=$(printf '%s' "$HERMES_PROMPT_LIMIT" | sed 's/^0*//')
+[ -z "$HERMES_PROMPT_LIMIT" ] && HERMES_PROMPT_LIMIT=0
+if [ "${#HERMES_PROMPT_LIMIT}" -gt 4 ] || [ "$HERMES_PROMPT_LIMIT" -gt 4000 ]; then
+  HERMES_PROMPT_LIMIT=4000
+fi
+PROMPT_LEN=${#PROMPT}
+if [ "$PROMPT_LEN" -gt "$HERMES_PROMPT_LIMIT" ]; then
+  echo "ERROR: prompt is $PROMPT_LEN chars, exceeds hermes transport limit ($HERMES_PROMPT_LIMIT). Shorten the prompt or use another peer adapter. Refusing to truncate silently." >&2
+  exit 1
+fi
+
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hermes-peer-XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT INT TERM
 
 OUT_FILE="$TMP_ROOT/hermes-output.txt"
-TRUNCATED_PROMPT=$(printf '%s' "$PROMPT" | head -c 4000)
 
-HERMES_ARGS=(chat -q "$TRUNCATED_PROMPT" -Q --max-turns "$MAX_TURNS")
+HERMES_ARGS=(chat -q "$PROMPT" -Q --max-turns "$MAX_TURNS")
 if [ -n "$SESSION_ID" ]; then
   HERMES_ARGS+=(--resume "$SESSION_ID")
 fi
@@ -78,6 +113,22 @@ fi
 # Убираем служебную строку session_id из начала ответа (hermes -Q всё ещё печатает session_id)
 # и ведущие пустые строки, но сохраняем внутренние переносы.
 RESPONSE=$(tail -n +2 "$OUT_FILE" | sed -e '/./,$!d')
+
+# WP-516 Ф5 (§0в.1): stdout обязан начинаться с frontmatter; ответ без
+# frontmatter = нарушение формата → exit 1 с диагностикой.
+# Проверка — для peer-реплик turn-loop. Служебные вызовы писателя
+# (review/verify/synth), чей вывод — НЕ peer-реплика, отключают её
+# через IWE_PEER_PLAIN=1 (слой IWE-интеграции, §0в.1).
+if [ "${IWE_PEER_PLAIN:-0}" != "1" ]; then
+  # awk одним процессом: 'sed | head' под pipefail ловит SIGPIPE на длинной
+  # валидной реплике и роняет адаптер без диагностики (review-02, WP-516 Ф5).
+  _FIRST_LINE=$(printf '%s\n' "$RESPONSE" | awk 'length { print; exit }')
+  _FM_FENCES=$(printf '%s\n' "$RESPONSE" | grep -c '^---$' || true)
+  if [ "$_FIRST_LINE" != "---" ] || [ "${_FM_FENCES:-0}" -lt 2 ]; then
+    echo "ERROR: peer response missing frontmatter (first non-empty line must be '---' with a closing '---')." >&2
+    exit 1
+  fi
+fi
 
 # === WP-454: write to agent-sessions journal (best-effort, non-blocking) ===
 # Security: only timestamps and duration written — no content from RESPONSE.

@@ -1,19 +1,15 @@
 ---
 name: agent-architecture-framework
 description: "Трёхслойная архитектура IWE: LLM / Агент / Роль; Универсальный vs Специализированный; Два каталога"
-metadata: 
-  node_type: memory
-  type: reference
-  horizon: warm
-  domains: 
-    - agent-architecture
-    - iwe
-    - roles
-  status: active
-  valid_from: 2026-05-25
-  owner: user
-  schema_version: 1
-  originSessionId: ae25144c-e026-495c-b6d0-616278d5d8b7
+node_type: memory
+type: reference
+horizon: warm
+domains: [agent-architecture, iwe, roles]
+status: active
+valid_from: 2026-05-25
+owner: platform
+schema_version: 1
+originSessionId: ae25144c-e026-495c-b6d0-616278d5d8b7
 ---
 
 # Агентная архитектура IWE: LLM / Агент / Роль
