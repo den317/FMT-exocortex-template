@@ -207,6 +207,7 @@ def audit_contexts(governance: Path) -> tuple[list[dict[str, str]], int]:
     pre_cutover = 0
     paths = list((governance / "inbox").glob("WP-*/WP-*.md"))
     paths.extend((governance / "archive" / "wp-contexts").glob("WP-*.md"))
+    paths.extend((governance / "archive" / "wp-contexts").glob("WP-*/WP-*.md"))
     for path in sorted(set(paths)):
         raw = path.read_text(encoding="utf-8")
         if not re.search(r'^github_repo:\s*"?\S+', raw, flags=re.MULTILINE):
