@@ -47,9 +47,12 @@ capture_autonomy: propose
 
 # === Интеграции ===
 
-# Путь к скрипту синхронизации Linear (day-close.sh шаг 3)
-# Пустой или отсутствует → шаг пропускается
-# Пример: "~/IWE/path/to/linear-sync.sh"
+# РП → GitHub Issue → Linear. Включать после canary GitHub ↔ Linear.
+github_wp_sync_enabled: false
+github_owner: ""
+
+# Устаревший fallback прямой синхронизации Linear. При включённом
+# github_wp_sync_enabled не используется.
 linear_sync_path: ""
 
 # === Расширения ===

@@ -62,7 +62,7 @@ for wp_dir in inbox/WP-*; do
 done
 [ -z "$WP_NUM" ] && { echo "FAIL: no WP created"; exit 1; }
 
-WP_ID="WP-$(printf '%03d' "$WP_NUM")"
+WP_ID="WP-$((10#$WP_NUM))"
 
 echo "Created: $WP_ID"
 
@@ -90,7 +90,7 @@ echo "✓ WeekPlan ($WEEKPLAN)"
 grep -q "$WP_ID" "docs/Strategy.md" || { echo "WARN: $WP_ID not in Strategy.md (may be intentional)"; }
 echo "✓ Strategy.md (checked)"
 
-# 4. WP-REGISTRY.md (должен быть с паддингом WP-NNN)
+# 4. WP-REGISTRY.md
 [ -f "docs/WP-REGISTRY.md" ] || { echo "FAIL: WP-REGISTRY.md not found"; exit 1; }
 grep -q "$WP_ID" "docs/WP-REGISTRY.md" || { echo "FAIL: $WP_ID not in WP-REGISTRY"; exit 1; }
 echo "✓ WP-REGISTRY.md"

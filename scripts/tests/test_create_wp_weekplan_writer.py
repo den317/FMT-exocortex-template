@@ -2,18 +2,18 @@
 Регрессионный тест WeekPlan-writer в create-wp.sh (issue #324).
 
 Фикс afdce30 (2026-07-27) переписал writer на поиск таблицы по реальному
-заголовку («РП»+«Статус» в предыдущей строке) вместо текстового anchor'а —
+заголовку с колонкой «РП» вместо текстового anchor'а —
 это остановило порчу документа, но осталось хрупким: полагается на то,
 что заголовок содержит ОБА этих слова. Два кейса:
 
 1. Стандартная схема (заголовок содержит «РП» и «Статус») — строка
    вставляется корректно, значения распределены по именованным колонкам.
-2. Нераспознанная схема (заголовок без слова «Статус», например
-   4-колоночная `# | РП | Бюджет | Артефакт-критерий`) — writer НЕ портит
-   файл: печатает предупреждение в stderr, содержимое файла не меняется.
+2. Пользовательская схема без «Статус» (например 4-колоночная
+   `# | РП | Бюджет | Артефакт-критерий`) — writer заполняет известные колонки
+   по именам и оставляет неизвестную колонку прочерком.
 
 Тест выполняет python-блок ИЗ РЕАЛЬНОГО create-wp.sh (извлекается по
-heredoc-маркерам между «# --- Шаг 4: WeekPlan ---» и следующим PYEOF),
+heredoc-маркерам между «# --- Шаг 3: WeekPlan ---» и следующим PYEOF),
 не копию логики — иначе тест проверял бы дубликат, не продакшен-код.
 """
 
@@ -28,7 +28,7 @@ CREATE_WP = Path(__file__).parent.parent / "create-wp.sh"
 def _extract_weekplan_writer() -> str:
     """Достаёт python-heredoc шага 4 (WeekPlan writer) из create-wp.sh."""
     text = CREATE_WP.read_text(encoding="utf-8")
-    marker = "# --- Шаг 4: WeekPlan ---"
+    marker = "# --- Шаг 3: WeekPlan ---"
     start = text.index(marker)
     heredoc_start = text.index("<<'PYEOF'\n", start) + len("<<'PYEOF'\n")
     heredoc_end = text.index("\nPYEOF", heredoc_start)
@@ -70,7 +70,7 @@ def test_standard_schema_inserts_row(tmp_path):
     assert "🟢 | 10 | **Существующий РП** | 5h | R1 | P3 | done | готово" in content
 
 
-def test_unrecognized_schema_does_not_corrupt_file(tmp_path):
+def test_custom_schema_without_status_is_supported(tmp_path):
     weekplan = tmp_path / "WeekPlan W31.md"
     original = (
         "# WeekPlan W31\n\n"
@@ -84,10 +84,8 @@ def test_unrecognized_schema_does_not_corrupt_file(tmp_path):
     result = _run_writer(weekplan, "16", "Новый РП", "P4", "1h")
 
     assert result.returncode == 0
-    assert "не найдена" in result.stderr
-    assert "добавлена" not in result.stdout
-    # файл не изменился ни на байт
-    assert weekplan.read_text(encoding="utf-8") == original
+    assert "добавлена" in result.stdout
+    assert "| 16 | **Новый РП** — [описание] | 1h | — |" in weekplan.read_text(encoding="utf-8")
 
 
 def test_column_order_independent(tmp_path):
