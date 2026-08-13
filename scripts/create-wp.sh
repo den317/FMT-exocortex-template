@@ -2,7 +2,7 @@
 # routing: helper  called-by=wp-gate  deterministic=true
 # see DP.SC.159, DP.ROLE.059
 # create-wp.sh — атомарное создание РП в локальных местах (inbox, REGISTRY, WeekPlan);
-# внешний трекер (Linear) — условный пост-шаг, только при подключённом MCP (issue #321)
+# внешний трекер: GitHub Issue → штатная интеграция Linear (WP-34)
 # see WP-297 Ф6.2 (<governance-repo>/inbox/WP-297-wp-lifecycle-architecture.md)
 # see DP.M.010, DP.ROLE.037
 #
@@ -227,10 +227,8 @@ fi
 
 echo "📋 Следующий номер WP: $WP_NUM"
 
-# issue #338 п.4: без паддинга "WP-9" в листинге сортируется после "WP-10".
-# WP_ID — только для строк с префиксом "WP-" (пути, заголовки); frontmatter
-# wp:, consent-файл и колонки "#" REGISTRY/WeekPlan остаются bare-числом.
-WP_ID=$(printf '%03d' "$WP_NUM")
+# WP context contract uses the human WP number without zero padding.
+WP_ID="$WP_NUM"
 
 # --- Проверка consent ---
 CONSENT_FILE="$STATE_DIR/wp-consent-${WP_NUM}"
@@ -269,11 +267,10 @@ print(result)
 fi
 
 # Inbox convention (WP-434): every WP is a folder inbox/WP-N/ with main file WP-N.md.
-# Slug is dropped from the filename (lives in title: frontmatter); archive stub keeps it.
+# Slug is dropped from the filename (lives in title: frontmatter). The archive
+# file is created only by close-wp; registration must not create a second source.
 WP_DIR="$INBOX/WP-${WP_ID}"
 WP_FILE="$WP_DIR/WP-${WP_ID}.md"
-ARCHIVE_DIR="$STRATEGY/archive/wp-contexts"
-ARCHIVE_STUB="$ARCHIVE_DIR/WP-${WP_ID}-${SLUG}.md"
 mkdir -p "$WP_DIR"
 
 echo "🚀 Создаю WP-${WP_ID}: $TITLE"
@@ -304,7 +301,6 @@ WEEKPLAN_SNAPSHOT="$SNAPSHOT_DIR/weekplan.snapshot"
 rollback_wp_creation() {
   echo "↩️  Откат: WP-${WP_ID} не создан целиком, отменяю частичные записи" >&2
   rm -rf "$WP_DIR"
-  rm -f "$ARCHIVE_STUB"
   if [[ -f "$REGISTRY_SNAPSHOT" ]]; then
     cp "$REGISTRY_SNAPSHOT" "$REGISTRY"
   else
@@ -336,7 +332,7 @@ fi
 
 # --- Шаг 1: context file ---
 echo ""
-echo "1/6 context file..."
+echo "1/5 context file..."
 
 # state_transition goes into frontmatter only when provided (gate off on
 # installs without the axes registry); hypothesis always present, "—" = no bet.
@@ -409,31 +405,8 @@ if [[ "$HYPOTHESIS_RELATION" == "unclassified" ]]; then
   echo "   ⚠️  Связь с гипотезой не определена: до начала РП выберите tests/enables/responds/researches/operational" >&2
 fi
 
-# --- Шаг 2: archive stub ---
-echo "2/6 archive stub..."
-
-mkdir -p "$ARCHIVE_DIR"
-if ! cat > "$ARCHIVE_STUB" <<ARCHEOF
----
-wp: ${WP_NUM}
-title: "${TITLE}"
-created: ${TODAY}
-status: pending
----
-
-# WP-${WP_ID}: ${TITLE} — §Закрытие
-
-*(заполняется при закрытии РП)*
-ARCHEOF
-then
-  echo "❌ Не удалось записать archive stub: $ARCHIVE_STUB" >&2
-  rollback_wp_creation
-  exit 1
-fi
-echo "   ✅ $ARCHIVE_STUB"
-
-# --- Шаг 3: WP-REGISTRY.md ---
-echo "3/6 WP-REGISTRY.md..."
+# --- Шаг 2: WP-REGISTRY.md ---
+echo "2/5 WP-REGISTRY.md..."
 
 if ! python3 - "$REGISTRY" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO" "$STAKE_CELL" "$WP_ID" <<'PYEOF'
 import sys
@@ -462,7 +435,7 @@ if insert_at is None:
 # Вместо счёта колонок — строим {имя: индекс} по фактическому заголовку и
 # проверяем наличие 6 канонических имён, не их порядок/количество.
 header_cols = [c.strip() for c in header_line.strip().strip("|").split("|")]
-CANONICAL_NAMES = ["#", "P", "Название", "Ст", "Репо", "Бюджет"]
+REQUIRED_NAMES = ["#", "Название", "Ст"]
 # issue #297: вендорский skeleton (templates/strategy-skeleton/docs/WP-REGISTRY.md)
 # пишет полные русские имена («Приоритет», «Статус», «Репозитории»), а не короткие
 # канонические («P», «Ст», «Репо») — та же семантика, другое написание. Раньше
@@ -480,42 +453,10 @@ col_index = {}
 for i, name in enumerate(header_cols):
     canonical = COLUMN_SYNONYMS.get(name, name)
     col_index.setdefault(canonical, i)
-missing_names = [name for name in CANONICAL_NAMES if name not in col_index]
+missing_names = [name for name in REQUIRED_NAMES if name not in col_index]
 if missing_names:
-    # issue #364: old installs cannot receive seed/template changes through
-    # update.sh, so migrate the first writable registry table in place. Existing
-    # columns (including the useful legacy «Активация») remain untouched; missing
-    # canonical columns are appended and old rows receive an explicit em dash.
-    def append_cell(line, value):
-        newline = "\n" if line.endswith("\n") else ""
-        body = line.rstrip("\n").rstrip()
-        if not body.endswith("|"):
-            raise ValueError("not a markdown table row")
-        return body[:-1].rstrip() + " | " + value + " |" + newline
-
-    header_idx = insert_at - 2
-    separator_idx = insert_at - 1
-    for name in missing_names:
-        lines[header_idx] = append_cell(lines[header_idx], name)
-        lines[separator_idx] = append_cell(lines[separator_idx], "---")
-
-    row_idx = insert_at
-    while row_idx < len(lines) and lines[row_idx].lstrip().startswith("|"):
-        for _ in missing_names:
-            lines[row_idx] = append_cell(lines[row_idx], "—")
-        row_idx += 1
-
-    header_line = lines[header_idx]
-    header_cols = [c.strip() for c in header_line.strip().strip("|").split("|")]
-    col_index = {}
-    for i, name in enumerate(header_cols):
-        canonical = COLUMN_SYNONYMS.get(name, name)
-        col_index.setdefault(canonical, i)
-    print(
-        "   ⚠ REGISTRY: добавлены отсутствовавшие колонки {} (legacy-колонки сохранены)".format(
-            ", ".join(missing_names)
-        )
-    )
+    print("❌ REGISTRY lacks required columns: {}".format(", ".join(missing_names)), file=sys.stderr)
+    sys.exit(1)
 
 repo_cell = repo if repo else "{}/inbox/WP-{}/".format(gov_repo, wp_id)
 values_by_name = {
@@ -556,8 +497,8 @@ if ! grep -qE "\| \*?\*?(WP-)?${WP_NUM}\*?\*? \|" "$REGISTRY"; then
   exit 1
 fi
 
-# --- Шаг 4: WeekPlan ---
-echo "4/6 WeekPlan..."
+# --- Шаг 3: WeekPlan ---
+echo "3/5 WeekPlan..."
 
 # WEEKPLAN уже найден выше (снимок для отката, issue WP-507 про формат имени файла
 # применён там же) — здесь используется тот же путь, не ищем повторно.
@@ -583,7 +524,7 @@ with open(weekplan_path, "r", encoding="utf-8") as f:
 header_line = None
 insert_at = None
 for i, line in enumerate(lines):
-    if line.strip().startswith("|---") and i > 0 and "РП" in lines[i - 1] and "Статус" in lines[i - 1]:
+    if line.strip().startswith("|---") and i > 0 and "РП" in lines[i - 1]:
         header_line = lines[i - 1]
         insert_at = i + 1
         break
@@ -594,9 +535,15 @@ else:
     header_cols = [c.strip() for c in header_line.strip().strip("|").split("|")]
     values_by_name = {
         "🚦": flag,
+        "Приоритет": flag,
+        "Режим ТВС": "🟡 важное",
         "#": wp_num,
         "РП": "**{}** — [описание]".format(title),
+        "РП / направление": "WP-{} «{}»".format(wp_num, title),
         "h": h_val,
+        "Бюджет": budget,
+        "Hard cap": budget,
+        "Срок": "—",
         "Источник": "—",
         "P": priority,
         "Статус": "pending",
@@ -621,8 +568,8 @@ else
   echo "   ⚠️  WeekPlan не найден в current/ — добавить вручную" >&2
 fi
 
-# --- Шаг 5: Strategy.md (только если --result задан и бюджет ≥3h) ---
-echo "5/6 Strategy.md..."
+# --- Шаг 4: Strategy.md (только если --result задан и бюджет ≥3h) ---
+echo "4/5 Strategy.md..."
 
 BUDGET_H=$(echo "$BUDGET" | sed 's/[^0-9]//g')
 if [[ -n "$RESULT" && "${BUDGET_H:-0}" -ge 3 ]]; then
@@ -663,7 +610,7 @@ else
 fi
 
 # --- Шаг 6: active-wp.md ---
-echo "6/6 active-wp.md..."
+echo "5/5 active-wp.md..."
 
 BUILD_ACTIVE_WP=""
 if [[ -f "$STRATEGY/scripts/build-active-wp.py" ]]; then
@@ -680,11 +627,24 @@ else
   echo "   ⚠️  scripts/build-active-wp.py не найден (искали в \`$STRATEGY/scripts/\` и \`$IWE/FMT-exocortex-template/scripts/\`) — пересобрать вручную" >&2
 fi
 
-# --- Внешний трекер (условный пост-шаг, issue #321) ---
+# --- Внешний трекер (условный пост-шаг, WP-34) ---
 echo ""
-echo "ℹ️  Внешний трекер (если подключён): создать issue вручную или через MCP"
-echo "   Linear MCP → create_issue title='WP-${WP_ID} ${TITLE}' teamId=TSR"
-echo "   MCP не подключён → штатно: отметить «внешний трекер: не подключён», локальная запись полна"
+GITHUB_LINKER="$IWE/FMT-exocortex-template/scripts/wp-github-link.py"
+GITHUB_SYNC_ENABLED=$(python3 -c "import yaml; print(str((yaml.safe_load(open('$IWE/params.yaml')) or {}).get('github_wp_sync_enabled', False)).lower())" 2>/dev/null || echo false)
+if [[ "$GITHUB_SYNC_ENABLED" == "true" && -x "$GITHUB_LINKER" ]]; then
+  GITHUB_OWNER=$(python3 -c "import yaml; print((yaml.safe_load(open('$IWE/params.yaml')) or {}).get('github_owner', ''))" 2>/dev/null || echo "")
+  OWNER_REPO="${REPO:-$GOV_REPO}"
+  if [[ "$OWNER_REPO" == *"+"* || "$OWNER_REPO" == *","* || "$OWNER_REPO" == *" "* ]]; then
+    echo "   ⚠️  GitHub issue не создана: --repo должен задавать один owner-repository" >&2
+  elif [[ -z "$GITHUB_OWNER" ]]; then
+    echo "   ⚠️  GitHub issue не создана: github_owner не задан в params.yaml" >&2
+  else
+    python3 "$GITHUB_LINKER" create --context "$WP_FILE" --repo "$GITHUB_OWNER/$OWNER_REPO" \
+      || echo "   ⚠️  GitHub issue не создана; локальная регистрация WP-${WP_ID} сохранена" >&2
+  fi
+else
+  echo "ℹ️  GitHub-мост отключён; локальная регистрация полна"
+fi
 
 # --- Consent file остаётся в папке WP для аудит-следа ---
 # Ранее consent file удалялся здесь; это ломало последующие wp-gate-check
@@ -697,6 +657,5 @@ fi
 echo ""
 echo "✅ WP-${WP_ID} создан: $TITLE"
 echo "   context: inbox/WP-${WP_ID}/WP-${WP_ID}.md"
-echo "   archive: archive/wp-contexts/WP-${WP_ID}-${SLUG}.md"
 echo "   Следующий шаг: заполнить «Проблема», «Артефакт», «Фазы» в context file"
-echo "   Не забыть: issue во внешнем трекере (если подключён)"
+echo "   Внешний трекер: GitHub-мост обработан выше; Linear получает issue через GitHub"
