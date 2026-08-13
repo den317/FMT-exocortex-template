@@ -79,7 +79,7 @@ class LinkTests(unittest.TestCase):
             inbox = governance / "inbox" / "WP-34"
             inbox.mkdir(parents=True)
             context_file(str(inbox))
-            archive = governance / "archive" / "wp-contexts"
+            archive = governance / "archive" / "wp-contexts" / "WP-33"
             archive.mkdir(parents=True)
             (archive / "WP-33.md").write_text(
                 '---\nwp: 33\ntitle: "Старый"\nstatus: done\n---\n# WP-33\n', encoding="utf-8"
