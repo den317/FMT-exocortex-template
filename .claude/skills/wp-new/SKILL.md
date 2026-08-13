@@ -86,6 +86,8 @@ gates_rationale: "операционный скилл; WP Gate применим 
 **После локальной записи — GitHub-мост (WP-34):**
 - при `github_wp_sync_enabled: true` скрипт создаёт или находит ровно одну
   GitHub issue `WP-{N} {Название}` в owner-repository из `--repo`;
+- если `--repo` не указан, используется `github_wp_default_repo` из
+  `params.yaml` (по умолчанию `DS-strategy`);
 - URL записывается в `github_issue` context frontmatter;
 - Linear получает связанную задачу через штатную GitHub-интеграцию;
 - прямой Linear MCP/API не вызывается;

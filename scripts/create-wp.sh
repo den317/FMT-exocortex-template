@@ -630,10 +630,24 @@ fi
 # --- Внешний трекер (условный пост-шаг, WP-34) ---
 echo ""
 GITHUB_LINKER="$IWE/FMT-exocortex-template/scripts/wp-github-link.py"
-GITHUB_SYNC_ENABLED=$(python3 -c "import yaml; print(str((yaml.safe_load(open('$IWE/params.yaml')) or {}).get('github_wp_sync_enabled', False)).lower())" 2>/dev/null || echo false)
+read_param() {
+  local key=$1 default=$2 value
+  value=$(awk -F: -v key="$key" '
+    $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*/, "")
+      gsub(/^[[:space:]\"]+|[[:space:]\"]+$/, "")
+      print
+      exit
+    }
+  ' "$IWE/params.yaml" 2>/dev/null)
+  printf '%s\n' "${value:-$default}"
+}
+GITHUB_SYNC_ENABLED=$(read_param github_wp_sync_enabled false)
 if [[ "$GITHUB_SYNC_ENABLED" == "true" && -x "$GITHUB_LINKER" ]]; then
-  GITHUB_OWNER=$(python3 -c "import yaml; print((yaml.safe_load(open('$IWE/params.yaml')) or {}).get('github_owner', ''))" 2>/dev/null || echo "")
-  OWNER_REPO="${REPO:-$GOV_REPO}"
+  GITHUB_OWNER=$(read_param github_owner "")
+  GITHUB_DEFAULT_REPO=$(read_param github_wp_default_repo "DS-strategy")
+  OWNER_REPO="${REPO:-$GITHUB_DEFAULT_REPO}"
   if [[ "$OWNER_REPO" == *"+"* || "$OWNER_REPO" == *","* || "$OWNER_REPO" == *" "* ]]; then
     echo "   ⚠️  GitHub issue не создана: --repo должен задавать один owner-repository" >&2
   elif [[ -z "$GITHUB_OWNER" ]]; then

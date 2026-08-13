@@ -50,6 +50,7 @@ capture_autonomy: propose
 # РП → GitHub Issue → Linear. Включать после canary GitHub ↔ Linear.
 github_wp_sync_enabled: false
 github_owner: ""
+github_wp_default_repo: "DS-strategy"
 
 # Устаревший fallback прямой синхронизации Linear. При включённом
 # github_wp_sync_enabled не используется.
