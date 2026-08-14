@@ -2027,7 +2027,7 @@
     },
     {
       "path": "scripts/iwe-audit.sh",
-      "sha256": "e51beb3db2c34c0660171c0ec87ab4d0004fa59f17255a89bb9f84eebeb86f45"
+      "sha256": "bc844b04b947cba5f1a98577721cef2d811bd56a273cddcf2df380a68a0928dd"
     },
     {
       "path": "scripts/iwe-backup-check.sh",
@@ -2375,7 +2375,7 @@
     },
     {
       "path": "setup.sh",
-      "sha256": "e1617e4fc32c145856785463d38aa167e3b275691bebf12595ba1e3a6eb6717c"
+      "sha256": "819d85a1ed21b34051ea215a3d23c953484fa9ff500c93985179b76504db5796"
     },
     {
       "path": "setup/build-runtime.sh",

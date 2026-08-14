@@ -369,6 +369,47 @@ fi
 # build-runtime.sh в $WORKSPACE_DIR/.iwe-runtime/.
 ENV_FILE="$WORKSPACE_DIR/.exocortex.env"
 IWE_RUNTIME_PATH="$WORKSPACE_DIR/.iwe-runtime"
+
+# Preserve the distribution channel across repeated setup runs. The template
+# origin is the default source; an existing explicit channel must agree with it
+# so setup cannot silently switch the updater to another repository.
+UPDATE_REPO="${IWE_UPDATE_REPO:-}"
+UPDATE_BRANCH="${IWE_UPDATE_BRANCH:-}"
+if [ -f "$ENV_FILE" ]; then
+    [ -n "$UPDATE_REPO" ] || UPDATE_REPO=$(grep -E '^IWE_UPDATE_REPO=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    [ -n "$UPDATE_BRANCH" ] || UPDATE_BRANCH=$(grep -E '^IWE_UPDATE_BRANCH=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+fi
+ORIGIN_URL=$(git -C "$TEMPLATE_DIR" remote get-url origin 2>/dev/null || true)
+ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E -e 's#^git@github.com:##' -e 's#^https://github.com/##' -e 's#\.git$##')
+if ! printf '%s' "$ORIGIN_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    ORIGIN_REPO=""
+fi
+MANIFEST_UPDATE_REPO=""
+MANIFEST_UPDATE_BRANCH=""
+if [ -f "$TEMPLATE_DIR/update-manifest.json" ] && command -v python3 >/dev/null 2>&1; then
+    IFS='|' read -r MANIFEST_UPDATE_REPO MANIFEST_UPDATE_BRANCH < <(
+        python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print("{}|{}".format(m.get("source_repo", ""), m.get("source_branch", "")))' "$TEMPLATE_DIR/update-manifest.json"
+    )
+fi
+EXPECTED_UPDATE_REPO="${MANIFEST_UPDATE_REPO:-$ORIGIN_REPO}"
+EXPECTED_UPDATE_BRANCH="${MANIFEST_UPDATE_BRANCH:-main}"
+if [ -n "$ORIGIN_REPO" ] && [ -n "$MANIFEST_UPDATE_REPO" ] && [ "$ORIGIN_REPO" != "$MANIFEST_UPDATE_REPO" ]; then
+    echo "ERROR: manifest update repository $MANIFEST_UPDATE_REPO conflicts with template origin $ORIGIN_REPO" >&2
+    exit 1
+fi
+if [ -n "$UPDATE_REPO$UPDATE_BRANCH" ] && \
+   { [ "$UPDATE_REPO" != "$EXPECTED_UPDATE_REPO" ] || [ "${UPDATE_BRANCH:-main}" != "$EXPECTED_UPDATE_BRANCH" ]; }; then
+    echo "ERROR: update channel ${UPDATE_REPO:-missing}@${UPDATE_BRANCH:-missing} conflicts with template identity $EXPECTED_UPDATE_REPO@$EXPECTED_UPDATE_BRANCH" >&2
+    exit 1
+fi
+UPDATE_REPO="${UPDATE_REPO:-$EXPECTED_UPDATE_REPO}"
+UPDATE_BRANCH="${UPDATE_BRANCH:-$EXPECTED_UPDATE_BRANCH}"
+if [ -n "$UPDATE_REPO" ] && ! printf '%s' "$UPDATE_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    echo "ERROR: invalid update channel repository: $UPDATE_REPO" >&2
+    exit 1
+fi
+case "$UPDATE_BRANCH" in ""|/*|*..*|*//*|*\\*|*[!A-Za-z0-9._/-]*) echo "ERROR: invalid update channel branch: $UPDATE_BRANCH" >&2; exit 1 ;; esac
+
 if $DRY_RUN; then
     echo "[DRY RUN] Would save configuration to $ENV_FILE"
 else
@@ -393,6 +434,7 @@ HOME_DIR="$HOME_DIR"
 GOVERNANCE_REPO="$GOVERNANCE_REPO"
 IWE_TEMPLATE="$IWE_TEMPLATE_PATH"
 IWE_RUNTIME="$IWE_RUNTIME_PATH"
+$(if [ -n "$UPDATE_REPO" ]; then printf 'IWE_UPDATE_REPO="%s"\nIWE_UPDATE_BRANCH="%s"\n' "$UPDATE_REPO" "$UPDATE_BRANCH"; fi)
 
 # === Platform LLM Proxy (optional own API key for unlimited usage) ===
 PLATFORM_LLM_PROXY_URL=https://llm.aisystant.com/v1

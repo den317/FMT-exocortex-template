@@ -559,6 +559,29 @@ else
     else
         echo "✅ \`GITHUB_USER=$GH_USER\` заполнен"
     fi
+
+    UPDATE_REPO=$(grep -E '^IWE_UPDATE_REPO=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    UPDATE_BRANCH=$(grep -E '^IWE_UPDATE_BRANCH=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    ORIGIN_URL=$(git -C "$IWE_ROOT/FMT-exocortex-template" remote get-url origin 2>/dev/null || true)
+    ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E -e 's#^git@github.com:##' -e 's#^https://github.com/##' -e 's#\.git$##')
+    MANIFEST_REPO=""
+    MANIFEST_BRANCH=""
+    if [ -f "$IWE_ROOT/FMT-exocortex-template/update-manifest.json" ] && command -v python3 >/dev/null 2>&1; then
+        MANIFEST_REPO=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_repo", ""))' "$IWE_ROOT/FMT-exocortex-template/update-manifest.json" 2>/dev/null || true)
+        MANIFEST_BRANCH=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_branch", ""))' "$IWE_ROOT/FMT-exocortex-template/update-manifest.json" 2>/dev/null || true)
+    fi
+    if [ -z "$UPDATE_REPO" ] || [ -z "$UPDATE_BRANCH" ]; then
+        echo "❌ Канал обновления не закреплён в \`.exocortex.env\`. Повторный setup/bootstrap может вернуть updater к default-каналу."
+        UPD_FAIL=$((UPD_FAIL + 1))
+    elif [ "$UPDATE_REPO" != "$ORIGIN_REPO" ]; then
+        echo "❌ Канал обновления \`$UPDATE_REPO@$UPDATE_BRANCH\` не совпадает с origin \`$ORIGIN_REPO\`."
+        UPD_FAIL=$((UPD_FAIL + 1))
+    elif [ -n "$MANIFEST_REPO" ] && { [ "$UPDATE_REPO" != "$MANIFEST_REPO" ] || [ "$UPDATE_BRANCH" != "$MANIFEST_BRANCH" ]; }; then
+        echo "❌ Канал обновления \`$UPDATE_REPO@$UPDATE_BRANCH\` не совпадает с манифестом \`$MANIFEST_REPO@$MANIFEST_BRANCH\`."
+        UPD_FAIL=$((UPD_FAIL + 1))
+    else
+        echo "✅ Канал обновления \`$UPDATE_REPO@$UPDATE_BRANCH\` совпадает с origin и манифестом"
+    fi
 fi
 echo ""
 

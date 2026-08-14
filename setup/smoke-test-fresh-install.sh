@@ -377,6 +377,13 @@ else
     else
         fail "e2e memory: day-rhythm-config.yaml ОТСУТСТВУЕТ в $E2E_MEM"
     fi
+    EXPECTED_UPDATE_REPO=$(git -C "$TEMPLATE_DIR" remote get-url origin 2>/dev/null | sed -E -e 's#^git@github.com:##' -e 's#^https://github.com/##' -e 's#\.git$##')
+    if grep -Fqx "IWE_UPDATE_REPO=\"$EXPECTED_UPDATE_REPO\"" "$E2E_WS/.exocortex.env" &&
+       grep -Fqx 'IWE_UPDATE_BRANCH="main"' "$E2E_WS/.exocortex.env"; then
+        pass "e2e config: канал обновления закреплён за origin шаблона"
+    else
+        fail "e2e config: канал обновления отсутствует или не совпадает с origin шаблона"
+    fi
 fi
 rm -rf "$E2E_WS" "$E2E_MEM" 2>/dev/null || true
 
