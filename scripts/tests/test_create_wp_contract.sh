@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Contract test for bug #338: create-wp.sh must guarantee atomic registry coherence.
 # Inject a deterministic fault on the WeekPlan write (step 4/6) and verify full
-# rollback (inbox + REGISTRY + WeekPlan all back to pre-run state),
+# rollback (inbox + archive stub + REGISTRY + WeekPlan all back to pre-run state),
 # not a partial WP left behind.
 #
 # Earlier version used `chmod 444` on WeekPlan — non-deterministic (root/ACLs can
@@ -119,6 +119,6 @@ cmp -s "$WEEKPLAN" "$INITIAL_WEEKPLAN_SNAPSHOT" ||
 [ "$FINAL_INBOX" = "$INITIAL_INBOX" ] ||
   { echo "FAIL: inbox/ was not rolled back" >&2; exit 1; }
 [ "$FINAL_ARCHIVE" = "$INITIAL_ARCHIVE" ] ||
-  { echo "FAIL: archive/wp-contexts/ changed during registration" >&2; exit 1; }
+  { echo "FAIL: archive/wp-contexts/ was not rolled back (orphaned stub left behind)" >&2; exit 1; }
 
 echo "✓ Correctly rolled back after fault injection — no partial WP left behind"

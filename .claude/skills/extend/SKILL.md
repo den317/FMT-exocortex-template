@@ -5,9 +5,8 @@ argument-hint: "[название протокола или пустое для 
 user_invocable: true
 version: 1.0.0
 routing:
-  executor: script
-  deterministic: true
-  script_path: ".claude/skills/extend/show-catalog.sh"
+  executor: sonnet
+  deterministic: false
 ---
 
 # /extend — Каталог расширяемости IWE

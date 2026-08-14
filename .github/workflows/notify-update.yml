@@ -8,6 +8,10 @@ on:
   schedule:
     - cron: '28 4 * * *'  # 7:28 MSK
   workflow_dispatch:       # ручной запуск для тестирования
+  push:
+    branches: [main]        # найдено code review 13.08: без этого фильтра фичебранчи/worktree тоже триггерят уведомление о неревьюженном контенте
+    paths:
+      - 'CHANGELOG.md'     # WP-7 Ф62 п.4: триггер для срочного security-уведомления (job notify-security)
 
 permissions:
   contents: read
@@ -15,7 +19,10 @@ permissions:
 jobs:
   notify:
     runs-on: ubuntu-latest
-    if: github.repository == 'TserenTserenov/FMT-exocortex-template'
+    # найдено code review 13.08: без ограничения по event_name дневной дайджест
+    # запускался бы на каждый push (после добавления push-триггера для
+    # notify-security) — дубль сообщения подписчикам на каждом security-пуше.
+    if: github.repository == 'TserenTserenov/FMT-exocortex-template' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
         with:
@@ -169,5 +176,75 @@ jobs:
             echo "✓ Bot webhook responded: $BODY"
           else
             echo "✗ Bot webhook failed (HTTP $HTTP_CODE): $BODY"
+            exit 1
+          fi
+
+  # WP-7 Ф62 п.4: срочное уведомление для [security]-пунктов CHANGELOG — поверх
+  # уже существующего дневного дайджеста (job notify выше), тот же webhook/бот,
+  # НЕ новый канал доставки (принцип SECURITY.md: rolling-release без LTS).
+  # DRR: decisions/2026-08/2026-08-10-wp-7-arhgeyt-changelog-klassifikaciya-bez-lts.md
+  notify-security:
+    runs-on: ubuntu-latest
+    if: github.repository == 'TserenTserenov/FMT-exocortex-template' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # нужна полная история для git diff по before..sha
+
+      - name: Extract newly added [security] lines
+        id: extract
+        run: |
+          # Общая логика извлечения/якорения — scripts/changelog-diff-lines.sh
+          # (выделена из дублей в этом файле и validate-template.yml, code
+          # review 13.08: голый grep был не заякорен на позицию бирки).
+          NEW_LINES=$(bash scripts/changelog-diff-lines.sh "${{ github.event.before }}" --security-only)
+
+          if [ -z "$NEW_LINES" ]; then
+            echo "has_security=false" >> "$GITHUB_OUTPUT"
+            echo "No new [security]-tagged CHANGELOG lines in this push"
+          else
+            echo "has_security=true" >> "$GITHUB_OUTPUT"
+            # найдено code review 13.08: статичный delimiter коллидирует, если
+            # текст CHANGELOG когда-нибудь совпадёт со строкой-разделителем —
+            # случайный delimiter на каждый прогон убирает этот класс бага.
+            DELIM="SECURITY_EOF_$(date +%s%N | sha256sum | cut -c1-16)"
+            {
+              echo "lines<<$DELIM"
+              echo "$NEW_LINES"
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send urgent security notification
+        if: steps.extract.outputs.has_security == 'true'
+        env:
+          BOT_WEBHOOK_URL: ${{ secrets.BOT_WEBHOOK_URL }}
+          TEMPLATE_WEBHOOK_SECRET: ${{ secrets.TEMPLATE_WEBHOOK_SECRET }}
+          SECURITY_LINES: ${{ steps.extract.outputs.lines }}
+        run: |
+          # SECURITY_LINES передан через env:, не заинлайнен в run: — прямая
+          # интерполяция ${{ }} в тело скрипта была бы script injection
+          # (значение из CHANGELOG.md попадает в actions-context как текст
+          # ДО запуска shell, до всякого экранирования).
+          VERSION=$(grep -m1 '^## \[' CHANGELOG.md | sed 's/## //')
+          MESSAGE="🔒 СРОЧНО — обнаружены security-изменения:
+          $SECURITY_LINES"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${BOT_WEBHOOK_URL}/api/template-update" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${TEMPLATE_WEBHOOK_SECRET}" \
+            -d "$(jq -n \
+              --arg version "$VERSION" \
+              --arg changelog "$MESSAGE" \
+              --arg commit_count "1" \
+              '{version: $version, changelog: $changelog, commit_count: ($commit_count | tonumber)}')")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✓ Urgent security notification sent: $BODY"
+          else
+            echo "✗ Urgent security notification failed (HTTP $HTTP_CODE): $BODY"
             exit 1
           fi

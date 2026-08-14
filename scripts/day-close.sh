@@ -36,8 +36,7 @@ readonly RC_REINDEX_PARTIAL=3
 SELECTIVE_REINDEX="${IWE_SELECTIVE_REINDEX:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/selective-reindex.sh}"
 SOURCES_JSON="${IWE_SOURCES_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources.json}"
 SOURCES_PERSONAL_JSON="${IWE_SOURCES_PERSONAL_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources-personal.json}"
-# Legacy Linear sync path. WP-34 uses GitHub Issues as the supported boundary;
-# Linear receives changes through its native GitHub integration.
+# Linear sync: путь читается из params.yaml (ключ linear_sync_path)
 PARAMS_YAML="$WORKSPACE_DIR/params.yaml"
 LINEAR_SYNC=""
 if [ -f "$PARAMS_YAML" ]; then
@@ -272,24 +271,15 @@ PYEOF
   fi
 }
 
-# --- Шаг 3: WP ↔ GitHub Issues audit (Linear receives via GitHub) ---
+# --- Шаг 3: Linear sync ---
 do_linear() {
-  log "Шаг 3/3: WP ↔ GitHub Issues audit"
-
-  local github_linker="$WORKSPACE_DIR/FMT-exocortex-template/scripts/wp-github-link.py"
-  local github_enabled
-  github_enabled=$(python3 -c "import yaml; print(str((yaml.safe_load(open('$PARAMS_YAML')) or {}).get('github_wp_sync_enabled', False)).lower())" 2>/dev/null || echo false)
-  if [ "$github_enabled" = "true" ] && [ -x "$github_linker" ]; then
-    python3 "$github_linker" audit --governance "$DS_STRATEGY"
-    return $?
-  fi
+  log "Шаг 3/3: Linear sync"
 
   if [ ! -x "$LINEAR_SYNC" ]; then
-    warn "  GitHub-мост отключён; legacy linear-sync.sh не найден — пропуск"
+    warn "  linear-sync.sh не найден: $LINEAR_SYNC — пропуск"
     return 0
   fi
 
-  warn "  Используется legacy linear-sync.sh; рекомендуется GitHub-мост WP-34"
   "$LINEAR_SYNC"
 }
 

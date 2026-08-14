@@ -36,10 +36,7 @@ IWE="$(iwe_resolve_root)"
 IWE_ROOT="$IWE"
 export IWE_ROOT IWE
 DATE="${1:-$(date +%Y-%m-%d)}"
-CONFIG="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/day-rhythm-config.yaml"
-if [ ! -f "$CONFIG" ]; then
-  CONFIG="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/exocortex/day-rhythm-config.yaml"
-fi
+CONFIG="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/exocortex/day-rhythm-config.yaml"
 PARAMS_FILE="$IWE/params.yaml"
 MULTIPLIER_ENABLED="true"
 if [ -f "$PARAMS_FILE" ] && grep -qE '^multiplier_enabled:[[:space:]]*false([[:space:]]*(#.*)?)?$' "$PARAMS_FILE"; then
@@ -547,21 +544,40 @@ render_iwe_status() {
   echo "| Подсистема | Статус | Детали |"
   echo "|------------|--------|--------|"
 
-  # Per-role launchd agents (старый com.exocortex.scheduler отключён с марта 2026)
-  # com.strategist.morning намеренно отключён 2026-06-13 (bug-2026-06-12-day-open-dual-writer-race.md):
-  # сервер = единственный владелец Day Open. На Mac владельцем конвейера Day Open теперь
-  # является com.iwe.day-open (WP-356). Проверяем его + остальные per-role агенты.
+  # Per-role launchd agents. issue #412: раньше список из четырёх агентов был
+  # зашит в коде (com.iwe.day-open/com.strategist.notereview/com.pulse.daily/
+  # com.aisystant.profiler.recalculate) — на инсталляции, где реально стоят
+  # другие per-role юниты (например com.strategist.morning/weekreview),
+  # строка не могла стать зелёной: зашитые агенты вечно "missing", а реально
+  # установленные вообще не проверялись. Вместо списка ожиданий — читаем,
+  # что реально лежит в ~/Library/LaunchAgents/ на этой машине, и проверяем
+  # ровно это (тот же принцип, что не-деплой ⚪ ≠ авария у Scheduler/триаж
+  # выше). Фильтр ограничен известными IWE-префиксами (не голый `com.*.plist`,
+  # code review нашёл: захватывал бы любой сторонний plist — Docker, Adobe,
+  # Google Keystone и т.п., воспроизводя тот же симптом «никогда не
+  # зелёная» зеркально, ложными срабатываниями вместо пропусков).
   if command -v launchctl &>/dev/null; then
-    local agents_bad=""
-    for agent in com.iwe.day-open com.strategist.notereview com.pulse.daily com.aisystant.profiler.recalculate; do
-      local line status
-      line=$(launchctl list 2>/dev/null | awk -v a="$agent" '$3==a{print}')
-      [ -z "$line" ] && { agents_bad="$agents_bad $agent(missing)"; continue; }
-      status=$(echo "$line" | awk '{print $2}')
-      [ "$status" != "0" ] && [ "$status" != "-" ] && agents_bad="$agents_bad $agent(exit=$status)"
-    done
-    if [ -z "$agents_bad" ]; then
-      echo "| LaunchAgents | 🟢 | per-role агенты OK |"
+    local plist_dir="$HOME/Library/LaunchAgents"
+    local agents_bad="" agents_checked=0
+    if [ -d "$plist_dir" ]; then
+      for plist in "$plist_dir"/com.iwe.*.plist "$plist_dir"/com.strategist.*.plist \
+                   "$plist_dir"/com.pulse.*.plist "$plist_dir"/com.aisystant.*.plist \
+                   "$plist_dir"/com.exocortex.*.plist "$plist_dir"/com.extractor.*.plist; do
+        [ -e "$plist" ] || continue
+        local agent
+        agent=$(basename "$plist" .plist)
+        agents_checked=$((agents_checked + 1))
+        local line status
+        line=$(launchctl list 2>/dev/null | awk -v a="$agent" '$3==a{print}')
+        [ -z "$line" ] && { agents_bad="$agents_bad $agent(not loaded)"; continue; }
+        status=$(echo "$line" | awk '{print $2}')
+        [ "$status" != "0" ] && [ "$status" != "-" ] && agents_bad="$agents_bad $agent(exit=$status)"
+      done
+    fi
+    if [ "$agents_checked" -eq 0 ]; then
+      echo "| LaunchAgents | ⚪ | ни одного plist в ~/Library/LaunchAgents — планировщик здесь не устанавливали |"
+    elif [ -z "$agents_bad" ]; then
+      echo "| LaunchAgents | 🟢 | per-role агенты OK ($agents_checked) |"
     else
       echo "| LaunchAgents | 🟡 |${agents_bad} |"
     fi
@@ -790,10 +806,26 @@ INCEOF
   # заведомо не укладывается в тайм-бокс, обновление тихо теряется как "проверено".
   # --fast (issue #230) сравнивает только версию манифеста — секунда вместо минут.
   if [ -d "$IWE/FMT-exocortex-template" ]; then
-    local upd_status
-    upd_status=$(run_bounded "${ISSUE_SWEEP_TIMEOUT:-10}" bash -c \
-      "cd '$IWE/FMT-exocortex-template' && bash update.sh --check --fast 2>&1 | grep -oE 'Версия совпадает|Версия отличается' | head -1")
-    echo "| Update IWE | 🟢 | ${upd_status:-проверено} |"
+    # issue #406: три дефекта здесь раньше складывались в вечнозелёную строку —
+    # (1) эмодзи был зашит 🟢 без ветвления; (2) update.sh с тех пор (issue #230/
+    # #288) отдаёт 5 разных формулировок с префиксом ✓/⚠ — старый grep на
+    # буквальные "Версия совпадает"/"Версия отличается" не покрывал ни ветку
+    # «состав изменился», ни текущую формулировку успеха («…совпадают», не
+    # «совпадает»), и при пустом совпадении молча падал на 🟢; (3) секция
+    # «Требует внимания» собирает только 🟡/🔴 строки — раз эта строка не могла
+    # стать не-зелёной, доступное обновление никогда туда не попадало. Эмодзи
+    # теперь читается по первому символу реального вывода (✓ → 🟢, ⚠ → 🟡),
+    # а не угадывается заранее.
+    local upd_output upd_emoji upd_status
+    upd_output=$(run_bounded "${ISSUE_SWEEP_TIMEOUT:-10}" bash -c \
+      "cd '$IWE/FMT-exocortex-template' && bash update.sh --check --fast 2>&1")
+    upd_status=$(printf '%s\n' "$upd_output" | grep -E '^[✓⚠]' | head -1)
+    case "$upd_status" in
+        ✓*) upd_emoji="🟢" ;;
+        ⚠*) upd_emoji="🟡" ;;
+        *) upd_emoji="🟡"; upd_status="${upd_status:-не удалось определить статус (тайм-аут или пустой вывод update.sh --check --fast)}" ;;
+    esac
+    echo "| Update IWE | $upd_emoji | ${upd_status} |"
   fi
 
   # Base repos (FPF/SPF/ZP) — fetch + behind count
@@ -1124,8 +1156,9 @@ render_compact_dashboard() {
 }
 
 # --- Section: Саморазвитие (active draft, deterministic) ---
-# The active draft comes from draft-list.md, not the LLM. Handing this to the LLM
-# with the file absent produced a hallucinated "D-001" (2026-07-01). "Где остановился"
+# The active draft comes from the first entry in the "Приоритетные" table, not the LLM.
+# The template's full collection has a status column but does not define an "черновик"
+# value, while the priority table is the explicit current-work list. "Где остановился"
 # is the pilot's own progress — we never fabricate it (see feedback_no_invented_personal_history).
 render_self_dev() {
   local draft_list="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/drafts/draft-list.md"
@@ -1133,20 +1166,24 @@ render_self_dev() {
     echo "**Активный черновик:** нет данных (drafts/draft-list.md не найден)"
     return
   fi
-  # Registry rows are newest-first; take the first one whose stage column is "черновик".
+  # Take the first data row from the template-defined "Приоритетные" table.
   local row
-  row=$(awk -F'|' '
-    /^\| *\*\*D-[0-9]+\*\*/ {
-      stage=$4; gsub(/^[ \t]+|[ \t]+$/, "", stage);
-      if (stage=="черновик") { print; exit }
+  row=$(awk '
+    /^## Приоритетные/ { in_priorities = 1; next }
+    in_priorities && /^## / { exit }
+    in_priorities && /^\|/ {
+      if ($0 ~ /^\|[[:space:]]*#/) next
+      if ($0 ~ /^\|[[:space:]]*-+/) next
+      print
+      exit
     }' "$draft_list")
   if [ -z "$row" ]; then
-    echo "**Активный черновик:** нет активных черновиков в draft-list.md"
+    echo "**Активный черновик:** нет приоритетных черновиков в draft-list.md"
     return
   fi
   local dnum path
   dnum=$(echo "$row" | grep -oE 'D-[0-9]+' | head -1)
-  path=$(echo "$row" | grep -oE '\(\./[^)]+\)' | head -1 | tr -d '()' | sed 's#^\./#drafts/#')
+  path=$(echo "$row" | grep -oE '\([^)]*D-[0-9][^)]*\.md\)' | head -1 | tr -d '()' | sed 's#^\./#drafts/#')
   if [ -n "$path" ]; then
     echo "**Активный черновик:** [$dnum]($path)"
   else

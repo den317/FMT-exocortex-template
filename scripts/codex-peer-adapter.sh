@@ -238,7 +238,18 @@ if [ "$PERL_EXIT" -eq 142 ]; then
 fi
 
 if [ ! -s "$OUT_FILE" ]; then
-  echo "ERROR: codex returned empty output (network/auth/quota?)" >&2
+  # WP-524 Ф1 (12.08): reproduced live — provider is OpenRouter on hosts without
+  # a ChatGPT login (see reference_codex_peer_openrouter_linux.md), and a missing
+  # OPENROUTER_API_KEY in the caller's shell produces this exact symptom with no
+  # other signal. Distinguishing it here turns a silent bootstrap failure into an
+  # actionable message instead of leaving the caller to guess network/auth/quota.
+  if [ -z "${OPENROUTER_API_KEY:-}" ] && grep -q '^env_key = "OPENROUTER_API_KEY"' "$HOME/.codex/config.toml" 2>/dev/null; then
+    echo "ERROR: codex returned empty output — OPENROUTER_API_KEY is not set in this shell." >&2
+    echo "HINT: source the OpenRouter key before calling this adapter:" >&2
+    echo "  set -a; source ~/.secrets/openrouter_key.env; set +a" >&2
+  else
+    echo "ERROR: codex returned empty output (network/auth/quota?)" >&2
+  fi
   exit 1
 fi
 
