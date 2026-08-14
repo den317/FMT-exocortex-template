@@ -84,6 +84,25 @@ hash_file() {
     sha256sum "$1" 2>/dev/null | cut -d' ' -f1
 }
 
+# === Cross-platform Python resolution (issue #402) ===
+# On Windows Git Bash, `command -v python3` finds the Microsoft Store App
+# Execution Alias stub (prints "Python was not found..." and exits non-zero)
+# even when a real interpreter is installed and reachable as `python`
+# (Windows python.org installer does not ship a `python3` shim). A presence
+# check alone is not enough — probe that the candidate actually runs code.
+PY_BIN=""
+for _py_candidate in python3 python; do
+    if command -v "$_py_candidate" >/dev/null 2>&1 && "$_py_candidate" -c 'pass' >/dev/null 2>&1; then
+        PY_BIN="$_py_candidate"
+        break
+    fi
+done
+if [ -z "$PY_BIN" ] && command -v py >/dev/null 2>&1 && py -3 -c 'pass' >/dev/null 2>&1; then
+    PY_BIN="py -3"
+fi
+unset _py_candidate
+py_available() { [ -n "$PY_BIN" ]; }
+
 # sed_escape_replacement STR — экранирует &, | и \ для безопасной подстановки
 # STR как replacement в `sed s|...|STR|` (issue #269 verify-фикс). Без этого
 # значение из .exocortex.env, содержащее & (sed: «весь мэтч») или | (наш
@@ -239,7 +258,7 @@ migrate_platform_memory() {
 # update/repair pass, not only NEW_FILES/UPDATED_FILES from this invocation.
 report_owner_user_memory_drift() {
     local fpath deployed drift_count=0
-    [ -d "$CLAUDE_MEMORY_DIR" ] && [ -f "$MANIFEST" ] || return 0
+    [ -d "$CLAUDE_MEMORY_DIR" ] && [ -f "$MANIFEST" ] && py_available || return 0
     while IFS= read -r fpath; do
         [ -n "$fpath" ] || continue
         is_migrated_platform_memory_path "$fpath" && continue
@@ -251,7 +270,7 @@ report_owner_user_memory_drift() {
             echo "    Сверьте: diff \"$SCRIPT_DIR/$fpath\" \"$deployed\""
             drift_count=$((drift_count + 1))
         fi
-    done < <(python3 - "$MANIFEST" <<'PY' 2>/dev/null
+    done < <($PY_BIN - "$MANIFEST" <<'PY' 2>/dev/null
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -491,8 +510,8 @@ fi
 # schema v2 binds every delivered path to its content.  This makes --check --fast
 # notice content-only releases and prevents a proxy/CDN mismatch from installing a
 # file that does not belong to the downloaded manifest.
-if command -v python3 >/dev/null 2>&1; then
-    if ! python3 - "$MANIFEST" <<'PY'
+if py_available; then
+    if ! $PY_BIN - "$MANIFEST" <<'PY'
 import json
 import re
 import sys
@@ -535,8 +554,12 @@ if $CHECK_ONLY && $FAST_CHECK; then
     LOCAL_VERSION=""
     [ -f "$LOCAL_MANIFEST" ] && LOCAL_VERSION=$(grep '"version"' "$LOCAL_MANIFEST" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//;s/".*//')
 
-    if command -v python3 >/dev/null 2>&1 && [ -f "$LOCAL_MANIFEST" ]; then
-        FILES_MATCH=$(python3 -c "
+    if py_available && [ -f "$LOCAL_MANIFEST" ]; then
+        # issue #402: paths passed via argv, not interpolated into the -c string —
+        # MSYS only rewrites path-shaped argv values to Windows form, not text
+        # baked into the script source, so an interpolated path silently fails
+        # to open on native Windows Python.
+        FILES_MATCH=$($PY_BIN -c "
 import json, sys
 def files_key(path):
     try:
@@ -545,13 +568,13 @@ def files_key(path):
     except Exception:
         return None
     return sorted(json.dumps(f, sort_keys=True) for f in data.get('files', []))
-local_files = files_key('$LOCAL_MANIFEST')
-upstream_files = files_key('$MANIFEST')
+local_files = files_key(sys.argv[1])
+upstream_files = files_key(sys.argv[2])
 if local_files is None or upstream_files is None:
     print('unknown')
 else:
     print('match' if local_files == upstream_files else 'differ')
-" 2>/dev/null)
+" "$LOCAL_MANIFEST" "$MANIFEST" 2>/dev/null)
         VERSIONS_MATCH=false
         [ -n "$LOCAL_VERSION" ] && [ "$LOCAL_VERSION" = "$UPSTREAM_VERSION" ] && VERSIONS_MATCH=true
         # issue #288 review fix: FILES_MATCH="unknown" (manifest JSON unparseable
@@ -667,13 +690,24 @@ repair_pass() {
                 ;;
         esac
     done < <(
-        python3 -c "
-import json
-with open('$MANIFEST') as f:
+        # issue #402: path via argv, not interpolated — see FILES_MATCH above for why.
+        # stderr is NOT suppressed here on purpose: the old `2>/dev/null` made a
+        # broken interpreter (or, before this fix, an embedded path native Python
+        # couldn't resolve) return zero rows with no diagnostic — "nothing to
+        # repair" looked identical to a real clean pass. A visible ⚠ beats silence;
+        # stderr is routed through a prefixer so it doesn't get read as a file row
+        # by the `while IFS='|' read` loop above (which only sees this fd's stdout).
+        if py_available; then
+            $PY_BIN -c "
+import json, sys
+with open(sys.argv[1]) as f:
     data = json.load(f)
 for entry in data.get('files', []):
     print(entry['path'] + '|')
-" 2>/dev/null
+" "$MANIFEST" 2> >(sed 's/^/  ⚠ repair_pass: /' >&2)
+        else
+            echo "  ⚠ repair_pass: python недоступен — сверка runtime-файлов пропущена" >&2
+        fi
     )
     if [ "$REPAIRED" -gt 0 ]; then
         echo "  ✓ $REPAIRED runtime-файлов восстановлено"
@@ -708,17 +742,26 @@ CLAUDE_CONFLICT_FILES=()
 CLAUDE_BASE_MISSING_FILES=()
 
 # Count total files for progress display
-TOTAL_FILES=$(python3 -c "
-import json
-with open('$MANIFEST') as f:
+TOTAL_FILES="?"
+if py_available; then
+    TOTAL_FILES=$($PY_BIN -c "
+import json, sys
+with open(sys.argv[1]) as f:
     data = json.load(f)
 print(len(data.get('files', [])))
-" 2>/dev/null || echo "?")
+" "$MANIFEST" 2>/dev/null || echo "?")
+fi
 DOWNLOAD_IDX=0
 
 # Parse manifest: extract path and desc for each file entry
 while IFS='|' read -r fpath fdesc expected_hash; do
     [ -z "$fpath" ] && continue
+    # issue #402 (defect 3): native Windows Python prints \r\n even inside a
+    # pipe read by Git Bash — the trailing \r rides along in the LAST field
+    # (expected_hash) and makes every sha256 comparison below fail forever,
+    # silently skipping all 593 manifest files. Strip unconditionally; a no-op
+    # on real Unix output.
+    expected_hash="${expected_hash%$'\r'}"
     # Protected user files (issue #154): never overwrite if they already exist locally.
     # The "Не затрагиваются" list below is cosmetic; is_protected_user_file() is the
     # actual skip-if-exists guard (shared with the deprecated-file removal loop below).
@@ -781,20 +824,25 @@ while IFS='|' read -r fpath fdesc expected_hash; do
         fi
     fi
 done < <(
-    # Parse JSON: extract path|desc pairs
-    python3 -c "
+    # Parse JSON: extract path|desc|sha256 lines. Path via argv (issue #402,
+    # defect 2), not interpolated into the -c string — see FILES_MATCH above.
+    if py_available; then
+        $PY_BIN -c "
 import json, sys
-with open('$MANIFEST') as f:
+with open(sys.argv[1]) as f:
     data = json.load(f)
 for entry in data.get('files', []):
     print(entry['path'] + '|' + entry.get('desc', '') + '|' + entry.get('sha256', ''))
-" 2>/dev/null || {
-    # Fallback: basic grep parsing if python3 not available
-    grep '"path"' "$MANIFEST" | while read -r line; do
-        fpath=$(echo "$line" | sed 's/.*"path"[[:space:]]*:[[:space:]]*"//;s/".*//')
-        echo "$fpath|"
-    done
-}
+" "$MANIFEST" 2>/dev/null
+    else
+        # Fallback: basic grep parsing if no working python interpreter.
+        # No sha256 in this path — integrity check below is skipped (already
+        # documented via SKIPPED_DOWNLOAD, not silently trusted).
+        grep '"path"' "$MANIFEST" | while read -r line; do
+            fpath=$(echo "$line" | sed 's/.*"path"[[:space:]]*:[[:space:]]*"//;s/".*//')
+            echo "$fpath|"
+        done
+    fi
 )
 printf "\n"
 
@@ -813,13 +861,15 @@ while IFS='|' read -r fpath freason; do
         DEPRECATED_REASONS+=("${freason:-устарел}")
     fi
 done < <(
-    python3 -c "
+    if py_available; then
+        $PY_BIN -c "
 import json, sys
-with open('$MANIFEST') as f:
+with open(sys.argv[1]) as f:
     data = json.load(f)
 for entry in data.get('deprecated_files', []):
     print(entry.get('path','') + '|' + entry.get('reason',''))
-" 2>/dev/null || true)
+" "$MANIFEST" 2>/dev/null || true
+    fi)
 
 TOTAL_CHANGES=$(( ${#NEW_FILES[@]} + ${#UPDATED_FILES[@]} + ${#DEPRECATED_FOUND[@]} ))
 
@@ -1571,11 +1621,12 @@ MCP_USER="$WORKSPACE_DIR/extensions/mcp-user.json"
 # Strategy: migrate in-place first (preserving user servers), then fallback to template copy.
 # This preserves any user-added MCP servers that are NOT in extensions/mcp-user.json.
 
-if [ -f "$MCP_WORKSPACE" ] && command -v python3 >/dev/null 2>&1; then
-    python3 -c "
+if [ -f "$MCP_WORKSPACE" ] && py_available; then
+    # issue #402 (defect 2): path via argv, not interpolated — see FILES_MATCH above.
+    $PY_BIN -c "
 import json, sys
 
-with open('$MCP_WORKSPACE') as f:
+with open(sys.argv[1]) as f:
     data = json.load(f)
 
 servers = data.get('mcpServers', {})
@@ -1598,7 +1649,7 @@ if changed:
     ordered = {'iwe-knowledge': servers.pop('iwe-knowledge')}
     ordered.update(servers)
     data['mcpServers'] = ordered
-    with open('$MCP_WORKSPACE', 'w') as f:
+    with open(sys.argv[1], 'w') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write('\n')
     removed = ', '.join(old_keys) if old_keys else ''
@@ -1608,12 +1659,12 @@ if changed:
     else:
         msg += ': добавлен iwe-knowledge (Gateway)'
     print(msg)
-" 2>/dev/null
+" "$MCP_WORKSPACE" 2>/dev/null
 elif [ ! -f "$MCP_WORKSPACE" ] && [ -f "$MCP_TEMPLATE" ]; then
     # No workspace .mcp.json — copy from template
     cp "$MCP_TEMPLATE" "$MCP_WORKSPACE"
     echo "  ✓ .mcp.json создан из шаблона (Gateway)"
-elif [ -f "$MCP_WORKSPACE" ] && ! command -v python3 >/dev/null 2>&1; then
+elif [ -f "$MCP_WORKSPACE" ] && ! py_available; then
     # No python3 — check if already migrated, otherwise warn
     if grep -q 'iwe-knowledge' "$MCP_WORKSPACE" 2>/dev/null; then
         echo "  ✓ .mcp.json уже содержит iwe-knowledge"
@@ -1710,9 +1761,9 @@ fi
 # update-manifest.json (neither in files[] nor deprecated_files[]).
 # These may be stale user customisations or files left over from a renamed skill.
 # Never auto-deletes; always informational only.
-if command -v python3 &>/dev/null && [ -f "$SCRIPT_DIR/update-manifest.json" ]; then
+if py_available && [ -f "$SCRIPT_DIR/update-manifest.json" ]; then
     ORPHAN_OUTPUT=""
-    if ! ORPHAN_OUTPUT=$(python3 - "$SCRIPT_DIR" 2>&1 <<'PYEOF'
+    if ! ORPHAN_OUTPUT=$($PY_BIN - "$SCRIPT_DIR" 2>&1 <<'PYEOF'
 import json, os, sys
 
 script_dir = os.path.realpath(sys.argv[1])
@@ -1788,6 +1839,17 @@ validate_no_install_values_in_applied_additions() {
     for key in WORKSPACE_DIR HOME_DIR CLAUDE_PATH IWE_TEMPLATE IWE_RUNTIME; do
         value=$(grep -E "^${key}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2- | sed -E 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')
         [ -n "$value" ] || continue
+        # issue #397: guard ищет значение как ПОДСТРОКУ во всех добавленных строках.
+        # Для путей (WORKSPACE_DIR и т.п.) это осмысленно — случайное совпадение с
+        # абсолютным личным путём маловероятно. Но CLAUDE_PATH по умолчанию из setup —
+        # голое имя команды (`claude`), а не путь: подстрока "claude" совпадает почти в
+        # любом добавленном файле шаблона (comments, имена claude-peer-adapter.sh и т.д.)
+        # и превращает guard в постоянный ложный блок. Guard значимого текста-пути без
+        # "/" не несёт — только настоящие абсолютные пути отличают личную инсталляцию.
+        case "$value" in
+            */*) ;;
+            *) continue ;;
+        esac
         install_keys+=("$key")
         install_values+=("$value")
     done
