@@ -1,6 +1,6 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
+    "defaultMode": "default",
     "allow": [
       "Edit(/.claude/skills/**)",
       "mcp__google-drive__search_files",
@@ -12,7 +12,22 @@
       "mcp__railway__list-projects",
       "mcp__railway__list-services",
       "mcp__railway__list-variables",
-      "mcp__ext-linear__search_issues"
+      "mcp__ext-linear__search_issues",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(diff:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)"
     ],
     "additionalDirectories": []
   },
