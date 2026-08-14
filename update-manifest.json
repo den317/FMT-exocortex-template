@@ -1,6 +1,8 @@
 {
   "schema_version": 2,
   "version": "0.38.3",
+  "source_repo": "den317/FMT-exocortex-template",
+  "source_branch": "main",
   "description": "Манифест платформенных файлов FMT-exocortex-template. Используется update.sh для доставки обновлений.",
   "files": [
     {
@@ -2413,7 +2415,7 @@
     },
     {
       "path": "update.sh",
-      "sha256": "28dbe535efb530dd0a17dec92943257c6b3a5b7da485d11508a901e1b40e6778"
+      "sha256": "2d6235abb0f3c9ee6a9bc198de6ca8dcd825805dfbfbad5361575550cab13934"
     }
   ],
   "excluded_paths": [

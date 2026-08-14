@@ -27,6 +27,7 @@
 #   T23: wp-sync-bundle prefers folder cards and reads structured open phase statuses
 #   T24-T27: update safety, bootstrap/path contracts, multiplier opt-out,
 #             and day-close ownership/source selection
+#   T28: pinned update channel consistency and manifest identity
 #
 # Exit: 0 = all PASS, N = N tests failed
 #
@@ -1678,6 +1679,139 @@ if grep -q '<!-- multiplier:off -->\*\*Бюджет дня:\*\* ~Yh РП все�
     pass "T26: DayPlan, WeekPlan, Week Close and Day Close all provide multiplier-off branches"
 else
     fail "T26: one or more plan/report templates lack a multiplier-off branch"
+fi
+
+# ============================================================
+# T28: one pinned channel owns self-update, manifest and payload
+# ============================================================
+echo "--- T28: pinned update channel is consistent and fail-closed ---"
+T28_ROOT="$TEST_WS/t28-workspace"
+T28_TEMPLATE="$T28_ROOT/FMT-exocortex-template"
+T28_BIN="$T28_ROOT/bin"
+mkdir -p "$T28_TEMPLATE" "$T28_BIN"
+cp "$TEMPLATE_DIR/update.sh" "$T28_TEMPLATE/update.sh"
+cp "$TEMPLATE_DIR/CLAUDE.md" "$T28_TEMPLATE/CLAUDE.md"
+cat > "$T28_ROOT/.exocortex.env" <<'EOF'
+IWE_UPDATE_REPO=den317/FMT-exocortex-template
+IWE_UPDATE_BRANCH=main
+EOF
+cat > "$T28_ROOT/manifest.json" <<'EOF'
+{
+  "schema_version": 2,
+  "version": "test",
+  "source_repo": "den317/FMT-exocortex-template",
+  "source_branch": "main",
+  "files": []
+}
+EOF
+cp "$T28_ROOT/manifest.json" "$T28_TEMPLATE/update-manifest.json"
+cat > "$T28_BIN/curl" <<'EOF'
+#!/bin/bash
+set -e
+out="" url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        http*) url="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+printf '%s\n' "$url" >> "$T28_CURL_LOG"
+[ "${T28_FAIL_NETWORK:-0}" = "1" ] && exit 22
+case "$url" in
+    */update.sh) cp "$T28_UPDATE_SOURCE" "$out" ;;
+    */update-manifest.json) cp "$T28_MANIFEST_SOURCE" "$out" ;;
+    *) echo "unexpected URL: $url" >&2; exit 22 ;;
+esac
+EOF
+chmod +x "$T28_BIN/curl"
+
+T28_CURL_LOG="$T28_ROOT/curl.log" \
+T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
+T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
+PATH="$T28_BIN:$PATH" \
+bash "$T28_TEMPLATE/update.sh" --check --fast > "$T28_ROOT/check.out" 2>&1
+if grep -q '^Канал обновления: den317/FMT-exocortex-template@main$' "$T28_ROOT/check.out" && \
+   [ "$(grep -c '^https://raw.githubusercontent.com/den317/FMT-exocortex-template/main/' "$T28_ROOT/curl.log")" -eq 2 ] && \
+   ! grep -v -q '^https://raw.githubusercontent.com/den317/FMT-exocortex-template/main/' "$T28_ROOT/curl.log"; then
+    pass "T28: self-update and manifest use only the pinned den317 channel"
+else
+    fail "T28: pinned channel leaked or was not used consistently"
+fi
+
+python3 - "$T28_ROOT/manifest.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["source_repo"] = "other-owner/FMT-exocortex-template"
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+PY
+rm -f "$T28_ROOT/curl.log" "$T28_TEMPLATE/.update-incomplete"
+set +e
+T28_CURL_LOG="$T28_ROOT/curl.log" \
+T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
+T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
+PATH="$T28_BIN:$PATH" \
+bash "$T28_TEMPLATE/update.sh" --check --fast > "$T28_ROOT/mismatch.out" 2>&1
+T28_MISMATCH_RC=$?
+set -e
+if [ "$T28_MISMATCH_RC" -eq 49 ] && \
+   grep -q 'Манифест не принадлежит выбранному каналу' "$T28_ROOT/mismatch.out" && \
+   [ ! -e "$T28_TEMPLATE/.update-incomplete" ]; then
+    pass "T28: a manifest from another channel stops before any write"
+else
+    fail "T28: mismatched channel rc=$T28_MISMATCH_RC (expected 49, no writes)"
+fi
+
+# A channel outage must stop; it must not retry against the canonical default.
+python3 - "$T28_ROOT/manifest.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["source_repo"] = "den317/FMT-exocortex-template"
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+PY
+T28_UPDATE_HASH=$(sha256sum "$T28_TEMPLATE/update.sh" | cut -d' ' -f1)
+rm -f "$T28_ROOT/curl.log" "$T28_TEMPLATE/.update-incomplete"
+set +e
+T28_FAIL_NETWORK=1 \
+T28_CURL_LOG="$T28_ROOT/curl.log" \
+T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
+T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
+PATH="$T28_BIN:$PATH" \
+bash "$T28_TEMPLATE/update.sh" --yes > "$T28_ROOT/offline.out" 2>&1
+T28_OFFLINE_RC=$?
+set -e
+if [ "$T28_OFFLINE_RC" -eq 2 ] && \
+   [ "$T28_UPDATE_HASH" = "$(sha256sum "$T28_TEMPLATE/update.sh" | cut -d' ' -f1)" ] && \
+   [ ! -e "$T28_TEMPLATE/.update-incomplete" ] && \
+   ! grep -v -q '^https://raw.githubusercontent.com/den317/FMT-exocortex-template/main/' "$T28_ROOT/curl.log"; then
+    pass "T28: a den317 outage stops without fallback or writes"
+else
+    fail "T28: channel outage rc=$T28_OFFLINE_RC (expected 2, no fallback/writes)"
+fi
+
+# An installation without channel settings keeps the canonical default.
+rm -f "$T28_ROOT/.exocortex.env" "$T28_ROOT/curl.log"
+T28_DEFAULT_REPO=$(sed -n 's/^DEFAULT_UPDATE_REPO="\([^"]*\)"/\1/p' "$T28_TEMPLATE/update.sh")
+python3 - "$T28_ROOT/manifest.json" "$T28_DEFAULT_REPO" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["source_repo"] = sys.argv[2]
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
+PY
+cp "$T28_ROOT/manifest.json" "$T28_TEMPLATE/update-manifest.json"
+T28_CURL_LOG="$T28_ROOT/curl.log" \
+T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
+T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
+PATH="$T28_BIN:$PATH" \
+bash "$T28_TEMPLATE/update.sh" --check --fast > "$T28_ROOT/default.out" 2>&1
+if grep -Fq "Канал обновления: $T28_DEFAULT_REPO@main" "$T28_ROOT/default.out" && \
+   [ "$(grep -F -c "https://raw.githubusercontent.com/$T28_DEFAULT_REPO/main/" "$T28_ROOT/curl.log")" -eq 2 ]; then
+    pass "T28: an unconfigured installation keeps the canonical default"
+else
+    fail "T28: default channel compatibility regressed"
 fi
 
 # ============================================================

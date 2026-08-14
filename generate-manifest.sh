@@ -10,6 +10,22 @@ MANIFEST="$SCRIPT_DIR/update-manifest.json"
 # Версия из CHANGELOG.md (первый ## [X.Y.Z])
 VERSION=$(grep -m1 '^\#\# \[[0-9]' "$SCRIPT_DIR/CHANGELOG.md" | sed 's/.*\[\(.*\)\].*/\1/')
 
+# Bind the generated manifest to its distribution channel. A fork is a complete
+# reviewed release source, not a runtime overlay. Explicit environment values
+# win; otherwise derive the GitHub slug from origin and publish from main.
+ORIGIN_URL=$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)
+ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E \
+    -e 's#^git@github.com:##' \
+    -e 's#^https://github.com/##' \
+    -e 's#\.git$##')
+SOURCE_REPO="${IWE_UPDATE_REPO:-$ORIGIN_REPO}"
+SOURCE_BRANCH="${IWE_UPDATE_BRANCH:-main}"
+
+if ! printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    echo "ERROR: Некорректный source_repo манифеста: $SOURCE_REPO" >&2
+    exit 1
+fi
+
 if [ -z "$VERSION" ]; then
     echo "ERROR: Не удалось извлечь версию из CHANGELOG.md"
     exit 1
@@ -248,6 +264,8 @@ def manifest_entry(path):
 data = {
     'schema_version': 2,
     'version': '$VERSION',
+    'source_repo': '$SOURCE_REPO',
+    'source_branch': '$SOURCE_BRANCH',
     'description': 'Манифест платформенных файлов FMT-exocortex-template. Используется update.sh для доставки обновлений.',
     'files': [manifest_entry(p) for p in files],
     'excluded_paths': excluded,
