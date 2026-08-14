@@ -83,6 +83,7 @@ EXCLUDED_SCRIPTS=(
     "scripts/session-dispatcher-tsekh.py"       # нет ссылок из доставляемого
     "scripts/iwe-catalog-list.py"               # ссылается только docs/maintaining-skills.md (сам dev-only)
     "scripts/guide-kit-sync.sh"                 # author-only: заносит релиз iwesys/guide-kit в дерево шаблона (WP-483 Ф4)
+    "scripts/upstream-intake-preview.py"        # author-only: read-only intake новых upstream-релизов в den317
 )
 
 EXCLUDED_EXACT=(
