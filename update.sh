@@ -21,10 +21,12 @@ EXIT_GENERAL=1
 
 trap 'echo "ОШИБКА: update.sh прервался на строке ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
-VERSION="2.4.1"  # fix (WP-401): deprecated-file removal now checks is_protected_user_file() — a protected file (e.g. sessions/00-index.md) listed in deprecated_files by mistake could previously be deleted despite the "Не затрагиваются" report claiming otherwise; fix #229: repair-pass no longer stale-repairs memory files with owner: user in frontmatter; fix #228: hot-budget validator warns when memory/*.md horizon:hot lines exceed threshold
-REPO="TserenTserenov/FMT-exocortex-template" # UPSTREAM-CONST: do not substitute
-BRANCH="main"
-RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
+VERSION="2.5.0"  # configurable, manifest-bound update channels; a pinned fork never falls back to canonical upstream
+DEFAULT_UPDATE_REPO="TserenTserenov/FMT-exocortex-template"
+DEFAULT_UPDATE_BRANCH="main"
+REPO="$DEFAULT_UPDATE_REPO"
+BRANCH="$DEFAULT_UPDATE_BRANCH"
+RAW_BASE=""
 
 CHECK_ONLY=false
 AUTO_YES=false
@@ -74,6 +76,9 @@ for arg in "$@"; do
             echo "  --refresh-stale         author_mode: обновить файлы «отстал от шаблона, правок нет» (бэкап; блок при «неизвестно» > 0)"
             echo "  --version   Версия скрипта"
             echo "  --help      Эта справка"
+            echo ""
+            echo "Канал: IWE_UPDATE_REPO и IWE_UPDATE_BRANCH в workspace/.exocortex.env"
+            echo "По умолчанию: $DEFAULT_UPDATE_REPO@$DEFAULT_UPDATE_BRANCH"
             exit 0
             ;;
     esac
@@ -453,10 +458,47 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ ! -f "$SCRIPT_DIR/CLAUDE.md" ]; then
     echo "ОШИБКА: Запускайте из корня экзокортекс-репо."
     echo "  cd /path/to/your-exocortex && bash update.sh"
-    exit 1
+    exit "$EXIT_GENERAL"
 fi
 
 WORKSPACE_DIR="$(dirname "$SCRIPT_DIR")"
+
+# The update channel must live outside update.sh: Step 0 replaces this script
+# before it downloads the manifest. Read the protected workspace env without
+# sourcing it, so a fork can pin one repository for self-update, manifest and
+# payload. Process environment values are useful for CI and take precedence.
+read_update_channel_value() {
+    local key="$1" env_file="$WORKSPACE_DIR/.exocortex.env" value=""
+    [ -f "$env_file" ] || { printf '%s\n' ""; return 0; }
+    value=$(grep -E "^${key}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2- | \
+        sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')
+    printf '%s\n' "$value"
+}
+
+configure_update_channel() {
+    local configured_repo="${IWE_UPDATE_REPO:-}" configured_branch="${IWE_UPDATE_BRANCH:-}"
+    [ -n "$configured_repo" ] || configured_repo=$(read_update_channel_value IWE_UPDATE_REPO)
+    [ -n "$configured_branch" ] || configured_branch=$(read_update_channel_value IWE_UPDATE_BRANCH)
+    REPO="${configured_repo:-$DEFAULT_UPDATE_REPO}"
+    BRANCH="${configured_branch:-$DEFAULT_UPDATE_BRANCH}"
+
+    if ! printf '%s' "$REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+        echo "ОШИБКА: некорректный репозиторий канала обновления: $REPO" >&2
+        exit "$EXIT_USAGE"
+    fi
+    case "$BRANCH" in
+        ""|/*|*..*|*//*|*\\*|*[!A-Za-z0-9._/-]*)
+            echo "ОШИБКА: некорректная ветка канала обновления: $BRANCH" >&2
+            exit "$EXIT_USAGE"
+            ;;
+    esac
+
+    RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
+    export IWE_UPDATE_REPO="$REPO" IWE_UPDATE_BRANCH="$BRANCH"
+}
+
+configure_update_channel
+echo "Канал обновления: $REPO@$BRANCH"
 RULES_BACKUP_RUN=""
 RULES_SAFE_TO_UPDATE="|"
 UPDATE_INCOMPLETE_MARKER="$SCRIPT_DIR/.update-incomplete"
@@ -637,7 +679,7 @@ if ! curl $CURL_BASE_OPTS $_CURL_SSL_OPT -sSfL "$MANIFEST_URL" -o "$MANIFEST" 2>
     echo "ОШИБКА: Не удалось загрузить манифест обновлений."
     echo "  URL: $MANIFEST_URL"
     echo "  Проверьте подключение к интернету."
-    exit 1
+    exit "$EXIT_NETWORK"
 fi
 
 # schema v2 binds every delivered path to its content.  This makes --check --fast
@@ -667,9 +709,41 @@ PY
     fi
 fi
 
+# A fork channel must never accept a manifest from another distribution. Older
+# canonical manifests may omit identity only for the default upstream; a pinned
+# channel is fail-closed until its manifest declares the same repo and branch.
+if py_available; then
+    if ! $PY_BIN - "$MANIFEST" "$REPO" "$BRANCH" "$DEFAULT_UPDATE_REPO" "$DEFAULT_UPDATE_BRANCH" <<'PY'
+import json
+import sys
+
+path, expected_repo, expected_branch, default_repo, default_branch = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    manifest = json.load(handle)
+actual_repo = manifest.get("source_repo")
+actual_branch = manifest.get("source_branch")
+if actual_repo is None and actual_branch is None:
+    if (expected_repo, expected_branch) == (default_repo, default_branch):
+        raise SystemExit(0)
+    raise SystemExit("manifest has no channel identity")
+if (actual_repo, actual_branch) != (expected_repo, expected_branch):
+    raise SystemExit(
+        f"manifest channel {actual_repo}@{actual_branch} != selected "
+        f"{expected_repo}@{expected_branch}"
+    )
+PY
+    then
+        echo "ОШИБКА: Манифест не принадлежит выбранному каналу $REPO@$BRANCH." >&2
+        exit "$EXIT_CONFLICT"
+    fi
+elif [ "$REPO" != "$DEFAULT_UPDATE_REPO" ] || [ "$BRANCH" != "$DEFAULT_UPDATE_BRANCH" ]; then
+    echo "ОШИБКА: Для проверки закреплённого канала требуется Python 3; обновление отменено." >&2
+    exit "$EXIT_CONFLICT"
+fi
+
 # Parse version from manifest
 UPSTREAM_VERSION=$(grep '"version"' "$MANIFEST" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//;s/".*//')
-echo "  Версия upstream: $UPSTREAM_VERSION"
+echo "  Версия канала: $UPSTREAM_VERSION"
 echo ""
 
 # === Fast check (issue #230): manifest-content comparison, skips the ~330-file download loop ===
@@ -700,7 +774,11 @@ def files_key(path):
             data = json.load(f)
     except Exception:
         return None
-    return sorted(json.dumps(f, sort_keys=True) for f in data.get('files', []))
+    return {
+        'source_repo': data.get('source_repo'),
+        'source_branch': data.get('source_branch'),
+        'files': sorted(json.dumps(f, sort_keys=True) for f in data.get('files', [])),
+    }
 local_files = files_key(sys.argv[1])
 upstream_files = files_key(sys.argv[2])
 if local_files is None or upstream_files is None:
@@ -716,7 +794,7 @@ else:
         # same version number twice while claiming a mismatch. Four distinct cases
         # now, not three collapsed into one catch-all.
         if [ "$FILES_MATCH" = "match" ] && $VERSIONS_MATCH; then
-            echo "✓ Версия и состав манифеста совпадают с upstream (v$UPSTREAM_VERSION). Обновлений нет."
+            echo "✓ Версия и состав манифеста совпадают с каналом (v$UPSTREAM_VERSION). Обновлений нет."
         elif [ "$FILES_MATCH" = "differ" ]; then
             echo "⚠ Состав манифеста изменился (файлы добавлены/удалены/обновлены)."
             echo "  Для полного списка изменений: bash update.sh --check (без --fast)."
@@ -728,7 +806,7 @@ else:
             echo "  Для полного списка изменений: bash update.sh --check (без --fast)."
         fi
     elif [ -n "$LOCAL_VERSION" ] && [ "$LOCAL_VERSION" = "$UPSTREAM_VERSION" ]; then
-        echo "✓ Версия совпадает с upstream (v$UPSTREAM_VERSION). python3 не найден — состав манифеста не сверен."
+        echo "✓ Версия совпадает с каналом (v$UPSTREAM_VERSION). python3 не найден — состав манифеста не сверен."
     else
         echo "⚠ Версия отличается: локально v${LOCAL_VERSION:-неизвестно}, upstream v$UPSTREAM_VERSION."
         echo "  Для полного списка изменений: bash update.sh --check (без --fast)."
