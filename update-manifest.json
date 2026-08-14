@@ -213,7 +213,7 @@
     },
     {
       "path": ".claude/rules/distinctions.md",
-      "sha256": "0d1f5a28dbaf38475828ab98e462354848cf8ceb4fc1fb293ea560efae69175d"
+      "sha256": "e65926b4ce0a53e14794537c1375467bb005c2b004aad6f8ad3a1c108120b9fc"
     },
     {
       "path": ".claude/rules/formatting.md",
@@ -1241,7 +1241,7 @@
     },
     {
       "path": "memory/agent-architecture-framework.md",
-      "sha256": "38fea9159f06418a2b5727964329d6c3e3a00bcd35a1d88b5f57571eeee4b4b2"
+      "sha256": "2b30d57a28a2f7ad99c8dc8e9f5f1e99a17ba101b0275f53ade00db43c91e7e6"
     },
     {
       "path": "memory/agent-vendor-connect-pattern.md",
@@ -1269,7 +1269,7 @@
     },
     {
       "path": "memory/distinctions-warm.md",
-      "sha256": "44f99f43925283c276f280c3bce02a56f289281f1b60e55b897d955acbc5e8c2"
+      "sha256": "26d7e3ae43085170b0dbefc9853494baf3031dbd6fc3289444a3330e20f00230"
     },
     {
       "path": "memory/dry-run-contract.md",
@@ -1285,7 +1285,7 @@
     },
     {
       "path": "memory/fpf-reference.md",
-      "sha256": "d753b57b1a500861034bdd4a522773979b1a8665135ba679afc02ecaeca9f3f9"
+      "sha256": "68e331d94e75bc32d60ff4a478a636dd0079884213081fcd088428bb7895a8c5"
     },
     {
       "path": "memory/fpf-term-map.yaml",
@@ -1293,7 +1293,7 @@
     },
     {
       "path": "memory/hard-distinctions.md",
-      "sha256": "194a8e2280e627b189c261336dd688750a443e216fd1a2fda837c3935eb2c89a"
+      "sha256": "bfb64115a08287b59c128b006a2bfbd3e6c101bbf8f3a9669633b41a33c3d5b1"
     },
     {
       "path": "memory/hooks-design.md",
@@ -1396,6 +1396,10 @@
       "sha256": "9a562120dec1a0d0546456cd3194545724d85a620cae7f3f20571b8e6b563adc"
     },
     {
+      "path": "pack-templates/digital-platform/02-domain-entities/DP.ROLE.NNN-external-tracker-router.md",
+      "sha256": "c8018ae98ecf6fa71092443c3a7ddd0194f8ba8a71220c55f9e86c05078b402e"
+    },
+    {
       "path": "pack-templates/digital-platform/04-work-products/DP.WP.NNN-stage-dependency-map.md",
       "sha256": "2317fb34445196210cab849a8a9bba9f0aa01c1252afcba79c220acb230ec48a"
     },
@@ -1410,6 +1414,10 @@
     {
       "path": "pack-templates/digital-platform/08-service-clauses/DP.SC.NNN-external-session-request.md",
       "sha256": "8076866fe2eddc7b4276c3a147d93c02c8792b24f48bbe05a4617248cc85d0f7"
+    },
+    {
+      "path": "pack-templates/digital-platform/08-service-clauses/DP.SC.NNN-wp-external-tracker-sync.md",
+      "sha256": "82e6337dc6b9c77d4f957254364e14db1cef2c34fac7ed5b501e7cbd4651c94b"
     },
     {
       "path": "roles/README.md",
@@ -1837,7 +1845,7 @@
     },
     {
       "path": "scripts/check-manifest-coverage.py",
-      "sha256": "4b65ffb6107a16f4e5a759b8b791d884beaef15b972a78fb0f9f7b50e6058415"
+      "sha256": "c4675bce160147f8881c3adb2bfb93be00f9891c39a5b994caa78b2a463eafb6"
     },
     {
       "path": "scripts/check-open-sessions.sh",
@@ -2276,10 +2284,6 @@
       "sha256": "cb8ae42e06dbeb141d8566a9cd808874798cb01f0d8c7395aeee05e270fe83c2"
     },
     {
-      "path": "scripts/tests/test_create_wp_hypothesis_relation.sh",
-      "sha256": "2265e5dda20c17e17ea66d2c870fa0f97e3a053f741239fe61beaa785f944a58"
-    },
-    {
       "path": "scripts/tests/test_create_wp_registry_coherence.sh",
       "sha256": "852828b4b741b9922fd0a72b5089214a3ee1663874d7950976ed8115958adb69"
     },
@@ -2310,14 +2314,6 @@
     {
       "path": "scripts/tests/test_hook_classification.sh",
       "sha256": "99c99c821223e70a8a0b1cb89ce9a72f2bd1e5eebd011c2f42eadde056125491"
-    },
-    {
-      "path": "scripts/tests/test_issues_413_418.py",
-      "sha256": "deccd502f68f06f7d95c8382e5daf25bb0ce62bd5df2ac3e9729f91c4a7f7d4e"
-    },
-    {
-      "path": "scripts/tests/test_session_guard_hypothesis_gate.sh",
-      "sha256": "45d241902da232578652c576f3240088936fb165a4ada29917089e802df61edb"
     },
     {
       "path": "scripts/tests/test_update_install_path_guard.sh",
@@ -2358,6 +2354,10 @@
     {
       "path": "scripts/week-draft-init.sh",
       "sha256": "45adae54e5bdfb2a98c4c734973dca82b9bd747b2f23e01a998562f16792fed4"
+    },
+    {
+      "path": "scripts/wp-github-link.py",
+      "sha256": "8a0487137782e0f9ca42ab3146130475a6ae2e840c8de374dc6625a11bc20d99"
     },
     {
       "path": "scripts/wp-list.py",
@@ -2418,11 +2418,7 @@
   ],
   "excluded_paths": [
     "AGENTS-agent-blocks.md",
-    "docs/developer/README.md",
-    "docs/developer/card-template.md",
     "docs/developer/code-style.md",
-    "docs/developer/developer-guide.md",
-    "docs/developer/testing-as-spec.md",
     "docs/developer/working-with-claude.md",
     "promotion-status.yaml",
     "scripts/agent-dashboard.py",
@@ -2438,7 +2434,10 @@
     "scripts/session-dispatcher-tsekh.py",
     "scripts/tests/conftest.py",
     "scripts/tests/test_agent_dashboard.py",
+    "scripts/tests/test_build_active_wp_registry_columns.py",
     "scripts/tests/test_copy_to_aisystant.py",
+    "scripts/tests/test_create_wp_github_default_repo.sh",
+    "scripts/tests/test_create_wp_hypothesis_relation.sh",
     "scripts/tests/test_create_wp_number_padding.py",
     "scripts/tests/test_create_wp_weekplan_writer.py",
     "scripts/tests/test_day_close_prepare.py",
@@ -2446,19 +2445,15 @@
     "scripts/tests/test_delivery_formal.py",
     "scripts/tests/test_dry_run_gate.py",
     "scripts/tests/test_install_hooks.py",
+    "scripts/tests/test_issues_413_418.py",
     "scripts/tests/test_manifest_coverage_local.py",
-    "scripts/tests/test_residency_gate_skill_adapter.py",
+    "scripts/tests/test_session_guard_hypothesis_gate.sh",
     "scripts/tests/test_skill_promote.py",
     "scripts/tests/test_translate_delta.py",
     "scripts/tests/test_translate_parse.py",
+    "scripts/tests/test_wp_github_link.py",
     "scripts/translate.py",
-    "scripts/verify-template-integrity.sh",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/00-writer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/01-peer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/02-writer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/03-peer.md",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/meta.yaml",
-    "sessions/2026-06/2026-06-17-01-kimi-setup/report.md"
+    "scripts/verify-template-integrity.sh"
   ],
   "deprecated_files": [
     {
