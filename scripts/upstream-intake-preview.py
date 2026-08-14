@@ -91,18 +91,44 @@ def classify(
     return "both-diverged"
 
 
-def build_report(upstream: Path, den317: Path, args: argparse.Namespace) -> dict[str, object]:
-    base_sha = resolve_commit(upstream, args.base, "base")
+def load_manifest(den317: Path) -> dict[str, object]:
+    try:
+        return json.loads((den317 / "update-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise IntakeError("den317 update-manifest.json is missing or invalid") from error
+
+
+def accepted_base(manifest: dict[str, object], requested: str | None) -> tuple[str, str]:
+    provenance = manifest.get("upstream_provenance")
+    if not isinstance(provenance, dict):
+        raise IntakeError("den317 manifest has no upstream_provenance")
+    tag = provenance.get("accepted_tag")
+    sha = provenance.get("accepted_sha")
+    if not isinstance(tag, str) or not tag or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise IntakeError("den317 manifest has invalid upstream_provenance")
+    if requested and requested not in {tag, sha}:
+        raise IntakeError(f"requested base {requested} differs from attested base {tag}@{sha}")
+    return tag, sha
+
+
+def build_report(
+    upstream: Path,
+    den317: Path,
+    args: argparse.Namespace,
+    manifest: dict[str, object],
+    base_tag: str,
+    attested_sha: str,
+) -> dict[str, object]:
+    base_sha = resolve_commit(upstream, attested_sha, "attested base")
+    tag_sha = resolve_commit(upstream, base_tag, "attested base tag")
+    if tag_sha != base_sha:
+        raise IntakeError(f"attested tag {base_tag} resolves to {tag_sha}, expected {base_sha}")
     candidate_sha = resolve_commit(upstream, args.target, "target")
     current_sha = git(den317, "rev-parse", "--verify", "HEAD^{commit}")
 
     base_tree = tree(upstream, base_sha)
     candidate_tree = tree(upstream, candidate_sha)
     current_tree = tree(den317, current_sha)
-    try:
-        manifest = json.loads((den317 / "update-manifest.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise IntakeError("den317 update-manifest.json is missing or invalid") from error
     delivered = {entry["path"] for entry in manifest.get("files", []) if "path" in entry}
     excluded = set(manifest.get("excluded_paths", []))
     paths = sorted(set(base_tree) | set(candidate_tree) | set(current_tree))
@@ -128,7 +154,7 @@ def build_report(upstream: Path, den317: Path, args: argparse.Namespace) -> dict
         "mode": "read-only",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "upstream": args.upstream,
-        "base_ref": args.base,
+        "base_ref": base_tag,
         "base_sha": base_sha,
         "target_ref": args.target,
         "target_sha": candidate_sha,
@@ -176,7 +202,7 @@ def markdown(report: dict[str, object]) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", default=DEFAULT_UPSTREAM)
-    parser.add_argument("--base", required=True, help="previously accepted upstream tag or SHA")
+    parser.add_argument("--base", help="optional assertion; must match the attested tag or SHA")
     parser.add_argument("--target", required=True, help="candidate upstream tag or SHA")
     parser.add_argument("--den317", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--format", choices=("json", "markdown"), default="markdown")
@@ -189,6 +215,8 @@ def main() -> int:
     den317 = args.den317.resolve()
     if git(den317, "status", "--porcelain"):
         raise IntakeError("den317 working tree is dirty; commit or stash before intake")
+    manifest = load_manifest(den317)
+    base_tag, base_sha = accepted_base(manifest, args.base)
     if args.output:
         output = args.output.resolve()
         if output == den317 or den317 in output.parents:
@@ -200,7 +228,7 @@ def main() -> int:
             ["git", "clone", "--quiet", "--no-checkout", "--", args.upstream, str(upstream)],
             check=True,
         )
-        report = build_report(upstream, den317, args)
+        report = build_report(upstream, den317, args, manifest, base_tag, base_sha)
 
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n" if args.format == "json" else markdown(report)
     if args.output:

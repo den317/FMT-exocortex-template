@@ -20,6 +20,14 @@ ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E \
     -e 's#\.git$##')
 SOURCE_REPO="${IWE_UPDATE_REPO:-$ORIGIN_REPO}"
 SOURCE_BRANCH="${IWE_UPDATE_BRANCH:-main}"
+ACCEPTED_UPSTREAM_TAG="v0.38.3"
+ACCEPTED_UPSTREAM_SHA="0063969f3f1c271f50fe5c8e3be1b7d2eaecc6fd"
+
+if ! printf '%s' "$ACCEPTED_UPSTREAM_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
+   ! printf '%s' "$ACCEPTED_UPSTREAM_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+    echo "ERROR: Некорректная аттестованная upstream provenance-запись" >&2
+    exit 1
+fi
 
 if ! printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
     echo "ERROR: Некорректный source_repo манифеста: $SOURCE_REPO" >&2
@@ -267,6 +275,10 @@ data = {
     'version': '$VERSION',
     'source_repo': '$SOURCE_REPO',
     'source_branch': '$SOURCE_BRANCH',
+    'upstream_provenance': {
+        'accepted_tag': '$ACCEPTED_UPSTREAM_TAG',
+        'accepted_sha': '$ACCEPTED_UPSTREAM_SHA',
+    },
     'description': 'Манифест платформенных файлов FMT-exocortex-template. Используется update.sh для доставки обновлений.',
     'files': [manifest_entry(p) for p in files],
     'excluded_paths': excluded,

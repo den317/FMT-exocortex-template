@@ -777,6 +777,7 @@ def files_key(path):
     return {
         'source_repo': data.get('source_repo'),
         'source_branch': data.get('source_branch'),
+        'upstream_provenance': data.get('upstream_provenance'),
         'files': sorted(json.dumps(f, sort_keys=True) for f in data.get('files', [])),
     }
 local_files = files_key(sys.argv[1])
