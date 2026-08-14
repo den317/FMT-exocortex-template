@@ -69,7 +69,7 @@
     },
     {
       "path": ".claude/hooks/extensions-gate.sh",
-      "sha256": "53e8290974b37427b15e27797687fc4a54991fc3c9e615aa94a85bc1d655e217"
+      "sha256": "fd72b8a1badbe6234aa9b5a1629547ae624c18b691c8e94779950736dc2899a5"
     },
     {
       "path": ".claude/hooks/inject-code-style.sh",
@@ -236,6 +236,10 @@
       "sha256": "229d92059b32a772424853ee3c5ac56e2141acfa209b2d42db8879454deb033a"
     },
     {
+      "path": ".claude/scripts/classify-workspace-copy.sh",
+      "sha256": "39e14176892023597366818e5d8afeba763a72403999da362c385e0235245cd5"
+    },
+    {
       "path": ".claude/scripts/generate-rules-registry.py",
       "sha256": "814607296a21ae1ce8a21f2484fce2c3e62be23f481da172fb55f920dfab793a"
     },
@@ -248,12 +252,20 @@
       "sha256": "e1a484a888fc81be5ffa8acb3d2d375e8bec7794385982b11d4d71f24a0d69b8"
     },
     {
+      "path": ".claude/scripts/settings-merge-apply.sh",
+      "sha256": "30c13a546e7d8178ffa186813fe1f56b88edd11ae74cb5c24c35588bff0984a4"
+    },
+    {
+      "path": ".claude/scripts/settings-merge-preview.py",
+      "sha256": "85cc623ab22dbc311de1b892c22cd5e2d2ce9edc9b46cbaf97b38dc7a4cff453"
+    },
+    {
       "path": ".claude/scripts/wp-sync-bundle.sh",
       "sha256": "cbb565d904644e70489a32e5df117239283a92a76794362fcac305c72ad4fa35"
     },
     {
       "path": ".claude/settings.json",
-      "sha256": "6b813603cd749920206338e43d0fccb4b850f26e1f43ec7f9fd126dfdd8b51be"
+      "sha256": "c2d350e46293eaad3a390858be3c3d5ff8260f10ec288af411512be1611fc0e8"
     },
     {
       "path": ".claude/skills-catalog.yaml",
@@ -2181,7 +2193,7 @@
     },
     {
       "path": "scripts/session-guard.sh",
-      "sha256": "80226e05117a27f6c3dbb185545afe5d4aa397c294d7e1b2200c301c642c959b"
+      "sha256": "37f0b652ac6e3fcdc64dc5ce3f1b31892e05f28e73e545a418cb5e123b6a6c2a"
     },
     {
       "path": "scripts/settings-promote.sh",
@@ -2401,7 +2413,7 @@
     },
     {
       "path": "update.sh",
-      "sha256": "27ed2bf7dc8722f1d43932241f5b7b44c7bd70494a72e469b49768aaf96433bf"
+      "sha256": "28dbe535efb530dd0a17dec92943257c6b3a5b7da485d11508a901e1b40e6778"
     }
   ],
   "excluded_paths": [
