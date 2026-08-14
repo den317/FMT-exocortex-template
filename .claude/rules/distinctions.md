@@ -10,7 +10,7 @@
 - **Pack-знание ≠ Реализационное решение** (HD #29). Доменная истина → Pack. Технический выбор → DS.
 - **OwnerIntegrity:** Один факт — одно место. Дублирование Pack↔DS = ошибка синхронизации.
 - **WP-context ≠ Результат работы.** Context в governance-репо, результат в целевом DS/Pack.
-- **Персона ≠ Память ≠ Контекст** (HD #27, DP.D.052 v2). Критерий: writer + owner. Персона = **distributed composition** (Ory anchor + Git declarations + Neon refs), Память = Neon (Observed + Derived), Контекст/Проекция = runtime ephemeral. v2 (2026-05-31): таблица расщеплена на 4 оси — Writer / Identity-anchor / State-storage / Snapshot-unit.
+- **Персона ≠ Память ≠ Контекст** (HD #1, DP.D.052 v2). Критерий: writer + owner. Персона = **distributed composition** (Ory anchor + Git declarations + Neon refs), Память = Neon (Observed + Derived), Контекст/Проекция = runtime ephemeral. v2 (2026-05-31): таблица расщеплена на 4 оси — Writer / Identity-anchor / State-storage / Snapshot-unit.
 - **Носитель ≠ Персона ≠ Декларация Персоны** (DP.D.052 §10, DP.ARCH.005 §0, 2026-05-31). Носитель = человек в физическом мире (вне платформы); Персона = entity-в-IWE как composition (anchor+decls+refs); Декларация = один Git snapshot. Тест: «удалю Git → пропадёт декларация, Персона остаётся (anchor живёт)». Адресует интуицию «в БД не Персона, а её Версия» без переименования. Lifecycle anchor: Pre-Grant `claim_token` → Granted `Ory subject_id`. Импорт Letta: наш Persona = их `human block`, **не** `persona block` (= self-описание агента).
 - **Проблема ≠ Задача ≠ ФР ≠ Работа** (HD #24, DP.D.053). Ступор / метод известен / спецификация / физ.мир.
 - **Система ≠ Роль** (D.141 PD). Носитель существует независимо; роль = функциональное место, переносима.
