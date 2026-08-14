@@ -2453,8 +2453,10 @@
     "scripts/tests/test_skill_promote.py",
     "scripts/tests/test_translate_delta.py",
     "scripts/tests/test_translate_parse.py",
+    "scripts/tests/test_upstream_intake_preview.py",
     "scripts/tests/test_wp_github_link.py",
     "scripts/translate.py",
+    "scripts/upstream-intake-preview.py",
     "scripts/verify-template-integrity.sh"
   ],
   "deprecated_files": [
