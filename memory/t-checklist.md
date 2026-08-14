@@ -40,7 +40,7 @@ schema_version: 1
 | T8 | Backup memory/ + CLAUDE.md → `<strategy-repo>/exocortex/` (governance-репо пользователя) | агент | день | экзокортекс отстаёт, recovery ломается |
 | T9 | Архивация старых DayPlan'ов → archive/day-plans/ | агент | день (auto-chore) | current/ забит устаревшими DayPlan |
 | T10 | Downstream sync (update.sh — reindex + pack-project + template) | агент | день при изменениях Pack | MCP-сервер отдаёт устаревший Pack, template-sync ломается |
-| T11 | Связь РП ↔ GitHub Issues (Linear доставляет штатно) | агент | день | missing/duplicate/stale/wrong-repo |
+| T11 | Linear sync (статусы linear ↔ git) | агент | день | Linear отражает не то, что в git |
 | T12 | Governance batch: WeekPlan/DayPlan/WP-REGISTRY/open-sessions.log обновлены | агент | день | план-факт расходится |
 | T13 | Drift top-3 critical в Day Report (`iwe-drift.sh --top 3 --critical`) | агент (S-вставка) | день | drift копится невидимо |
 | T14 | Day Open файл завтра готов (pre-populate календарь, заметки) | агент | конец дня | Day Open утром стартует с нуля |

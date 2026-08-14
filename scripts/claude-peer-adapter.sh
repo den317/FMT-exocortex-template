@@ -92,11 +92,21 @@ done
 # perl alarm 300: 5-minute hard timeout, same as kimi-peer-adapter.sh.
 # On timeout: SIGALRM → exit 142 → caller sees exit≠0 + empty file → reports to pilot.
 #
-# One turn is insufficient even for a text-only request: Claude can use it to
-# formulate an internal plan, then exits with "Reached max turns (1)" before
-# emitting the answer. Two turns preserve the no-tools boundary but guarantee
-# one turn remains for delivery of the response (WP-7 Ф65).
-CLAUDE_PEER_MAX_TURNS="${CLAUDE_PEER_MAX_TURNS:-2}"
+# WP-7 Ф64 (12.08, six independent reproductions across sessions, root-caused
+# live in WP-524 Ф3): the old default of 2 assumed one turn for internal
+# planning + one for delivery is always enough — DISPROVEN by direct bisection
+# against the exact failing prompt from sessions/2026-08/12/.../wp520-witness-
+# race-index-null/00-writer.md (recovered via git history, original session
+# files since archived): --max-turns 2 → "Reached max turns (2)"; --max-turns
+# 15 → still "Reached max turns (15)" after 77s; --max-turns 25 → succeeds in
+# ~54s with a full, on-topic multi-part answer. Also ruled out by the same
+# bisection: --allowedTools "" is NOT the cause (removing it reproduces the
+# identical failure) — the original "empty toolset confuses the model"
+# hypothesis (WP-7 Ф64 "Гипотеза") does not hold. The real bottleneck is turn
+# budget on multi-part diagnostic/structured prompts, not tool access or
+# content policy. Trivial prompts still exit in 1-2 turns (verified earlier in
+# Ф64) — raising the ceiling costs nothing on the easy path.
+CLAUDE_PEER_MAX_TURNS="${CLAUDE_PEER_MAX_TURNS:-40}"
 case "$CLAUDE_PEER_MAX_TURNS" in
   ''|*[!0-9]*)
     echo "ERROR: CLAUDE_PEER_MAX_TURNS must be a positive integer." >&2

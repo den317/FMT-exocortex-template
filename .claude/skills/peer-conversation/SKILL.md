@@ -824,9 +824,14 @@ DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
 
 1. Показать пилоту краткий итог (2-3 строки, что сделали в этой пир-сессии — не пересказ turn-файлов, суть).
 2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно вопрос Ф18, `CONCEPT-night-cycle.md §18`).
-3. Записать ответ в дневной ledger:
+3. Записать ответ в дневной ledger (issue #409: скрипт есть не на каждой установке — не блокировать при отсутствии):
    ```bash
-   bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ledger-append.sh" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   LEDGER_SCRIPT="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ledger-append.sh"
+   if [ -f "$LEDGER_SCRIPT" ]; then
+     bash "$LEDGER_SCRIPT" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   else
+     echo "ledger-append.sh недоступен на этой установке — рефлексия не записана в дневной ledger"
+   fi
    ```
 4. Сказать пилоту: «Ты свободен, дальше закрываю сессию сам» — и продолжить Шаг 4 (финализация: report.md, commit, session-guard close) без дальнейшего участия пилота.
 
