@@ -77,7 +77,7 @@ Day Close = протокол. Исполнять ТОЛЬКО пошагово �
 Просмотреть «Уроки» в MEMORY.md. Не применялся >1 нед и есть в `lessons_*.md` → удалить. Новый урок → строка в MEMORY.md + `lessons_*.md`. Цель: ≤8 уроков.
 
 ### 5. Автоматические шаги
-`"$IWE_SCRIPTS/day-close.sh"` — аудит связи РП ↔ GitHub Issues, downstream sync (update.sh), backup (memory/ + CLAUDE.md).
+`"$IWE_SCRIPTS/day-close.sh"` — Linear sync, downstream sync (update.sh), backup (memory/ + CLAUDE.md).
 
 ### 6. Мультипликатор IWE
 > Условный шаг: если `params.yaml → multiplier_enabled: false` → пропустить и
@@ -146,7 +146,7 @@ Sub-agent Haiku R23 (context isolation): передать чеклист + че�
 - [ ] open-sessions.log: строки закрытых сессий удалены
 - [ ] Captures за день применены (все Quick Close → KE пройден)
 - [ ] Синхронизация downstream: `update.sh` выполнен
-- [ ] Связь РП ↔ GitHub Issues проверена: нет missing/duplicate/stale/wrong-repo; Linear получает изменения штатной GitHub-интеграцией
+- [ ] Linear sync: статусы соответствуют git. Кол-во active РП в REGISTRY = active issues в Linear
 - [ ] Repo CLAUDE.md: feat-коммиты → новые правила?
 - [ ] DayPlan сегодня → `archive/day-plans/` (старые DayPlan'ы в `current/` тоже) — **DayPlan сегодня N/A на strategy_day** (шаг 0в), старые — архивировать в любом случае
 - [ ] WP context: done → `mv inbox/ → archive/wp-contexts/`

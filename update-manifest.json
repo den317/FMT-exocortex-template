@@ -61,7 +61,7 @@
     },
     {
       "path": ".claude/hooks/destructive-guard.sh",
-      "sha256": "082102b3fa6ebf3cae4a968f6556f4fc0b03c80edf0351ea8b57e540752e8a19"
+      "sha256": "3fd94e91db31347513df92e1070fe09a48fce4b8db0b321f7bc67e3ffcc1829c"
     },
     {
       "path": ".claude/hooks/dry-run-gate.sh",
@@ -93,7 +93,7 @@
     },
     {
       "path": ".claude/hooks/memory-exocortex-sync.sh",
-      "sha256": "db77c45f58aa5d783f4a337c505665060eed474d0ccdaa048484ba4050610a0d"
+      "sha256": "871c87683a683c98d3df253533fa4cfe9eb665a722d711d07dc8a614846ac1ae"
     },
     {
       "path": ".claude/hooks/pack-creator-spf-guard.sh",
@@ -245,7 +245,7 @@
     },
     {
       "path": ".claude/scripts/memory-drift-scan.py",
-      "sha256": "fbe797ff59dd6260f8c3187ee3902cab37d35a37a70aff494996b4cbaff734bb"
+      "sha256": "e1a484a888fc81be5ffa8acb3d2d375e8bec7794385982b11d4d71f24a0d69b8"
     },
     {
       "path": ".claude/scripts/wp-sync-bundle.sh",
@@ -253,7 +253,7 @@
     },
     {
       "path": ".claude/settings.json",
-      "sha256": "6a2ea7fd90e2451e0662ace6b7e76041fd9be13b047c82c5dfcbd452a3ad1e6b"
+      "sha256": "6b813603cd749920206338e43d0fccb4b850f26e1f43ec7f9fd126dfdd8b51be"
     },
     {
       "path": ".claude/skills-catalog.yaml",
@@ -269,7 +269,7 @@
     },
     {
       "path": ".claude/skills/agent-fault/SKILL.md",
-      "sha256": "900306a3b85029aa3b740ec2278da693176a691dde548733ffbabb09dc193e73"
+      "sha256": "657db63775afc4ba41b3e72d4d2d1ad549142dde1522f1eb42ecd61b6fd67ebf"
     },
     {
       "path": ".claude/skills/apply-captures/SKILL.md",
@@ -305,7 +305,7 @@
     },
     {
       "path": ".claude/skills/check-secret/SKILL.md",
-      "sha256": "c2ba83003aab46ead77d33b1d84f21ca8c690a7df92b4907494fd321df2162e6"
+      "sha256": "1a614d7a6fc460c50e6c9aa1573c1ef8bc0daa3938ab1a99c8d575f1bfa00164"
     },
     {
       "path": ".claude/skills/check-secret/check.sh",
@@ -353,7 +353,7 @@
     },
     {
       "path": ".claude/skills/extend/SKILL.md",
-      "sha256": "ee882b3b180b8721727fa84cf86138ca5114c787d8bd83449db499e9424440ff"
+      "sha256": "d5f4cbc7a7883f1f03a33f5fd982c3941527de2359a4784fa60e2ddd168ac912"
     },
     {
       "path": ".claude/skills/fpf/SKILL.md",
@@ -385,7 +385,7 @@
     },
     {
       "path": ".claude/skills/kimi-peer-writer/SKILL.md",
-      "sha256": "15ef3aee2dc24d5798b20ffb1c30b36973eac52a5ec3b19bee33ed6b1c2244d3"
+      "sha256": "50961a5c7ef49101dc594bfeb9a35164e1aef4468dfc9e3e48067b98c645bbb5"
     },
     {
       "path": ".claude/skills/lesson-close/SKILL.md",
@@ -421,7 +421,7 @@
     },
     {
       "path": ".claude/skills/peer-conversation/SKILL.md",
-      "sha256": "9ec0c4ff52928c42dadc690373fb38ba70a1bf44addf20a669c270ffd9c7bd0a"
+      "sha256": "b3d61c6491905c28a5f2a0eea0a8efd4960593a9941860711d1c3c6beea1090c"
     },
     {
       "path": ".claude/skills/personal-guide-render/SKILL.md",
@@ -561,7 +561,7 @@
     },
     {
       "path": ".claude/skills/week-close-pilot/SKILL.md",
-      "sha256": "e9accf6bfe8def5cb87fb811b3370ff9bd236b6ec7bf3b6c84b9293338a893cc"
+      "sha256": "5b0ff7a1f2d462722aa0dfb006c82842fe8c87da5c12f7600d55854784d86757"
     },
     {
       "path": ".claude/skills/week-close/SKILL.md",
@@ -573,7 +573,7 @@
     },
     {
       "path": ".claude/skills/wp-new/SKILL.md",
-      "sha256": "06edf17ec6a251ef4b3272dfd63a7497856d1b3f7510e94b46cf3c7866618b76"
+      "sha256": "02d6265b087f452adf7c3a71c4122caec1f6f833de84f7b062fc3e61c021639a"
     },
     {
       "path": ".claude/styles/p05-core.md",
@@ -585,7 +585,7 @@
     },
     {
       "path": ".claude/sync-manifest.yaml",
-      "sha256": "5181fabdf723fbc7ba0afc0901197c18f74d64c7067b0412b02c8cfb1757908b"
+      "sha256": "d4d1fddfce286cb7db3300b421a1bc0552210dd8e9356aafb7e3b84765a20cc7"
     },
     {
       "path": ".claude/templates/drr-template.md",
@@ -609,7 +609,7 @@
     },
     {
       "path": ".github/workflows/notify-update.yml",
-      "sha256": "672316f4226d43912c77b9ad2b2a66c90e987f6939688e83a7bfd40859cb797f"
+      "sha256": "7a31dd64679fe304d06ad116ccfb9b2765a0a6271d4211deab854749e792b436"
     },
     {
       "path": ".github/workflows/post-release-audit.yml",
@@ -633,7 +633,7 @@
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "add9b00cceff0d11fc89ef4cb2e7171cabfc1259a1cf3b532e90f531970b85a6"
+      "sha256": "e823b97330e35bc416ba4bcb6efce6b180246b7eda0e03700de246a0ee84c97f"
     },
     {
       "path": "CLAUDE.md",
@@ -1605,7 +1605,7 @@
     },
     {
       "path": "roles/strategist/prompts/strategy-session-weekly/steps/08-confirm.md",
-      "sha256": "036d1e1fb2f0c762c1b5752c4d101dc382a5962a3d6df62b252cb49e21ca9ec9"
+      "sha256": "18fd3f447bd0d165d8226498bae14732ec6d6f9db5415c4543ce1dc06d6f08fd"
     },
     {
       "path": "roles/strategist/prompts/strategy-session.md",
@@ -1801,11 +1801,15 @@
     },
     {
       "path": "scripts/build-active-wp.py",
-      "sha256": "a0c8516167c5aa8b67fcb8eb9d460898940c3d9d616e9b261420973b08d4d592"
+      "sha256": "ab896aa1b981955bc42daa507abc44da084a0d0328a49dfc73c2c4d19341d974"
     },
     {
       "path": "scripts/changelog-append.sh",
-      "sha256": "9b24d66af9bda65bd24e201074183b6333c597558f80864a9bf3bc6f259df14d"
+      "sha256": "c559e833e45c8c68e0386971f5518e05c943992d40c4b7cf5a3cdf0b3294a1ac"
+    },
+    {
+      "path": "scripts/changelog-diff-lines.sh",
+      "sha256": "92d55dc631f6c763edfe3be9312ffc5a7ea6540889abddb5c16dda2b802b4d86"
     },
     {
       "path": "scripts/changelog-flush.sh",
@@ -1857,15 +1861,15 @@
     },
     {
       "path": "scripts/claude-peer-adapter.sh",
-      "sha256": "d55d5920c0aec585adf34a55af2720220356871f7eae5c8e6a2c7c2f6b5eb080"
+      "sha256": "f5b354a8b330ef3601636c8f6e0791d7a471962001d27090738f8902afece214"
     },
     {
       "path": "scripts/close-wp.sh",
-      "sha256": "448b1a68971b4ef9a69e44a38384d745bca38cf72cce94afed700df2bf15fc48"
+      "sha256": "57ac198f937530a9a692cf9baf98729006ae5576e628d2c19323dce6ef11dcac"
     },
     {
       "path": "scripts/codex-peer-adapter.sh",
-      "sha256": "c735ed3ffba03d20ea14e388625a89c88be357b0618c4b276f512e2a38daf169"
+      "sha256": "69af213809d3c142d1f65c17f9614143426162cccddc8be05a346b554dd1e19d"
     },
     {
       "path": "scripts/config/pipeline-security-whitelist.yaml",
@@ -1921,7 +1925,7 @@
     },
     {
       "path": "scripts/day-open-pipeline.sh",
-      "sha256": "88d5480323bdf73935aed1e2a0726d3e384632948f19f148b3be35304efe424a"
+      "sha256": "efdc97d8e09d925267c0f33ff86973f31b28be9c5f6419699abc786d36a7376c"
     },
     {
       "path": "scripts/day-open-preflight.sh",
@@ -1929,7 +1933,7 @@
     },
     {
       "path": "scripts/day-open-scaffold.sh",
-      "sha256": "b18329a4284f70bacce1b34d22d2cc381ae0bccfdafa35e1a8aeb2b40dbc46fb"
+      "sha256": "830ac941393c1029bd9593476928cc9c296d95b0cd84565cec442730a375619b"
     },
     {
       "path": "scripts/day-open-smoke-extended.sh",
@@ -2021,7 +2025,7 @@
     },
     {
       "path": "scripts/iwe-drift-helpers/check-status-legend.sh",
-      "sha256": "8f39d9857944ae166eb08c813b665f3b51404f2d1d8663566a4be5f37858d21a"
+      "sha256": "4b025b18accb86c1bba5cf6d9284e6ccfe4ca58b32881cb5979b7d49260078f6"
     },
     {
       "path": "scripts/iwe-drift.sh",
@@ -2296,12 +2300,16 @@
       "sha256": "99c99c821223e70a8a0b1cb89ce9a72f2bd1e5eebd011c2f42eadde056125491"
     },
     {
+      "path": "scripts/tests/test_issues_413_418.py",
+      "sha256": "deccd502f68f06f7d95c8382e5daf25bb0ce62bd5df2ac3e9729f91c4a7f7d4e"
+    },
+    {
       "path": "scripts/tests/test_session_guard_hypothesis_gate.sh",
       "sha256": "45d241902da232578652c576f3240088936fb165a4ada29917089e802df61edb"
     },
     {
       "path": "scripts/tests/test_update_install_path_guard.sh",
-      "sha256": "e86c97daa4bcaa224b1c1686b6c291f5a670c63dc94c5fde83c531fa6004d4ca"
+      "sha256": "d8e59a1836aaea9642f8a380c2dad3de2ae29104c1db337077eeb92b59f966d6"
     },
     {
       "path": "scripts/tests/test_upgrade_worktree_cleanup.sh",
@@ -2393,7 +2401,7 @@
     },
     {
       "path": "update.sh",
-      "sha256": "fcd35d0d72afe32ec6b44c9c04bdd124e58c522ba80dedcc00e0de6fe8e274f5"
+      "sha256": "27ed2bf7dc8722f1d43932241f5b7b44c7bd70494a72e469b49768aaf96433bf"
     }
   ],
   "excluded_paths": [
@@ -2418,7 +2426,6 @@
     "scripts/session-dispatcher-tsekh.py",
     "scripts/tests/conftest.py",
     "scripts/tests/test_agent_dashboard.py",
-    "scripts/tests/test_build_active_wp_registry_columns.py",
     "scripts/tests/test_copy_to_aisystant.py",
     "scripts/tests/test_create_wp_number_padding.py",
     "scripts/tests/test_create_wp_weekplan_writer.py",
