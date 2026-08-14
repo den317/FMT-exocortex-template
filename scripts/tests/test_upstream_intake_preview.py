@@ -44,6 +44,16 @@ def test_read_only_three_way_report_and_blockers(tmp_path: Path) -> None:
     run("git", "checkout", "-q", base, cwd=den317)
     (den317 / "tracked.txt").write_text("den317\n", encoding="utf-8")
     (den317 / "update.sh").write_text("base\n", encoding="utf-8")
+    (den317 / "update-manifest.json").write_text(
+        json.dumps(
+            {
+                "files": [{"path": "tracked.txt"}],
+                "excluded_paths": ["update.sh"],
+                "upstream_provenance": {"accepted_tag": base, "accepted_sha": base},
+            }
+        ),
+        encoding="utf-8",
+    )
     commit(den317, "den317")
     before = run("git", "rev-parse", "HEAD", cwd=den317).stdout.strip()
 
@@ -52,8 +62,6 @@ def test_read_only_three_way_report_and_blockers(tmp_path: Path) -> None:
         str(SCRIPT),
         "--upstream",
         str(upstream),
-        "--base",
-        base,
         "--target",
         target,
         "--den317",
@@ -83,7 +91,50 @@ def test_dirty_den317_is_rejected(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     base = commit(upstream, "base")
-    (upstream / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    den317 = tmp_path / "den317"
+    run("git", "clone", "-q", str(upstream), str(den317))
+    run("git", "config", "user.name", "Test", cwd=den317)
+    run("git", "config", "user.email", "test@example.invalid", cwd=den317)
+    (den317 / "update-manifest.json").write_text(
+        json.dumps(
+            {
+                "files": [{"path": "tracked.txt"}],
+                "excluded_paths": ["update.sh"],
+                "upstream_provenance": {"accepted_tag": base, "accepted_sha": base},
+            }
+        ),
+        encoding="utf-8",
+    )
+    commit(den317, "provenance")
+    (den317 / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = run(
+        "python3",
+        str(SCRIPT),
+        "--upstream",
+        str(upstream),
+        "--target",
+        base,
+        "--den317",
+        str(den317),
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "working tree is dirty" in result.stderr
+
+
+def test_conflicting_manual_base_is_rejected(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    init_repo(upstream)
+    (upstream / "tracked.txt").write_text("base\n", encoding="utf-8")
+    (upstream / "update.sh").write_text("base\n", encoding="utf-8")
+    (upstream / "update-manifest.json").write_text("{}\n", encoding="utf-8")
+    base = commit(upstream, "base")
+    (upstream / "update-manifest.json").write_text(
+        json.dumps({"upstream_provenance": {"accepted_tag": base, "accepted_sha": base}}),
+        encoding="utf-8",
+    )
+    commit(upstream, "provenance")
 
     result = run(
         "python3",
@@ -91,7 +142,7 @@ def test_dirty_den317_is_rejected(tmp_path: Path) -> None:
         "--upstream",
         str(upstream),
         "--base",
-        base,
+        "0" * 40,
         "--target",
         base,
         "--den317",
@@ -99,4 +150,4 @@ def test_dirty_den317_is_rejected(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 2
-    assert "working tree is dirty" in result.stderr
+    assert "differs from attested base" in result.stderr
