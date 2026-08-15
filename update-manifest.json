@@ -2363,7 +2363,7 @@
     },
     {
       "path": "scripts/wp-github-link.py",
-      "sha256": "f0fd7e56815105f0be0b4a97abe5ff1a3aae7bfb14571d49aa7bcf206db9f86a"
+      "sha256": "2eb73fe215b7236ba9605835f9a2de888491ae792a13597f31f83a72e8f32c68"
     },
     {
       "path": "scripts/wp-list.py",

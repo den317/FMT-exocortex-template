@@ -471,6 +471,34 @@ def issue_repo(url: str) -> str:
     return match.group(1)
 
 
+def issue_number(url: str) -> int:
+    match = re.match(r"^https://github\.com/[^/]+/[^/]+/issues/(\d+)$", url)
+    if not match:
+        raise LinkError(f"invalid GitHub issue URL in context: {url}")
+    return int(match.group(1))
+
+
+def issue_by_identity(url: str, repo: str) -> dict[str, object]:
+    """Load a linked issue by immutable repository+number, never by title."""
+    number = issue_number(url)
+    raw = gh_json(
+        [
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            repo,
+            "--json",
+            "number,title,state,url",
+        ]
+    )
+    if not isinstance(raw, dict):
+        raise LinkError("GitHub issue view returned a non-object response")
+    if int(raw.get("number", -1)) != number or str(raw.get("url", "")) != url:
+        raise LinkError(f"GitHub returned wrong identity for {url}")
+    return raw
+
+
 def create_issue(context: Context, repo: str) -> str:
     repo = validate_repo(repo)
     if context.github_repo and context.github_repo != repo:
@@ -566,12 +594,17 @@ def check_context(context: Context, repo: str) -> tuple[str, str]:
             "WRONG_REPO",
             f"WP-{context.wp}: context URL points to {issue_repo(context.github_issue)}, expected {repo}",
         )
-    matches = matching_issues(repo, context.wp)
-    if len(matches) > 1:
-        return "DUPLICATE", f"WP-{context.wp}: {len(matches)} issues in {repo}"
-    if not matches:
-        return "MISSING", f"WP-{context.wp}: no issue in {repo}"
-    issue = matches[0]
+    if context.github_issue:
+        issue = issue_by_identity(context.github_issue, repo)
+    else:
+        # Legacy WP-first contexts without a stored identity can only be
+        # discovered by their machine-readable WP marker in the title.
+        matches = matching_issues(repo, context.wp)
+        if len(matches) > 1:
+            return "DUPLICATE", f"WP-{context.wp}: {len(matches)} issues in {repo}"
+        if not matches:
+            return "MISSING", f"WP-{context.wp}: no issue in {repo}"
+        issue = matches[0]
     active = context.status not in {"done", "closed", "cancelled", "archived"}
     issue_open = issue.get("state") == "OPEN"
     if active != issue_open:
