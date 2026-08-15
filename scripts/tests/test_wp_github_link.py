@@ -133,6 +133,10 @@ class LinkTests(unittest.TestCase):
             self.assertIn("closed_date: 2026-08-15", text)
             self.assertIn("closure_enrichment: pending", text)
             self.assertIn("GitHub Issue #21 закрыта", text)
+            self.assertIn("- [x] Выполнить работу, описанную в GitHub Issue #21.", text)
+            self.assertIn(
+                "**Следующий шаг:** Работа закрыта по связанной GitHub Issue.", text
+            )
             self.assertIn(
                 "| ✅ |",
                 (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
@@ -172,6 +176,22 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(registry.read_bytes(), registry_before)
             self.assertEqual(active.read_bytes(), active_before)
             self.assertFalse(governance.joinpath("archive/wp-contexts/WP-035").exists())
+
+    def test_auto_close_does_not_claim_arbitrary_checklist_items_are_done(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            MODULE.adopt_issue(issue(21), governance)
+            card = governance / "inbox" / "WP-035" / "WP-035.md"
+            card.write_text(
+                card.read_text(encoding="utf-8") + "\n- [ ] Проверить вручную\n",
+                encoding="utf-8",
+            )
+            context = MODULE.read_frontmatter(card)
+            MODULE.auto_close_context(context, issue(21, state="CLOSED"), governance)
+            archived = governance / "archive" / "wp-contexts" / "WP-035" / "WP-035.md"
+            text = archived.read_text(encoding="utf-8")
+            self.assertIn("- [x] Выполнить работу, описанную в GitHub Issue #21.", text)
+            self.assertIn("- [ ] Проверить вручную", text)
 
     def test_pre_cutover_issue_is_not_listed(self) -> None:
         config = MODULE.AdoptionConfig(("den317/DS-strategy",), "2026-08-15T10:00:00Z")
