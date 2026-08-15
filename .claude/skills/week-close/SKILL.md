@@ -36,6 +36,10 @@ Week Close = протокол. Исполнять ТОЛЬКО пошагово 
 
 ## Algorithm
 
+### -1. GitHub → IWE reconciliation
+До reasoning выполнить `python3 "$IWE_SCRIPTS/wp-github-link.py" reconcile --governance "$IWE_WORKSPACE/$IWE_GOVERNANCE_REPO" --params "$IWE_WORKSPACE/params.yaml"`.
+Новые WP кратко перечислить. `CONFLICT`, `UNAVAILABLE` или ненулевой код явно сообщить и не заявлять успешную синхронизацию недели.
+
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh week-close before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/week-close.before.md` И `extensions/week-close.before.<suffix>.md`.
 

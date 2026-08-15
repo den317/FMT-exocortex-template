@@ -27,6 +27,10 @@ Day Close = протокол. Исполнять ТОЛЬКО пошагово �
 
 ## Алгоритм
 
+### -1. GitHub → IWE reconciliation
+До reasoning выполнить `python3 "$IWE_SCRIPTS/wp-github-link.py" reconcile --governance "$IWE_WORKSPACE/$IWE_GOVERNANCE_REPO" --params "$IWE_WORKSPACE/params.yaml"`.
+Новые WP кратко перечислить. `CONFLICT`, `UNAVAILABLE` или ненулевой код явно сообщить и не заявлять успешную синхронизацию.
+
 ### 0. Extensions (before)
 `bash .claude/scripts/load-extensions.sh day-close before` → exit 0: `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Поддерживает `extensions/day-close.before.md` И `extensions/day-close.before.<suffix>.md`.
 
