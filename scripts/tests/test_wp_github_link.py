@@ -28,26 +28,221 @@ def context_file(directory: str, *, status: str = "pending", url: str = "") -> P
     return path
 
 
+def governance_fixture(directory: str) -> Path:
+    governance = Path(directory) / "DS-strategy"
+    (governance / "docs").mkdir(parents=True)
+    (governance / "current").mkdir()
+    (governance / "inbox" / "WP-34").mkdir(parents=True)
+    (governance / "archive" / "wp-contexts").mkdir(parents=True)
+    (governance / "docs" / "WP-REGISTRY.md").write_text(
+        "| # | P | Название | Ст | Репо | Бюджет |\n|---|---|---|---|---|---|\n| 34 | P3 | **Связь** | ⏳ | DS-strategy | 1h |\n",
+        encoding="utf-8",
+    )
+    context_file(str(governance / "inbox" / "WP-34"))
+    (governance / "current" / "active-wp.md").write_text("before\n", encoding="utf-8")
+    return governance
+
+
+def issue(
+    number: int, *, state: str = "OPEN", created: str = "2026-08-15T12:00:00Z"
+) -> MODULE.Issue:
+    return MODULE.Issue(
+        number,
+        f"Issue {number}",
+        f"Body {number}",
+        state,
+        f"https://github.com/den317/DS-strategy/issues/{number}",
+        created,
+        "den317/DS-strategy",
+    )
+
+
 class LinkTests(unittest.TestCase):
+    def test_adopt_new_issue_creates_one_wp_without_github_create(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            result = MODULE.adopt_issue(issue(21), governance)
+            self.assertEqual(result["status"], "CREATED")
+            context = governance / "inbox" / "WP-035" / "WP-035.md"
+            self.assertIn(
+                'github_issue: "https://github.com/den317/DS-strategy/issues/21"',
+                context.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| 35 |",
+                (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| 35 | — | **Issue 21** |",
+                (governance / "current" / "active-wp.md").read_text(encoding="utf-8"),
+            )
+
+    def test_repeat_adopt_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            with patch.object(MODULE, "rebuild_active"):
+                first = MODULE.adopt_issue(issue(21), governance)
+                second = MODULE.adopt_issue(issue(21), governance)
+            self.assertEqual(first["wp"], second["wp"])
+            self.assertEqual(second["status"], "ALREADY_LINKED")
+
+    def test_reconcile_multiple_issues_allocates_unique_wps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            config = MODULE.AdoptionConfig(
+                ("den317/DS-strategy",), "2026-08-15T10:00:00Z"
+            )
+            with (
+                patch.object(
+                    MODULE,
+                    "list_adoption_issues",
+                    return_value=[issue(21), issue(22), issue(23)],
+                ),
+                patch.object(MODULE, "rebuild_active"),
+            ):
+                report = MODULE.reconcile(governance, config)
+            self.assertEqual(
+                [item["wp"] for item in report["created"]],
+                ["WP-035", "WP-036", "WP-037"],
+            )
+
+    def test_closed_issue_is_adopted_as_closed_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            with patch.object(MODULE, "rebuild_active"):
+                MODULE.adopt_issue(issue(24, state="CLOSED"), governance)
+            context = governance / "archive" / "wp-contexts" / "WP-035.md"
+            self.assertIn("status: done", context.read_text(encoding="utf-8"))
+            self.assertIn(
+                "| ✅ |",
+                (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
+            )
+
+    def test_pre_cutover_issue_is_not_listed(self) -> None:
+        config = MODULE.AdoptionConfig(("den317/DS-strategy",), "2026-08-15T10:00:00Z")
+        raw = [
+            {
+                "number": 20,
+                "title": "old",
+                "body": "",
+                "state": "OPEN",
+                "url": "https://github.com/den317/DS-strategy/issues/20",
+                "createdAt": "2026-08-15T09:59:59Z",
+            }
+        ]
+        with patch.object(MODULE, "gh_json", return_value=raw):
+            self.assertEqual(MODULE.list_adoption_issues(config), [])
+
+    def test_duplicate_local_links_are_conflict_without_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            url = issue(21).url
+            context_file(str(governance / "inbox" / "WP-34"), url=url)
+            second = governance / "archive" / "wp-contexts" / "WP-33.md"
+            second.write_text(
+                f'---\nwp: 33\ntitle: "duplicate"\nstatus: done\ngithub_issue: "{url}"\ngithub_repo: "den317/DS-strategy"\n---\n',
+                encoding="utf-8",
+            )
+            registry_before = (governance / "docs" / "WP-REGISTRY.md").read_text(
+                encoding="utf-8"
+            )
+            config = MODULE.AdoptionConfig(
+                ("den317/DS-strategy",), "2026-08-15T10:00:00Z"
+            )
+            with patch.object(MODULE, "list_adoption_issues", return_value=[issue(21)]):
+                report = MODULE.reconcile(governance, config)
+            self.assertEqual(report["status"], "CONFLICT")
+            self.assertEqual(
+                (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
+                registry_before,
+            )
+
+    def test_github_unavailable_happens_before_local_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            registry = governance / "docs" / "WP-REGISTRY.md"
+            before = registry.read_text(encoding="utf-8")
+            config = MODULE.AdoptionConfig(
+                ("den317/DS-strategy",), "2026-08-15T10:00:00Z"
+            )
+            with patch.object(
+                MODULE,
+                "list_adoption_issues",
+                side_effect=MODULE.LinkError("GitHub unavailable"),
+            ):
+                with self.assertRaises(MODULE.LinkError):
+                    MODULE.reconcile(governance, config)
+            self.assertEqual(registry.read_text(encoding="utf-8"), before)
+
+    def test_audit_reports_post_cutover_issue_without_wp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            config = MODULE.AdoptionConfig(
+                ("den317/DS-strategy",), "2026-08-15T10:00:00Z"
+            )
+            with patch.object(MODULE, "list_adoption_issues", return_value=[issue(21)]):
+                report = MODULE.reconcile(governance, config, audit_only=True)
+            self.assertEqual(report["status"], "DRIFT")
+            self.assertEqual(report["missing"], [issue(21).url])
+
+    def test_empty_adoption_scope_is_cleanly_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            params = Path(directory) / "params.yaml"
+            params.write_text(
+                'github_wp_adoption_repositories: []\ngithub_wp_adopt_from: ""\n',
+                encoding="utf-8",
+            )
+            config = MODULE.read_adoption_config(params)
+            report = MODULE.reconcile(Path(directory), config)
+            self.assertEqual(report, {"status": "OK", "disabled": True, "created": []})
+
+    def test_all_rituals_run_reconciliation_before_reasoning(self) -> None:
+        template = SCRIPT.parents[1]
+        ritual_paths = [
+            template / ".claude/skills/day-open/SKILL.md",
+            template / ".claude/skills/day-close/SKILL.md",
+            template / ".claude/skills/week-close/SKILL.md",
+            template / ".claude/skills/strategy-session/SKILL.md",
+        ]
+        for path in ritual_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn('wp-github-link.py" reconcile', text, path)
+            self.assertLess(
+                text.index("reconcile --governance"),
+                text.index("Extensions (before)"),
+                path,
+            )
+
     def test_create_reuses_exact_wp_issue_and_writes_url(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = context_file(directory)
-            issue = {"number": 15, "title": "WP-34 Связь", "state": "OPEN", "url": "https://github.com/den317/DS-strategy/issues/15"}
+            issue = {
+                "number": 15,
+                "title": "WP-34 Связь",
+                "state": "OPEN",
+                "url": "https://github.com/den317/DS-strategy/issues/15",
+            }
             with patch.object(MODULE, "matching_issues", return_value=[issue]):
-                url = MODULE.create_issue(MODULE.read_frontmatter(path), "den317/DS-strategy")
+                url = MODULE.create_issue(
+                    MODULE.read_frontmatter(path), "den317/DS-strategy"
+                )
             self.assertEqual(url, issue["url"])
             self.assertIn(f'github_issue: "{url}"', path.read_text(encoding="utf-8"))
 
     def test_create_blocks_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             context = MODULE.read_frontmatter(context_file(directory))
-            with patch.object(MODULE, "matching_issues", return_value=[{"url": "a"}, {"url": "b"}]):
+            with patch.object(
+                MODULE, "matching_issues", return_value=[{"url": "a"}, {"url": "b"}]
+            ):
                 with self.assertRaisesRegex(MODULE.LinkError, "DUPLICATE"):
                     MODULE.create_issue(context, "den317/DS-strategy")
 
     def test_create_blocks_existing_wrong_repo(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = context_file(directory, url="https://github.com/den317/IWE/issues/29")
+            path = context_file(
+                directory, url="https://github.com/den317/IWE/issues/29"
+            )
             context = MODULE.read_frontmatter(path)
             with self.assertRaisesRegex(MODULE.LinkError, "WRONG_REPO"):
                 MODULE.create_issue(context, "den317/DS-strategy")
@@ -55,16 +250,26 @@ class LinkTests(unittest.TestCase):
     def test_check_detects_stale_active_wp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             context = MODULE.read_frontmatter(context_file(directory))
-            issue = {"title": "WP-34 Связь", "state": "CLOSED", "url": "https://github.com/den317/DS-strategy/issues/15"}
+            issue = {
+                "title": "WP-34 Связь",
+                "state": "CLOSED",
+                "url": "https://github.com/den317/DS-strategy/issues/15",
+            }
             with patch.object(MODULE, "matching_issues", return_value=[issue]):
                 status, _ = MODULE.check_context(context, "den317/DS-strategy")
             self.assertEqual(status, "STALE")
 
     def test_check_detects_wrong_repo(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = context_file(directory, url="https://github.com/den317/IWE/issues/29")
+            path = context_file(
+                directory, url="https://github.com/den317/IWE/issues/29"
+            )
             context = MODULE.read_frontmatter(path)
-            issue = {"title": "WP-34 Связь", "state": "OPEN", "url": "https://github.com/den317/DS-strategy/issues/15"}
+            issue = {
+                "title": "WP-34 Связь",
+                "state": "OPEN",
+                "url": "https://github.com/den317/DS-strategy/issues/15",
+            }
             with patch.object(MODULE, "matching_issues", return_value=[issue]):
                 status, _ = MODULE.check_context(context, "den317/DS-strategy")
             self.assertEqual(status, "WRONG_REPO")
@@ -82,7 +287,8 @@ class LinkTests(unittest.TestCase):
             archive = governance / "archive" / "wp-contexts" / "WP-33"
             archive.mkdir(parents=True)
             (archive / "WP-33.md").write_text(
-                '---\nwp: 33\ntitle: "Старый"\nstatus: done\n---\n# WP-33\n', encoding="utf-8"
+                '---\nwp: 33\ntitle: "Старый"\nstatus: done\n---\n# WP-33\n',
+                encoding="utf-8",
             )
             with patch.object(MODULE, "check_context", return_value=("OK", "linked")):
                 results, pre_cutover = MODULE.audit_contexts(governance)
@@ -100,15 +306,29 @@ class LinkTests(unittest.TestCase):
             context = MODULE.read_frontmatter(context_file(directory))
             created = "https://github.com/den317/DS-strategy/issues/16"
             issues = [
-                {"number": 15, "title": "WP-34 Связь", "state": "OPEN", "url": "https://github.com/den317/DS-strategy/issues/15"},
+                {
+                    "number": 15,
+                    "title": "WP-34 Связь",
+                    "state": "OPEN",
+                    "url": "https://github.com/den317/DS-strategy/issues/15",
+                },
                 {"number": 16, "title": "WP-34 Связь", "state": "OPEN", "url": created},
             ]
-            create_result = subprocess.CompletedProcess([], 0, stdout=created + "\n", stderr="")
-            close_failure = subprocess.CompletedProcess([], 1, stdout="", stderr="denied")
-            with patch.object(MODULE, "matching_issues", side_effect=[[], issues]), patch.object(
-                MODULE.subprocess, "run", side_effect=[create_result, close_failure]
+            create_result = subprocess.CompletedProcess(
+                [], 0, stdout=created + "\n", stderr=""
+            )
+            close_failure = subprocess.CompletedProcess(
+                [], 1, stdout="", stderr="denied"
+            )
+            with (
+                patch.object(MODULE, "matching_issues", side_effect=[[], issues]),
+                patch.object(
+                    MODULE.subprocess, "run", side_effect=[create_result, close_failure]
+                ),
             ):
-                with self.assertRaisesRegex(MODULE.LinkError, "reconciliation could not close"):
+                with self.assertRaisesRegex(
+                    MODULE.LinkError, "reconciliation could not close"
+                ):
                     MODULE.create_issue(context, "den317/DS-strategy")
 
 

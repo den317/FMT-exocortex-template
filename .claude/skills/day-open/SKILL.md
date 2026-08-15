@@ -32,6 +32,10 @@ Day Open = протокол. Исполнять ТОЛЬКО пошагово ч
 
 ## Алгоритм
 
+### -1. GitHub → IWE reconciliation
+До reasoning выполнить `python3 "$IWE_SCRIPTS/wp-github-link.py" reconcile --governance "$IWE_WORKSPACE/$IWE_GOVERNANCE_REPO" --params "$IWE_WORKSPACE/params.yaml"`.
+Новые WP кратко перечислить. `CONFLICT`, `UNAVAILABLE` или ненулевой код явно сообщить до основного reasoning.
+
 ### 0. Extensions (before)
 `bash .claude/scripts/load-extensions.sh day-open before` → Exit 0: Read каждый файл, выполнить. Exit 1: пропустить.
 <!-- Детали: day-open-details.md § Шаг 0 -->

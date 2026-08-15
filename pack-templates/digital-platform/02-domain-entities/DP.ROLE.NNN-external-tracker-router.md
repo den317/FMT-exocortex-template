@@ -28,12 +28,15 @@ related:
 4. Записать URL в frontmatter context file.
 5. В режиме проверки обнаружить missing, duplicate, stale и wrong-repo.
 6. Вернуть наблюдаемый результат вызывающему циклу IWE.
+7. Принять существующую GitHub issue как минимальный WP без вызова create.
+8. Сверить adoption allowlist и cutover до пакетного принятия issues.
 
 ## Полномочия
 
 - читать локальный WP context и WP Registry;
 - выполнять `gh issue list`, `gh issue view` и `gh issue create`;
-- менять только поле `github_issue` соответствующего context file;
+- создавать минимальный WP context, строку Registry и пересобирать active-wp
+  одной локальной транзакцией; WeekPlan при adoption не менять;
 - не обращаться к Linear API и не читать секреты GitHub.
 
 ## Входы и выходы
@@ -53,6 +56,8 @@ related:
 - внешний отказ не удаляет и не откатывает локальные файлы;
 - статус Linear не считается источником истины для WP;
 - текст issue для публичного FMT не содержит приватный DS-контекст.
+- одна входящая GitHub issue связана максимум с одним WP;
+- adoption не вызывает создание GitHub issue;
 
 ## Связи
 
@@ -60,4 +65,3 @@ related:
 - вызывается `/wp-new`, Day Close и Week Close;
 - Day Open использует её отчёт как сигнал внимания;
 - штатная GitHub ↔ Linear интеграция находится за границей роли.
-

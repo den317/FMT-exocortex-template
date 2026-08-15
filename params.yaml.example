@@ -51,6 +51,8 @@ capture_autonomy: propose
 github_wp_sync_enabled: false
 github_owner: ""
 github_wp_default_repo: "DS-strategy"
+github_wp_adoption_repositories: []
+github_wp_adopt_from: ""
 
 # Устаревший fallback прямой синхронизации Linear. При включённом
 # github_wp_sync_enabled не используется.

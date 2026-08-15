@@ -335,7 +335,7 @@
     },
     {
       "path": ".claude/skills/day-close/SKILL.md",
-      "sha256": "52bca39831b23a800d5a390212eedd79f4d6a81f455ca252290cdac683f784b2"
+      "sha256": "418d037cefc7708c11acc6d05b3bff4f27bfda5a2c66241095634ddc73ae0644"
     },
     {
       "path": ".claude/skills/day-close/day-close-details.md",
@@ -347,7 +347,7 @@
     },
     {
       "path": ".claude/skills/day-open/SKILL.md",
-      "sha256": "a328a261ab9f377526ad1ae5535b67e7475acfdf9758eca425fa8c40b1b0da84"
+      "sha256": "296ee37a38b35073462fc571ad326a4908e742158af22d32daad509c78eef834"
     },
     {
       "path": ".claude/skills/day-open/day-open-details.md",
@@ -535,7 +535,7 @@
     },
     {
       "path": ".claude/skills/strategy-session/SKILL.md",
-      "sha256": "af3172fc895b47f1bd6d9080c366c5d3588f243ede54b5695531d839e73e709f"
+      "sha256": "dee002711f44339b0f240b205523e51b297f26d72f1b9edf011e0e9ed66fc368"
     },
     {
       "path": ".claude/skills/think/SKILL.md",
@@ -583,7 +583,7 @@
     },
     {
       "path": ".claude/skills/week-close/SKILL.md",
-      "sha256": "938b8500dd36bb962d0ecac85fb0d9c7521d7aadcd831edc4686c5831f9745c6"
+      "sha256": "9ff944e6df9684d6878c34e7e2aede0720764730a3a4c8d8dc985c49a46cbbdd"
     },
     {
       "path": ".claude/skills/week-close/week-close/SKILL.md",
@@ -1403,7 +1403,7 @@
     },
     {
       "path": "pack-templates/digital-platform/02-domain-entities/DP.ROLE.NNN-external-tracker-router.md",
-      "sha256": "c8018ae98ecf6fa71092443c3a7ddd0194f8ba8a71220c55f9e86c05078b402e"
+      "sha256": "de3873c5c7837f661788d7f05849c5be5c3ae15d1d9d0383f5d1c243f16bdbd3"
     },
     {
       "path": "pack-templates/digital-platform/04-work-products/DP.WP.NNN-stage-dependency-map.md",
@@ -1423,7 +1423,7 @@
     },
     {
       "path": "pack-templates/digital-platform/08-service-clauses/DP.SC.NNN-wp-external-tracker-sync.md",
-      "sha256": "82e6337dc6b9c77d4f957254364e14db1cef2c34fac7ed5b501e7cbd4651c94b"
+      "sha256": "63b26e43b317921084490755b3889b0e4ef315741fe60fc6b9cb042a677b596f"
     },
     {
       "path": "roles/README.md",
@@ -2363,7 +2363,7 @@
     },
     {
       "path": "scripts/wp-github-link.py",
-      "sha256": "8a0487137782e0f9ca42ab3146130475a6ae2e840c8de374dc6625a11bc20d99"
+      "sha256": "23f3c82509a3211c98fcd1fde78f17ad58408ea5d730fca79e17bd74177756f6"
     },
     {
       "path": "scripts/wp-list.py",
