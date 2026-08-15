@@ -91,3 +91,4 @@ Issue до cutover не меняются. Для новой несвязанно
    `FMT-exocortex-template`.
 6. Reconcile учитывает open и closed issues после cutover и не меняет WeekPlan.
 7. Повторный reconcile не создаёт второй WP или новую GitHub issue.
+8. Закрытая связанная GitHub issue детерминированно закрывает и архивирует WP без вопросов; рефлексивное обогащение выполняется позже и не блокирует lifecycle.

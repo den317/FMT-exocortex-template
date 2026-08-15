@@ -22,6 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ALLOWED_REPOS = {"DS-strategy", "IWE", "FMT-exocortex-template"}
+COLUMN_ALIASES = {
+    "Приоритет": "P",
+    "Статус": "Ст",
+    "Репозитории": "Репо",
+    "Репозиторий": "Репо",
+}
 
 
 class LinkError(RuntimeError):
@@ -46,6 +52,7 @@ class Issue:
     state: str
     url: str
     created_at: str
+    closed_at: str
     repository: str
 
 
@@ -145,8 +152,18 @@ def parse_issue(raw: object, repository: str) -> Issue:
         dt.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise LinkError(f"invalid GitHub issue #{number}: createdAt") from exc
+    closed_at = str(raw.get("closedAt") or "")
+    if state == "CLOSED" and not closed_at:
+        raise LinkError(f"invalid GitHub issue #{number}: closedAt")
     return Issue(
-        number, title, str(raw.get("body") or ""), state, url, created_at, repository
+        number,
+        title,
+        str(raw.get("body") or ""),
+        state,
+        url,
+        created_at,
+        closed_at,
+        repository,
     )
 
 
@@ -199,7 +216,7 @@ def list_adoption_issues(config: AdoptionConfig) -> list[Issue]:
                 "--search",
                 f"created:>={config.adopt_from[:10]}",
                 "--json",
-                "number,title,body,state,url,createdAt",
+                "number,title,body,state,url,createdAt,closedAt",
             ]
         )
         if not isinstance(raw, list):
@@ -289,6 +306,19 @@ def registry_row(registry: Path, wp: int, title: str, status: str) -> None:
 def render_adopted_context(issue: Issue, wp: int) -> str:
     local_status = "done" if issue.state == "CLOSED" else "pending"
     body = issue.body.strip() or "Описание в GitHub Issue отсутствует."
+    closed_fields = ""
+    closure = ""
+    if issue.state == "CLOSED":
+        closed_fields = (
+            f"closed_date: {issue.closed_at[:10]}\nclosure_enrichment: pending\n"
+        )
+        closure = f"""\n## Закрытие
+
+- **Дата:** {issue.closed_at[:10]}
+- **Результат:** GitHub Issue #{issue.number} закрыта.
+- **Источник:** {issue.url}
+- **Обогащение:** pending — вопросы переносятся в Day Close / Week Close.
+"""
     return f'''---
 wp: {wp}
 title: "{issue.title.replace(chr(34), chr(39))}"
@@ -297,7 +327,7 @@ priority: TBD
 budget: TBD
 created: {issue.created_at[:10]}
 last_session: {issue.created_at[:10]}
-related: []
+{closed_fields}related: []
 hypothesis: "—"
 hypothesis_relation: "operational"
 activation: on-demand
@@ -328,6 +358,7 @@ github_repo: "{issue.repository}"
 ## Осталось
 
 **Следующий шаг:** {"Работа уже закрыта во внешней Issue." if issue.state == "CLOSED" else "Уточнить выполнение по исходной GitHub Issue."}
+{closure}
 '''
 
 
@@ -360,6 +391,125 @@ def require_active_wp(active: Path, wp: int) -> None:
     )
     if not marker.search(active.read_text(encoding="utf-8")):
         raise LinkError(f"INVALID_LOCAL_STATE: WP-{wp:03d} missing from active-wp")
+
+
+def close_registry_row(registry: Path, wp: int) -> None:
+    lines = registry.read_text(encoding="utf-8").splitlines(keepends=True)
+    columns: dict[str, int] = {}
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("|") and index + 1 < len(lines):
+            names = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if "#" in names and lines[index + 1].strip().startswith("|---"):
+                columns = {
+                    COLUMN_ALIASES.get(name, name): pos
+                    for pos, name in enumerate(names)
+                }
+                continue
+        match = re.match(r"^\|\s*[*~]*(?:WP-)?(\d+)", line)
+        if not match or int(match.group(1)) != wp:
+            continue
+        status_index = columns.get("Ст")
+        if status_index is None:
+            raise LinkError("INVALID_LOCAL_STATE: Registry has no status column")
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        cells[status_index] = "✅"
+        repo_index = columns.get("Репо")
+        if repo_index is not None and repo_index < len(cells):
+            governance = registry.parents[1].name
+            cells[repo_index] = f"{governance}/archive/wp-contexts/WP-{wp:03d}/"
+        for pos, value in enumerate(cells):
+            if pos == status_index or not value or value.startswith("~~"):
+                continue
+            cells[pos] = f"~~{value.strip('*')}~~"
+        lines[index] = "| " + " | ".join(cells) + " |\n"
+        registry.write_text("".join(lines), encoding="utf-8")
+        return
+    raise LinkError(f"INVALID_LOCAL_STATE: WP-{wp:03d} missing from Registry")
+
+
+def set_frontmatter_value(text: str, name: str, value: str) -> str:
+    replacement = f"{name}: {value}"
+    if re.search(rf"^{re.escape(name)}:", text, re.MULTILINE):
+        return re.sub(
+            rf"^{re.escape(name)}:.*$", replacement, text, count=1, flags=re.MULTILINE
+        )
+    return text.replace("\n---\n", f"\n{replacement}\n---\n", 1)
+
+
+def auto_close_context(
+    context: Context, issue: Issue, governance: Path
+) -> dict[str, str]:
+    if issue.state != "CLOSED" or context.status in {
+        "done",
+        "closed",
+        "cancelled",
+        "archived",
+    }:
+        return {"status": "ALREADY_CLOSED", "wp": f"WP-{context.wp:03d}"}
+    if not issue.closed_at:
+        raise LinkError(f"INVALID: closed GitHub Issue #{issue.number} has no closedAt")
+    registry = governance / "docs" / "WP-REGISTRY.md"
+    active = governance / "current" / "active-wp.md"
+    source = context.path
+    folder_mode = source.parent.name == f"WP-{context.wp:03d}"
+    target = (
+        governance / "archive" / "wp-contexts" / source.parent.name
+        if folder_mode
+        else governance / "archive" / "wp-contexts" / source.name
+    )
+    if target.exists():
+        raise LinkError(
+            f"CONFLICT: archive target already exists for WP-{context.wp:03d}"
+        )
+    with tempfile.TemporaryDirectory() as directory:
+        snapshot = Path(directory)
+        shutil.copy2(registry, snapshot / "registry")
+        if active.exists():
+            shutil.copy2(active, snapshot / "active")
+        source_snapshot = snapshot / "source"
+        if folder_mode:
+            shutil.copytree(source.parent, source_snapshot)
+        else:
+            shutil.copy2(source, source_snapshot)
+        try:
+            text = source.read_text(encoding="utf-8")
+            text = set_frontmatter_value(text, "status", "done")
+            text = set_frontmatter_value(text, "closed_date", issue.closed_at[:10])
+            text = set_frontmatter_value(text, "closure_enrichment", "pending")
+            if not re.search(r"^## Закрытие$", text, re.MULTILINE):
+                text = (
+                    text.rstrip()
+                    + f"""\n\n## Закрытие
+
+- **Дата:** {issue.closed_at[:10]}
+- **Результат:** GitHub Issue #{issue.number} закрыта.
+- **Источник:** {issue.url}
+- **Обогащение:** pending — вопросы переносятся в Day Close / Week Close.
+"""
+                )
+            source.write_text(text, encoding="utf-8")
+            close_registry_row(registry, context.wp)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source.parent if folder_mode else source), str(target))
+            rebuild_active(governance)
+            require_active_wp(active, context.wp)
+        except Exception:
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            original = source.parent if folder_mode else source
+            if original.exists():
+                shutil.rmtree(original) if original.is_dir() else original.unlink()
+            if folder_mode:
+                shutil.copytree(source_snapshot, original)
+            else:
+                shutil.copy2(source_snapshot, original)
+            shutil.copy2(snapshot / "registry", registry)
+            if (snapshot / "active").exists():
+                shutil.copy2(snapshot / "active", active)
+            else:
+                active.unlink(missing_ok=True)
+            raise
+    return {"status": "CLOSED", "wp": f"WP-{context.wp:03d}", "url": issue.url}
 
 
 def adopt_issue(issue: Issue, governance: Path) -> dict[str, object]:
@@ -427,16 +577,29 @@ def reconcile(
     if conflicts:
         return {"status": "CONFLICT", "conflicts": conflicts, "created": []}
     missing = [issue for issue in issues if not links.get(issue.url)]
+    closable = [
+        (links[issue.url][0], issue)
+        for issue in issues
+        if len(links.get(issue.url, [])) == 1
+        and issue.state == "CLOSED"
+        and links[issue.url][0].status
+        not in {"done", "closed", "cancelled", "archived"}
+    ]
     if audit_only:
         return {
-            "status": "DRIFT" if missing else "OK",
+            "status": "DRIFT" if missing or closable else "OK",
             "missing": [issue.url for issue in missing],
+            "stale_closed": [issue.url for _, issue in closable],
             "conflicts": [],
         }
+    closed = [
+        auto_close_context(context, issue, governance) for context, issue in closable
+    ]
     created = [adopt_issue(issue, governance) for issue in missing]
     return {
         "status": "OK",
         "created": created,
+        "closed": closed,
         "already_linked": len(issues) - len(missing),
     }
 
@@ -686,7 +849,7 @@ def main() -> int:
                     "--repo",
                     repo,
                     "--json",
-                    "number,title,body,state,url,createdAt",
+                    "number,title,body,state,url,createdAt,closedAt",
                 ]
             )
             print(

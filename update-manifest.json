@@ -335,7 +335,7 @@
     },
     {
       "path": ".claude/skills/day-close/SKILL.md",
-      "sha256": "418d037cefc7708c11acc6d05b3bff4f27bfda5a2c66241095634ddc73ae0644"
+      "sha256": "61769cc5fca1895007984dea9b80f8843f8b3c88246e3e9378814ed90cdb0dba"
     },
     {
       "path": ".claude/skills/day-close/day-close-details.md",
@@ -583,7 +583,7 @@
     },
     {
       "path": ".claude/skills/week-close/SKILL.md",
-      "sha256": "9ff944e6df9684d6878c34e7e2aede0720764730a3a4c8d8dc985c49a46cbbdd"
+      "sha256": "1a02c2d425b13c542bf61f13eddf6515329910cd9e8767c9aff01b6427eafcd7"
     },
     {
       "path": ".claude/skills/week-close/week-close/SKILL.md",
@@ -1403,7 +1403,7 @@
     },
     {
       "path": "pack-templates/digital-platform/02-domain-entities/DP.ROLE.NNN-external-tracker-router.md",
-      "sha256": "de3873c5c7837f661788d7f05849c5be5c3ae15d1d9d0383f5d1c243f16bdbd3"
+      "sha256": "be1977621068a96d71fceca5baf1cf7198de3af4c593462485e4403ee99f66b4"
     },
     {
       "path": "pack-templates/digital-platform/04-work-products/DP.WP.NNN-stage-dependency-map.md",
@@ -1423,7 +1423,7 @@
     },
     {
       "path": "pack-templates/digital-platform/08-service-clauses/DP.SC.NNN-wp-external-tracker-sync.md",
-      "sha256": "63b26e43b317921084490755b3889b0e4ef315741fe60fc6b9cb042a677b596f"
+      "sha256": "4ede4ee57f0008a7272323cc77e1fedd07c3d4bcdc9211dd442b218cf113854b"
     },
     {
       "path": "roles/README.md",
@@ -2363,7 +2363,7 @@
     },
     {
       "path": "scripts/wp-github-link.py",
-      "sha256": "2eb73fe215b7236ba9605835f9a2de888491ae792a13597f31f83a72e8f32c68"
+      "sha256": "fecd697c0e1e987b9359c0bed524985317052a6a26c4e99fc4242b6ad77141b4"
     },
     {
       "path": "scripts/wp-list.py",
