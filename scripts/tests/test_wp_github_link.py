@@ -268,6 +268,36 @@ class LinkTests(unittest.TestCase):
                 status, _ = MODULE.check_context(context, "den317/DS-strategy")
             self.assertEqual(status, "STALE")
 
+    def test_check_uses_saved_identity_when_issue_was_renamed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            url = "https://github.com/den317/DS-strategy/issues/29"
+            context = MODULE.read_frontmatter(context_file(directory, url=url))
+            renamed = {
+                "number": 29,
+                "title": "Renamed many times without WP marker",
+                "state": "CLOSED",
+                "url": url,
+            }
+            with (
+                patch.object(MODULE, "gh_json", return_value=renamed) as github,
+                patch.object(MODULE, "matching_issues") as title_search,
+            ):
+                status, detail = MODULE.check_context(context, "den317/DS-strategy")
+            self.assertEqual(status, "STALE")
+            self.assertIn("issue=CLOSED", detail)
+            github.assert_called_once_with(
+                [
+                    "issue",
+                    "view",
+                    "29",
+                    "--repo",
+                    "den317/DS-strategy",
+                    "--json",
+                    "number,title,state,url",
+                ]
+            )
+            title_search.assert_not_called()
+
     def test_check_detects_wrong_repo(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = context_file(
