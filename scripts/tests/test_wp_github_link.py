@@ -53,6 +53,7 @@ def issue(
         state,
         f"https://github.com/den317/DS-strategy/issues/{number}",
         created,
+        "2026-08-15T13:00:00Z" if state == "CLOSED" else "",
         "den317/DS-strategy",
     )
 
@@ -112,6 +113,65 @@ class LinkTests(unittest.TestCase):
                 "| ✅ |",
                 (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
             )
+
+    def test_linked_issue_close_archives_wp_without_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            MODULE.adopt_issue(issue(21), governance)
+            config = MODULE.AdoptionConfig(
+                ("den317/DS-strategy",), "2026-08-15T10:00:00Z"
+            )
+            with patch.object(
+                MODULE, "list_adoption_issues", return_value=[issue(21, state="CLOSED")]
+            ):
+                report = MODULE.reconcile(governance, config)
+            self.assertEqual(report["closed"][0]["wp"], "WP-035")
+            self.assertFalse(governance.joinpath("inbox/WP-035").exists())
+            card = governance / "archive" / "wp-contexts" / "WP-035" / "WP-035.md"
+            text = card.read_text(encoding="utf-8")
+            self.assertIn("status: done", text)
+            self.assertIn("closed_date: 2026-08-15", text)
+            self.assertIn("closure_enrichment: pending", text)
+            self.assertIn("GitHub Issue #21 закрыта", text)
+            self.assertIn(
+                "| ✅ |",
+                (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "DS-strategy/archive/wp-contexts/WP-035/",
+                (governance / "docs" / "WP-REGISTRY.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "| ~~35~~ |",
+                (governance / "current" / "active-wp.md").read_text(encoding="utf-8"),
+            )
+
+    def test_auto_close_postcondition_failure_rolls_back_move_and_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            MODULE.adopt_issue(issue(21), governance)
+            context = MODULE.read_frontmatter(
+                governance / "inbox" / "WP-035" / "WP-035.md"
+            )
+            registry = governance / "docs" / "WP-REGISTRY.md"
+            active = governance / "current" / "active-wp.md"
+            registry_before = registry.read_bytes()
+            active_before = active.read_bytes()
+            with patch.object(
+                MODULE,
+                "rebuild_active",
+                side_effect=lambda _: active.write_text("missing\n", encoding="utf-8"),
+            ):
+                with self.assertRaisesRegex(MODULE.LinkError, "INVALID_LOCAL_STATE"):
+                    MODULE.auto_close_context(
+                        context, issue(21, state="CLOSED"), governance
+                    )
+            card = governance / "inbox" / "WP-035" / "WP-035.md"
+            self.assertTrue(card.exists())
+            self.assertIn("status: pending", card.read_text(encoding="utf-8"))
+            self.assertEqual(registry.read_bytes(), registry_before)
+            self.assertEqual(active.read_bytes(), active_before)
+            self.assertFalse(governance.joinpath("archive/wp-contexts/WP-035").exists())
 
     def test_pre_cutover_issue_is_not_listed(self) -> None:
         config = MODULE.AdoptionConfig(("den317/DS-strategy",), "2026-08-15T10:00:00Z")

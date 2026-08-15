@@ -40,6 +40,8 @@ Week Close = протокол. Исполнять ТОЛЬКО пошагово 
 До reasoning выполнить `python3 "$IWE_SCRIPTS/wp-github-link.py" reconcile --governance "$IWE_WORKSPACE/$IWE_GOVERNANCE_REPO" --params "$IWE_WORKSPACE/params.yaml"`.
 Новые WP кратко перечислить. `CONFLICT`, `UNAVAILABLE` или ненулевой код явно сообщить и не заявлять успешную синхронизацию недели.
 
+Архивные WP с `closure_enrichment: pending` включить в недельную рефлексию как необязательное обогащение: записать фактический итог/урок и сменить маркер на `complete`. Не задавать вопрос «закрывать ли WP» и не возвращать WP в активный статус при отсутствии ответа.
+
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh week-close before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/week-close.before.md` И `extensions/week-close.before.<suffix>.md`.
 
