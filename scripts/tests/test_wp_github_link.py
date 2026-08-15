@@ -80,9 +80,8 @@ class LinkTests(unittest.TestCase):
     def test_repeat_adopt_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             governance = governance_fixture(directory)
-            with patch.object(MODULE, "rebuild_active"):
-                first = MODULE.adopt_issue(issue(21), governance)
-                second = MODULE.adopt_issue(issue(21), governance)
+            first = MODULE.adopt_issue(issue(21), governance)
+            second = MODULE.adopt_issue(issue(21), governance)
             self.assertEqual(first["wp"], second["wp"])
             self.assertEqual(second["status"], "ALREADY_LINKED")
 
@@ -92,13 +91,10 @@ class LinkTests(unittest.TestCase):
             config = MODULE.AdoptionConfig(
                 ("den317/DS-strategy",), "2026-08-15T10:00:00Z"
             )
-            with (
-                patch.object(
-                    MODULE,
-                    "list_adoption_issues",
-                    return_value=[issue(21), issue(22), issue(23)],
-                ),
-                patch.object(MODULE, "rebuild_active"),
+            with patch.object(
+                MODULE,
+                "list_adoption_issues",
+                return_value=[issue(21), issue(22), issue(23)],
             ):
                 report = MODULE.reconcile(governance, config)
             self.assertEqual(
@@ -109,8 +105,7 @@ class LinkTests(unittest.TestCase):
     def test_closed_issue_is_adopted_as_closed_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             governance = governance_fixture(directory)
-            with patch.object(MODULE, "rebuild_active"):
-                MODULE.adopt_issue(issue(24, state="CLOSED"), governance)
+            MODULE.adopt_issue(issue(24, state="CLOSED"), governance)
             context = governance / "archive" / "wp-contexts" / "WP-035.md"
             self.assertIn("status: done", context.read_text(encoding="utf-8"))
             self.assertIn(
@@ -173,6 +168,20 @@ class LinkTests(unittest.TestCase):
                 with self.assertRaises(MODULE.LinkError):
                     MODULE.reconcile(governance, config)
             self.assertEqual(registry.read_text(encoding="utf-8"), before)
+
+    def test_missing_active_wp_postcondition_rolls_back_all_local_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            governance = governance_fixture(directory)
+            registry = governance / "docs" / "WP-REGISTRY.md"
+            active = governance / "current" / "active-wp.md"
+            registry_before = registry.read_bytes()
+            active_before = active.read_bytes()
+            with patch.object(MODULE, "rebuild_active"):
+                with self.assertRaisesRegex(MODULE.LinkError, "INVALID_LOCAL_STATE"):
+                    MODULE.adopt_issue(issue(21), governance)
+            self.assertEqual(registry.read_bytes(), registry_before)
+            self.assertEqual(active.read_bytes(), active_before)
+            self.assertFalse(governance.joinpath("inbox/WP-035").exists())
 
     def test_audit_reports_post_cutover_issue_without_wp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -349,6 +349,19 @@ def rebuild_active(governance: Path) -> None:
         )
 
 
+def require_active_wp(active: Path, wp: int) -> None:
+    if not active.exists():
+        raise LinkError(
+            f"INVALID_LOCAL_STATE: active-wp was not created for WP-{wp:03d}"
+        )
+    marker = re.compile(
+        rf"^\|\s*(?:~~)?(?:\*\*)?(?:WP-)?0*{wp}(?:[-.]\w+)?(?:\*\*)?(?:~~)?\s*\|",
+        re.MULTILINE,
+    )
+    if not marker.search(active.read_text(encoding="utf-8")):
+        raise LinkError(f"INVALID_LOCAL_STATE: WP-{wp:03d} missing from active-wp")
+
+
 def adopt_issue(issue: Issue, governance: Path) -> dict[str, object]:
     existing = links_by_url(governance).get(issue.url, [])
     if len(existing) > 1:
@@ -378,6 +391,7 @@ def adopt_issue(issue: Issue, governance: Path) -> dict[str, object]:
             path.write_text(render_adopted_context(issue, wp), encoding="utf-8")
             registry_row(registry, wp, issue.title, "✅" if closed else "⏳")
             rebuild_active(governance)
+            require_active_wp(active, wp)
         except Exception:
             path.unlink(missing_ok=True)
             if path.parent.name == f"WP-{wp:03d}":
@@ -671,6 +685,8 @@ def main() -> int:
             status = "CONFLICT"
         elif detail.startswith("INVALID_CONFIG"):
             status = "INVALID_CONFIG"
+        elif detail.startswith("INVALID_LOCAL_STATE"):
+            status = "INVALID_LOCAL_STATE"
         elif detail.startswith("invalid "):
             status = "INVALID"
         else:

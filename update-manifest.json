@@ -1827,7 +1827,7 @@
     },
     {
       "path": "scripts/build-active-wp.py",
-      "sha256": "ab896aa1b981955bc42daa507abc44da084a0d0328a49dfc73c2c4d19341d974"
+      "sha256": "78cd82398081401e10bfd321a91b1c7f481db53af03073a7113f7068d411bb31"
     },
     {
       "path": "scripts/changelog-append.sh",
@@ -2363,7 +2363,7 @@
     },
     {
       "path": "scripts/wp-github-link.py",
-      "sha256": "23f3c82509a3211c98fcd1fde78f17ad58408ea5d730fca79e17bd74177756f6"
+      "sha256": "f0fd7e56815105f0be0b4a97abe5ff1a3aae7bfb14571d49aa7bcf206db9f86a"
     },
     {
       "path": "scripts/wp-list.py",
