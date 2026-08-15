@@ -24,7 +24,10 @@ def test_reordered_legacy_registry_is_rendered_in_canonical_order():
     assert rows[0]["name"] == "**Обновление FMT-exocortex-template**"
     assert rows[0]["status"] == "⏳"
     assert rows[0]["repo"] == "FMT-exocortex-template"
-    assert "| 34 | P3 | **Обновление FMT-exocortex-template** | ⏳ | FMT-exocortex-template | 1h |" in BUILD.render(rows)
+    assert (
+        "| 34 | P3 | **Обновление FMT-exocortex-template** | ⏳ | FMT-exocortex-template | 1h |"
+        in BUILD.render(rows)
+    )
 
 
 def test_minimal_legacy_registry_keeps_active_row():
