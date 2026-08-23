@@ -977,7 +977,7 @@ else:
         # same version number twice while claiming a mismatch. Four distinct cases
         # now, not three collapsed into one catch-all.
         if [ "$FILES_MATCH" = "match" ] && $VERSIONS_MATCH; then
-            echo "✓ Версия и состав манифеста совпадают с upstream (v$UPSTREAM_VERSION). Обновлений нет."
+            echo "✓ Версия и состав манифеста совпадают с каналом (v$UPSTREAM_VERSION). Обновлений нет."
         elif [ "$FILES_MATCH" = "differ" ]; then
             echo "⚠ Состав манифеста изменился (файлы добавлены/удалены/обновлены)."
             echo "  Для полного списка изменений: bash update.sh --check (без --fast)."
@@ -989,7 +989,7 @@ else:
             echo "  Для полного списка изменений: bash update.sh --check (без --fast)."
         fi
     elif [ -n "$LOCAL_VERSION" ] && [ "$LOCAL_VERSION" = "$UPSTREAM_VERSION" ]; then
-        echo "✓ Версия совпадает с upstream (v$UPSTREAM_VERSION). python3 не найден — состав манифеста не сверен."
+        echo "✓ Версия совпадает с каналом (v$UPSTREAM_VERSION). python3 не найден — состав манифеста не сверен."
     else
         echo "⚠ Версия отличается: локально v${LOCAL_VERSION:-неизвестно}, upstream v$UPSTREAM_VERSION."
         echo "  Для полного списка изменений: bash update.sh --check (без --fast)."
