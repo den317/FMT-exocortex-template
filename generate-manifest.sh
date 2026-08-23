@@ -10,9 +10,8 @@ MANIFEST="$SCRIPT_DIR/update-manifest.json"
 # Версия из CHANGELOG.md (первый ## [X.Y.Z])
 VERSION=$(grep -m1 '^\#\# \[[0-9]' "$SCRIPT_DIR/CHANGELOG.md" | sed 's/.*\[\(.*\)\].*/\1/')
 
-# Bind the generated manifest to its distribution channel. A fork is a complete
-# reviewed release source, not a runtime overlay. Explicit environment values
-# win; otherwise derive the GitHub slug from origin and publish from main.
+# Bind the generated manifest to this reviewed distribution and attest the
+# exact canonical release accepted during upstream intake.
 ORIGIN_URL=$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)
 ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E \
     -e 's#^git@github.com:##' \
@@ -20,17 +19,13 @@ ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E \
     -e 's#\.git$##')
 SOURCE_REPO="${IWE_UPDATE_REPO:-$ORIGIN_REPO}"
 SOURCE_BRANCH="${IWE_UPDATE_BRANCH:-main}"
-ACCEPTED_UPSTREAM_TAG="v0.38.3"
-ACCEPTED_UPSTREAM_SHA="0063969f3f1c271f50fe5c8e3be1b7d2eaecc6fd"
+ACCEPTED_UPSTREAM_TAG="v0.38.7"
+ACCEPTED_UPSTREAM_SHA="cb898c5f732f1c3542e217797919fc9be5633d3d"
 
-if ! printf '%s' "$ACCEPTED_UPSTREAM_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
+if ! printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' ||
+   ! printf '%s' "$ACCEPTED_UPSTREAM_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
    ! printf '%s' "$ACCEPTED_UPSTREAM_SHA" | grep -qE '^[0-9a-f]{40}$'; then
-    echo "ERROR: Некорректная аттестованная upstream provenance-запись" >&2
-    exit 1
-fi
-
-if ! printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
-    echo "ERROR: Некорректный source_repo манифеста: $SOURCE_REPO" >&2
+    echo "ERROR: Некорректная идентичность канала или upstream provenance" >&2
     exit 1
 fi
 
@@ -47,7 +42,10 @@ SKIP_PATTERNS=(
     ".github/"
     ".backups/"
     ".DS_Store"
-    "generate-manifest.sh"
+    # generate-manifest.sh is DELIVERED since WP-529 F6 (Evgenii defect #4,
+    # 18.08): the shipped scripts/verify-manifest.sh hard-depends on the
+    # repo-root generator, so an update-only install kept a stale copy and
+    # the B2 completeness check exited 1 on the user's machine.
     "update-manifest.json"
     "update-manifest.local.json"
     "seed/"
@@ -97,7 +95,6 @@ EXCLUDED_SCRIPTS=(
 EXCLUDED_EXACT=(
     "promotion-status.yaml"
     "scripts/guide-kit-sync-state.yaml"         # provenance vendored-копии guide-kit/ — нужен CI drift-check, не пользователям
-    "AGENTS-agent-blocks.md"
     "${EXCLUDED_SCRIPTS[@]}"
 )
 
@@ -129,8 +126,12 @@ FILES_EXCLUDE_EXACT=(
 # per-file include, same technique as setup/validate-template.sh below.
 GITHUB_EXPLICIT_INCLUDE=(
     ".github/workflows/cloud-scheduler.yml"
+    ".github/workflows/notify-security.yml"
     ".github/workflows/notify-update.yml"
     ".github/workflows/post-release-audit.yml"
+)
+GITHUB_CI_ONLY_EXCLUDE=(
+    ".github/workflows/nightly-template-audit.yml"
 )
 SETUP_EXPLICIT_INCLUDE=(
     "setup/build-runtime.sh"
@@ -157,16 +158,43 @@ SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
     "scripts/tests/test_create_wp_contract.sh"
     "scripts/tests/test_capture_bus_contract.sh"
     "scripts/tests/test_critical_alert_contract.sh"
+    "scripts/tests/test_create_wp_number_padding.py"
+    "scripts/tests/test_create_wp_weekplan_writer.py"
     "scripts/tests/validate_manifest_coverage.sh"
     "scripts/tests/lib/capture_fixture.sh"
     "scripts/tests/lib/seed_strategy_fixture.sh"
     "scripts/tests/test_critical_alert_failure_matrix.sh"
     "scripts/tests/test_create_wp_repeat_and_cwd.sh"
+    "scripts/tests/test_create_wp_hypothesis_relation.sh"
     "scripts/tests/test_day_close_lock_timezone.sh"
     "scripts/tests/test_fresh_seed_reproduction.sh"
     "scripts/tests/test_hook_classification.sh"
     "scripts/tests/test_update_install_path_guard.sh"
+    "scripts/tests/test_update_deprecated_mirror_guard.sh"
+    "scripts/tests/test_update_settings_merge_drift.sh"
+    "scripts/tests/test_update_delivery_ref.sh"
     "scripts/tests/test_upgrade_worktree_cleanup.sh"
+    "scripts/tests/test_issues_413_418.py"
+    "scripts/tests/test_hindsight_docs_contract.sh"
+    "scripts/tests/test_launchd_identity_runtime.sh"
+    "scripts/tests/test_session_guard_hypothesis_gate.sh"
+    # WP-529 F6 (Evgenii 18.08): the whole test_issue_* family plus its runner
+    # ship with the template — a user's copy must be able to run its own
+    # issue-regression gate (same rationale as the 03.08 block above).
+    "scripts/tests/run-issue-tests.sh"
+    "scripts/tests/test_issue_434_pipeline_scaffold_only.sh"
+    "scripts/tests/test_issue_453_calendar_private_visibility.sh"
+    "scripts/tests/test_issue_455_scaffold_missing_lib_fatal.sh"
+    "scripts/tests/test_issue_463_pyyaml_explicit_diagnostics.sh"
+    "scripts/tests/test_issue_463_setup_reuses_resolved_python3.sh"
+    "scripts/tests/test_issue_469_settings_merge_hook_identity.py"
+    "scripts/tests/test_issue_471_drift_scan_status_boundary.py"
+    "scripts/tests/test_issue_473_build_active_wp_columns.py"
+    "scripts/tests/test_issue_473_wp_sync_bundle_status.sh"
+    "scripts/tests/test_issue_calendar_api_error_named.sh"
+    "scripts/tests/test_update_build_runtime_fail_closed.sh"
+    "scripts/tests/test_update_delivers_python_resolver_before_roles.sh"
+    "scripts/tests/test_role_runner_update_marker_guard.sh"
 )
 
 is_explicit_include() {
@@ -189,6 +217,13 @@ while IFS= read -r rel; do
         FILES+=("$rel")
         continue
     fi
+    # .github/ is normally outside the delivery manifest.  Keep every tracked
+    # workflow explicitly classified, otherwise manifest-coverage correctly
+    # reports a silent delivery gap (#423).
+    if is_explicit_include "$rel" "${GITHUB_CI_ONLY_EXCLUDE[@]}"; then
+        EXCLUDED_PATHS+=("$rel")
+        continue
+    fi
     skip=false
     for pattern in "${SKIP_PATTERNS[@]}"; do
         case "$rel" in
@@ -201,7 +236,14 @@ while IFS= read -r rel; do
     # setup/ contains install-time scripts; skip all except explicit includes
     # (validate-template.sh referenced by .githooks/pre-commit and update.sh
     # after delivery; setup-cloud-scheduler.sh — see SETUP_EXPLICIT_INCLUDE above).
+    # Register in EXCLUDED_PATHS same as .github/ above (#423) — Evgenii's
+    # Red Team review 2026-08-19 found setup/test-delivery-route-label.sh
+    # (and every other setup/test-*.sh) as a silent manifest-coverage gap:
+    # this branch's bare `continue` never recorded WHY the file was skipped,
+    # so check-manifest-coverage.py had no way to distinguish it from a
+    # forgotten delivery.
     if [[ "$rel" == setup/* ]] && ! is_explicit_include "$rel" "${SETUP_EXPLICIT_INCLUDE[@]}"; then
+        EXCLUDED_PATHS+=("$rel")
         continue
     fi
 
@@ -284,6 +326,28 @@ data = {
     'excluded_paths': excluded,
     'deprecated_files': json.loads('''$DEPRECATED_JSON'''),
 }
+
+# 2026-08-22 (external report): deprecated_files is hand-managed and carried
+# over from the previous manifest — a path that came BACK into the delivered
+# tree stayed listed as deprecated, and update.sh deleted 10 files HEAD still
+# ships. A path cannot be delivered and deprecated at once: delivery wins,
+# the stale deprecation entry is dropped with a warning.
+import subprocess
+import sys
+delivered_now = {e['path'] for e in data['files']}
+# Same class, wider net (the live 10-file incident): a path still TRACKED in
+# git HEAD ships with every fresh clone — deprecating it makes update.sh
+# delete what the canon still distributes, leaving clones with tracked
+# deletions. Deprecated may only list paths git no longer carries.
+tracked_now = set(subprocess.run(
+    ['git', 'ls-files'], capture_output=True, text=True, cwd='$SCRIPT_DIR'
+).stdout.splitlines())
+kept, dropped = [], []
+for entry in data['deprecated_files']:
+    (dropped if entry.get('path') in delivered_now or entry.get('path') in tracked_now else kept).append(entry)
+for entry in dropped:
+    print('  ⚠ deprecated_files: %s снова в поставке — запись удалена из deprecated' % entry.get('path'), file=sys.stderr)
+data['deprecated_files'] = kept
 
 # Убираем пустые массивы
 if not data['excluded_paths']:

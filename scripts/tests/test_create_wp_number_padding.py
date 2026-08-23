@@ -1,8 +1,10 @@
 """
-Регрессионный тест канонического WP-ID без дополнения нулями.
+Регрессионный тест на дополнение номера WP нулями (issue #338 п.4).
 
-Контракт `/wp-new` и WP-434 требуют `inbox/WP-{N}/WP-{N}.md`; архивный
-контекст создаётся только при закрытии РП.
+Без паддинга "WP-9" в листинге/сортировке (ls, git) идёт после "WP-10" —
+на свежей установке (номера < 100) идентификатор перестаёт быть пригоден
+как ключ. Фикс: WP_ID = printf '%03d' в путях/заголовках; "чистое число"
+(frontmatter wp:, consent-файл, колонки "#" REGISTRY/WeekPlan) не трогается.
 
 Тест гоняет РЕАЛЬНЫЙ create-wp.sh end-to-end на минимальном scaffold'е
 governance-репо во временной директории — не копию логики.
@@ -44,23 +46,24 @@ def _run_create_wp(iwe_root: Path, **extra_args):
     )
 
 
-def test_next_wp_number_uses_canonical_paths_and_headers(tmp_path):
+def test_next_wp_number_padded_in_paths_and_headers(tmp_path):
     strategy = _scaffold_governance_repo(tmp_path)
 
     result = _run_create_wp(tmp_path)
 
     assert result.returncode == 0, result.stderr
 
-    wp_dir = strategy / "inbox" / "WP-9"
-    wp_file = wp_dir / "WP-9.md"
-    assert wp_dir.is_dir(), f"ожидалась папка WP-9. stdout:\n{result.stdout}"
+    wp_dir = strategy / "inbox" / "WP-009"
+    wp_file = wp_dir / "WP-009.md"
+    assert wp_dir.is_dir(), f"ожидалась папка WP-009 (паддинг), не WP-9. stdout:\n{result.stdout}"
     assert wp_file.is_file()
 
     content = wp_file.read_text(encoding="utf-8")
-    assert "# WP-9: Тестовый РП" in content
+    assert "# WP-009: Тестовый РП" in content, "заголовок H1 должен быть дополнен нулями"
     assert "wp: 9" in content, "frontmatter wp: остаётся чистым числом, без паддинга"
 
-    assert not list((strategy / "archive" / "wp-contexts").glob("WP-9*"))
+    archive_dir = strategy / "archive" / "wp-contexts"
+    assert not list(archive_dir.iterdir()), "архив создаётся только при закрытии РП, без pending stub"
 
 
 def test_registry_number_column_stays_bare(tmp_path):
@@ -73,7 +76,8 @@ def test_registry_number_column_stays_bare(tmp_path):
     # колонка "#" — чистое число (та же конвенция, что frontmatter), НЕ "009"
     assert "| 9 |" in registry
     assert "| 009 |" not in registry
-    assert "DS-strategy/inbox/WP-9/" in registry
+    # дефолтный "Репо" (когда --repo не передан) обязан указывать на РЕАЛЬНЫЙ (паддированный) путь
+    assert "DS-strategy/inbox/WP-009/" in registry
 
 
 def test_consent_file_path_stays_bare_number(tmp_path):
@@ -90,4 +94,4 @@ def test_consent_file_path_stays_bare_number(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert (strategy / "inbox" / "WP-9").is_dir()
+    assert (strategy / "inbox" / "WP-009").is_dir()

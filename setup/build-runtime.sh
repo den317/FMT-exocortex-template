@@ -23,6 +23,7 @@
 #   3 — overlay-реестр не найден
 #   4 — отсутствуют source-файлы из реестра
 #   5 — drift detected (только в --diff режиме при найденных расхождениях)
+#   7 — отсутствует обязательное значение runtime-конфигурации
 #
 # WP-273 Этап 2 Ф18. ArchGate v2 → F (Generated runtime).
 
@@ -160,6 +161,12 @@ fi
 env_get() {
     local raw
     raw=$(grep "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    # launchd не передаёт USER/LOGNAME в job, но build выполняется в
+    # интерактивной системе, где Unix login доступен надёжно. Явное значение
+    # из env-файла сохраняет приоритет для нестандартных установок.
+    if [ -z "$raw" ] && [ "$1" = "USER_NAME" ]; then
+        raw=$(id -un 2>/dev/null || true)
+    fi
     case "$raw" in
         \"*\") [ ${#raw} -ge 2 ] && raw="${raw#\"}" && raw="${raw%\"}" ;;
         \'*\') [ ${#raw} -ge 2 ] && raw="${raw#\'}" && raw="${raw%\'}" ;;
@@ -195,6 +202,14 @@ while IFS= read -r line; do PLACEHOLDERS+=("$line"); done < <(parse_list "placeh
 if [ "${#SUBSTITUTED_FILES[@]}" -eq 0 ] && [ "${#COPIED_FILES[@]}" -eq 0 ]; then
     echo "ERROR: Overlay-реестр пуст или повреждён: $OVERLAY_FILE" >&2
     exit 3
+fi
+
+# USER/LOGNAME are absent from launchd's minimal environment. They are rendered
+# during the build from explicit configuration or the current Unix login.
+if [ -z "$(env_get USER_NAME)" ]; then
+    echo "ERROR: cannot determine USER_NAME to render launchd jobs." >&2
+    echo "Set USER_NAME in .exocortex.env or run the build as a Unix user." >&2
+    exit 7
 fi
 
 # === Verify source files exist in FMT ===

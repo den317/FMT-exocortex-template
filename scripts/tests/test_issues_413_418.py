@@ -188,6 +188,50 @@ def test_memory_drift_scan_keeps_real_status_difference_visible(tmp_path: Path):
     assert len(module.scan(memory, governance)) == 1
 
 
+def test_memory_drift_scan_normalizes_russian_statuses(tmp_path: Path):
+    memory = tmp_path / "MEMORY.md"
+    governance = tmp_path / "DS-strategy"
+    card = governance / "inbox" / "WP-414" / "WP-414.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("---\nstatus: blocked\n---\n", encoding="utf-8")
+    memory.write_text(
+        "| # | Работа | Статус |\n|---|---|---|\n| 414 | Проверка | ⏸ ЗАБЛОКИРОВАН — ждёт решения |\n",
+        encoding="utf-8",
+    )
+
+    module = load_memory_drift_scan()
+    assert module.scan(memory, governance) == []
+
+
+def test_memory_drift_scan_keeps_paused_distinct_from_blocked(tmp_path: Path):
+    memory = tmp_path / "MEMORY.md"
+    governance = tmp_path / "DS-strategy"
+    card = governance / "inbox" / "WP-414" / "WP-414.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("---\nstatus: blocked\n---\n", encoding="utf-8")
+    memory.write_text(
+        "| # | Работа | Статус |\n|---|---|---|\n| 414 | Проверка | ⏸ — на паузе |\n",
+        encoding="utf-8",
+    )
+
+    module = load_memory_drift_scan()
+    drifts = module.scan(memory, governance)
+    assert len(drifts) == 1
+    assert "MEMORY.md=`paused` vs WP-context=`blocked`" in drifts[0]
+
+
+def test_memory_drift_scan_covers_platform_status_markers():
+    module = load_memory_drift_scan()
+
+    assert module.normalize_status("🧪") == "in_progress"
+    assert module.normalize_status("🚧") == "blocked"
+    assert module.normalize_status("📦") == "done"
+    assert module.normalize_status("↗️") == "done"
+    assert module.normalize_status("❌") == "cancelled"
+    assert module.normalize_status("выполнено") == "done"
+    assert module.normalize_status("отменён") == "cancelled"
+
+
 def test_close_wp_updates_canonical_folder_card(tmp_path: Path):
     governance = tmp_path / "DS-strategy"
     (governance / "docs").mkdir(parents=True)
@@ -211,6 +255,34 @@ def test_close_wp_updates_canonical_folder_card(tmp_path: Path):
     content = card.read_text(encoding="utf-8")
     assert "status: done" in content
     assert "closed_date:" in content
+
+
+def test_close_wp_uses_padded_card_and_single_archive_for_bare_number(tmp_path: Path):
+    governance = tmp_path / "DS-strategy"
+    (governance / "docs").mkdir(parents=True)
+    card = governance / "inbox" / "WP-009" / "WP-009.md"
+    card.parent.mkdir(parents=True)
+    (governance / "docs" / "WP-REGISTRY.md").write_text(
+        "| # | P | Название | Ст |\n|---|---|---|---|\n| 9 | P1 | Проверка архива | 🔄 |\n",
+        encoding="utf-8",
+    )
+    card.write_text("---\nstatus: in_progress\ncreated: 2026-08-01\n---\n", encoding="utf-8")
+    env = {**os.environ, "IWE_ROOT": str(tmp_path), "IWE_GOVERNANCE_REPO": "DS-strategy"}
+
+    for _ in range(2):
+        result = subprocess.run(
+            ["bash", str(CLOSE_WP), "--wp", "9", "--summary", "готово"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    assert "status: done" in card.read_text(encoding="utf-8")
+    archives = list((governance / "archive" / "wp-contexts").glob("WP-009-*.md"))
+    assert len(archives) == 1
+    assert not list((governance / "archive" / "wp-contexts").glob("WP-9-*.md"))
 
 
 @pytest.mark.skipif(not shutil.which("jq"), reason="destructive guard requires jq")

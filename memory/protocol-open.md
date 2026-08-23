@@ -66,7 +66,7 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 
    **Шаг 3a — Bundle.** Запустить детерминированный сборщик контекста:
    ```bash
-   bash .claude/scripts/wp-sync-bundle.sh WP-N > /tmp/wp-sync-bundle-$$.md
+   bash "${IWE_WORKSPACE:-$HOME/IWE}/.claude/scripts/wp-sync-bundle.sh" WP-N > /tmp/wp-sync-bundle-$$.md
    ```
    Exit 0 → читать вывод. Exit 1 → РП не найден → перейти к Ритуалу с пометкой «контекст не найден». Exit 2 → ошибка парсинга → перейти к Ритуалу, поднять stderr в «Требует внимания».
 

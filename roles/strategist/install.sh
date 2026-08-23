@@ -48,8 +48,8 @@ if ! command -v launchctl >/dev/null 2>&1; then
             echo "  ⊠ SETUP_CI: systemd activation skipped for $ROLE_NAME"
             exit 0
         fi
-        echo "Installing $ROLE_NAME systemd user services (Linux)..."
-        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+
+        source "$(cd "$SCRIPT_DIR/../lib" && pwd)/scheduler-cron.sh"
 
         if [ -n "${IWE_RUNTIME:-}" ] && [ -d "$IWE_RUNTIME/roles/$ROLE_NAME/scripts/systemd" ]; then
             SYSTEMD_SRC="$IWE_RUNTIME/roles/$ROLE_NAME/scripts/systemd"
@@ -65,8 +65,37 @@ if ! command -v launchctl >/dev/null 2>&1; then
             exit 2
         fi
 
-        mkdir -p "$SYSTEMD_USER_DIR"
         mkdir -p "$HOME/logs/strategist"
+
+        # issue #454: same functional bus probe as synchronizer/install.sh —
+        # `command -v systemctl` alone can't tell WSL2/container hosts without a
+        # session bus from a real systemd apart, and `enable --now` on those just
+        # fails silently for the pilot.
+        if ! iwe_systemd_user_bus_ok; then
+            echo "  ⚠ systemd --user недоступен (нет пользовательской сессионной шины — типично для WSL2/контейнера/сервера без активного логина)"
+            echo "  Installing $ROLE_NAME via cron fallback (issue #454)..."
+            # WP-529 Ф9 (Evgenii 20.08): mapfile is bash4-only — this branch is
+            # exactly the one macOS (stock /bin/bash 3.2, no systemd) takes,
+            # so the previous line silently crashed the cron-fallback install
+            # on the platform it exists to serve.
+            cron_lines=()
+            while IFS= read -r cron_line; do
+                cron_lines+=("$cron_line")
+            done < <(
+                iwe_timer_to_cron_lines "$SYSTEMD_SRC/iwe-strategist-morning.timer" \
+                    "$(iwe_cron_env_prefix) $SCRIPT_TARGET morning >> $HOME/logs/strategist/cron-morning.log 2>&1"
+                iwe_timer_to_cron_lines "$SYSTEMD_SRC/iwe-strategist-weekreview.timer" \
+                    "$(iwe_cron_env_prefix) $SCRIPT_TARGET week-review >> $HOME/logs/strategist/cron-weekreview.log 2>&1"
+            )
+            iwe_install_cron_fallback "strategist" "${cron_lines[@]}"
+            echo "  ✓ Installed via crontab. Verify: crontab -l | grep strategist.sh"
+            echo "  ✓ Logs: ~/logs/strategist/"
+            exit 0
+        fi
+
+        echo "Installing $ROLE_NAME systemd user services (Linux)..."
+        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SYSTEMD_USER_DIR"
 
         # issue #285 (same class of bug, Linux equivalent): пользователь мог явно
         # выключить таймер (`systemctl --user disable iwe-strategist-morning.timer`)

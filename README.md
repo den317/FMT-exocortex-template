@@ -1,7 +1,7 @@
 # IWE — Intellectual Work Environment
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.38.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.38.7-blue.svg)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(Git%20Bash)-lightgrey.svg)]()
 [![EN sync](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/TserenTserenov/FMT-exocortex-template/en-draft/badge-data.json)](https://github.com/TserenTserenov/FMT-exocortex-template/tree/en-draft)
 
@@ -125,6 +125,10 @@ IWE — для тех, кто хочет это изменить:
 - В понедельник — Стратег готовит черновик недельного плана, вы обсуждаете его на сессии стратегирования
 
 ---
+
+## Требования к машине
+
+Минимум **4 ГиБ свободной оперативной памяти** на время работы Claude Code (или другого агента) поверх IWE. При меньшем объёме — особенно на общих серверах с несколькими пользователями — инструменты чтения/записи файлов могут периодически отказывать с сообщением вида `PreToolUse hook did not respond before its timeout`. Это сообщение указывает на нехватку памяти хост-процесса, не на поломку хуков шаблона (issue [#461](https://github.com/TserenTserenov/FMT-exocortex-template/issues/461)) — `bash scripts/iwe-audit.sh` показывает текущий уровень доступной памяти в разделе «Доступная память».
 
 ## Начать
 

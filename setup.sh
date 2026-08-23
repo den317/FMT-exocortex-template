@@ -299,6 +299,7 @@ else
 fi
 
 HOME_DIR="$HOME"
+USER_NAME="$(id -un)"
 
 # Compute Claude project slug: /Users/alice/IWE → -Users-alice-IWE
 CLAUDE_PROJECT_SLUG="$(echo "$WORKSPACE_DIR" | tr '/' '-')"
@@ -431,6 +432,7 @@ CLAUDE_PROJECT_SLUG="$CLAUDE_PROJECT_SLUG"
 TIMEZONE_HOUR="$TIMEZONE_HOUR"
 TIMEZONE_DESC="$TIMEZONE_DESC"
 HOME_DIR="$HOME_DIR"
+USER_NAME="$USER_NAME"
 GOVERNANCE_REPO="$GOVERNANCE_REPO"
 IWE_TEMPLATE="$IWE_TEMPLATE_PATH"
 IWE_RUNTIME="$IWE_RUNTIME_PATH"
@@ -727,6 +729,29 @@ fi
 
 # === 4e. Generate executor-catalog.yaml for task routing (issue #197) ===
 # route-task.sh (DP.ROLE.059, Маршрутизатор) looks this up at
+# WP-529 F6 (#463): one visible PyYAML preflight instead of per-script
+# surprises. Warning only — never blocks install: calendar/news/wp-sweep are
+# optional features and every consumer now fails with an explicit dependency
+# error at use time (scripts/lib/find-python3.sh).
+#
+# Evgenii Red Team review 2026-08-19 (defect #2): this used to run the
+# resolver for its exit code only and discard stdout — the executor-catalog
+# generation below then called bare `python3` again, which on the same Apple
+# Silicon machine can be a DIFFERENT interpreter (no yaml) than the one the
+# resolver just found. Keep the resolved path and reuse it everywhere below.
+YAML_PYTHON3=""
+if YAML_PYTHON3=$("$TEMPLATE_DIR/scripts/lib/find-python3.sh" 2>/dev/null); then
+    :
+else
+    YAML_PYTHON3=""
+    echo "  ⚠ Не найден python3 с библиотекой PyYAML — календарь, лента «Мир» и обзор РП будут отключаться с явной ошибкой зависимости."
+    if [ "$(uname)" = "Linux" ]; then
+        echo "    Установи: sudo apt install python3-yaml (или: pip3 install pyyaml)"
+    else
+        echo "    Установи: pip3 install pyyaml (python3 из Homebrew уже содержит pip3)"
+    fi
+fi
+
 # ~/IWE/$GOVERNANCE_REPO/scripts/executor-catalog.yaml — without generating it on
 # install, a fresh install has no catalog and route-task.sh always fails ("not found").
 # Non-fatal on error: routing is a convenience feature, not a hard setup prerequisite
@@ -735,25 +760,19 @@ if $CORE_ONLY; then
     echo "[4e] executor-catalog.yaml... пропущено (core mode, нет агента для маршрутизации)"
 elif $DRY_RUN; then
     echo "[DRY RUN] Would generate executor-catalog.yaml (IWE_GOVERNANCE_REPO=$GOVERNANCE_REPO)"
+elif [ -z "$YAML_PYTHON3" ]; then
+    # Resolver above already found and printed the remediation — no yaml-capable
+    # interpreter exists on this machine at all, running generate-executor-catalog.py
+    # would just repeat the same ModuleNotFoundError one indirection later.
+    echo "[4e] executor-catalog.yaml... пропущено (нет python3 с PyYAML, см. предупреждение выше)"
 else
     echo "[4e] Generating executor-catalog.yaml..."
-    if CATALOG_OUTPUT=$(IWE_GOVERNANCE_REPO="$GOVERNANCE_REPO" python3 "$TEMPLATE_DIR/scripts/generate-executor-catalog.py" 2>&1); then
+    if CATALOG_OUTPUT=$(IWE_GOVERNANCE_REPO="$GOVERNANCE_REPO" "$YAML_PYTHON3" "$TEMPLATE_DIR/scripts/generate-executor-catalog.py" 2>&1); then
         echo "$CATALOG_OUTPUT" | sed 's/^/  /'
-    elif echo "$CATALOG_OUTPUT" | grep -q "No module named 'yaml'"; then
-        # Голая Ubuntu/Debian не тащит PyYAML в system python3 (issue найден живым
-        # прогоном WP-5, 2026-07-27) — сырой traceback пугает новичка без подсказки.
-        echo "  ⚠ executor-catalog.yaml не сгенерирован — не хватает библиотеки PyYAML для python3."
-        if [ "$(uname)" = "Linux" ]; then
-            echo "    Установи: sudo apt install python3-yaml (или: pip3 install pyyaml, если pip3 уже стоит)"
-        else
-            echo "    Установи: pip3 install pyyaml"
-        fi
-        echo "    Потом выполни вручную:"
-        echo "    python3 $TEMPLATE_DIR/scripts/generate-executor-catalog.py"
     else
         echo "$CATALOG_OUTPUT" | sed 's/^/  /'
         echo "  ⚠ executor-catalog.yaml не сгенерирован — запусти вручную:"
-        echo "    python3 $TEMPLATE_DIR/scripts/generate-executor-catalog.py"
+        echo "    \"$YAML_PYTHON3\" $TEMPLATE_DIR/scripts/generate-executor-catalog.py"
     fi
 fi
 
@@ -828,21 +847,21 @@ else
 fi
 
 # === 6. Create DS-strategy repo ===
-echo "[6/6] Setting up DS-strategy..."
-MY_STRATEGY_DIR="$WORKSPACE_DIR/DS-strategy"
+echo "[6/6] Setting up $GOVERNANCE_REPO..."
+MY_STRATEGY_DIR="$WORKSPACE_DIR/$GOVERNANCE_REPO"
 STRATEGY_TEMPLATE="$TEMPLATE_DIR/seed/strategy"
 
 if [ -d "$MY_STRATEGY_DIR/.git" ]; then
-    echo "  DS-strategy already exists as git repo."
+    echo "  $GOVERNANCE_REPO already exists as git repo."
 elif $DRY_RUN; then
     if [ -d "$STRATEGY_TEMPLATE" ]; then
-        echo "  [DRY RUN] Would create DS-strategy from seed/strategy → $MY_STRATEGY_DIR"
+        echo "  [DRY RUN] Would create $GOVERNANCE_REPO from seed/strategy → $MY_STRATEGY_DIR"
         echo "  [DRY RUN] Would init git repo + initial commit"
         if ! $CORE_ONLY; then
-            echo "  [DRY RUN] Would create GitHub repo: $GITHUB_USER/DS-strategy (private)"
+            echo "  [DRY RUN] Would create GitHub repo: $GITHUB_USER/$GOVERNANCE_REPO (private)"
         fi
     else
-        echo "  [DRY RUN] Would create minimal DS-strategy (seed/strategy not found)"
+        echo "  [DRY RUN] Would create minimal $GOVERNANCE_REPO (seed/strategy not found)"
     fi
 else
     if [ -d "$STRATEGY_TEMPLATE" ]; then
@@ -864,7 +883,7 @@ else
         cd "$MY_STRATEGY_DIR"
         git init
         git add -A
-        git commit -m "Initial exocortex: DS-strategy governance hub"
+        git commit -m "Initial exocortex: $GOVERNANCE_REPO governance hub"
 
         # Enable secrets-check pre-commit hook (issue #317: install-iwe-paths.sh
         # runs at step [4d], before this repo exists — its auto-enable loop can't
@@ -876,25 +895,25 @@ else
 
         if ! $CORE_ONLY; then
             # Create GitHub repo (full mode only)
-            gh repo create "$GITHUB_USER/DS-strategy" --private --source=. --push 2>/dev/null || \
-                echo "  GitHub repo DS-strategy already exists or creation skipped."
+            gh repo create "$GITHUB_USER/$GOVERNANCE_REPO" --private --source=. --push 2>/dev/null || \
+                echo "  GitHub repo $GOVERNANCE_REPO already exists or creation skipped."
         else
             echo "  Локальный репозиторий создан. Для публикации на GitHub:"
-            echo "    cd $MY_STRATEGY_DIR && gh repo create $GITHUB_USER/DS-strategy --private --source=. --push"
+            echo "    cd $MY_STRATEGY_DIR && gh repo create $GITHUB_USER/$GOVERNANCE_REPO --private --source=. --push"
         fi
     else
-        echo "  ERROR: seed/strategy/ not found. DS-strategy will be incomplete."
+        echo "  ERROR: seed/strategy/ not found. $GOVERNANCE_REPO will be incomplete."
         echo "  Fix: re-clone the template and run setup.sh again."
         echo "  Creating minimal structure as fallback..."
         mkdir -p "$MY_STRATEGY_DIR"/{current,inbox,archive/wp-contexts,docs,exocortex}
         cd "$MY_STRATEGY_DIR"
         git init
         git add -A
-        git commit -m "Initial exocortex: DS-strategy governance hub (minimal)"
+        git commit -m "Initial exocortex: $GOVERNANCE_REPO governance hub (minimal)"
 
         if ! $CORE_ONLY; then
-            gh repo create "$GITHUB_USER/DS-strategy" --private --source=. --push 2>/dev/null || \
-                echo "  GitHub repo DS-strategy already exists or creation skipped."
+            gh repo create "$GITHUB_USER/$GOVERNANCE_REPO" --private --source=. --push 2>/dev/null || \
+                echo "  GitHub repo $GOVERNANCE_REPO already exists or creation skipped."
         fi
     fi
 fi
@@ -950,7 +969,7 @@ else
     echo "  ✓ CLAUDE.md:   $WORKSPACE_DIR/CLAUDE.md"
     echo "  ✓ Memory:      $CLAUDE_MEMORY_DIR/ ($(ls "$CLAUDE_MEMORY_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ') files)"
     echo "  ✓ Symlink:     $WORKSPACE_DIR/memory → $CLAUDE_MEMORY_DIR"
-    echo "  ✓ DS-strategy: $MY_STRATEGY_DIR/"
+    echo "  ✓ $GOVERNANCE_REPO: $MY_STRATEGY_DIR/"
     echo "  ✓ Template:    $TEMPLATE_DIR/"
     echo ""
 

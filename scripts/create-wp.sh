@@ -269,11 +269,10 @@ print(result)
 fi
 
 # Inbox convention (WP-434): every WP is a folder inbox/WP-N/ with main file WP-N.md.
-# Slug is dropped from the filename (lives in title: frontmatter); archive stub keeps it.
+# Slug lives in the title/frontmatter.  Архив появляется только при закрытии:
+# предварительный stub конфликтовал с close-wp.sh и мог затереть контекст.
 WP_DIR="$INBOX/WP-${WP_ID}"
 WP_FILE="$WP_DIR/WP-${WP_ID}.md"
-ARCHIVE_DIR="$STRATEGY/archive/wp-contexts"
-ARCHIVE_STUB="$ARCHIVE_DIR/WP-${WP_ID}-${SLUG}.md"
 mkdir -p "$WP_DIR"
 
 echo "🚀 Создаю WP-${WP_ID}: $TITLE"
@@ -304,7 +303,6 @@ WEEKPLAN_SNAPSHOT="$SNAPSHOT_DIR/weekplan.snapshot"
 rollback_wp_creation() {
   echo "↩️  Откат: WP-${WP_ID} не создан целиком, отменяю частичные записи" >&2
   rm -rf "$WP_DIR"
-  rm -f "$ARCHIVE_STUB"
   if [[ -f "$REGISTRY_SNAPSHOT" ]]; then
     cp "$REGISTRY_SNAPSHOT" "$REGISTRY"
   else
@@ -336,7 +334,7 @@ fi
 
 # --- Шаг 1: context file ---
 echo ""
-echo "1/6 context file..."
+echo "1/5 context file..."
 
 # state_transition goes into frontmatter only when provided (gate off on
 # installs without the axes registry); hypothesis always present, "—" = no bet.
@@ -409,31 +407,8 @@ if [[ "$HYPOTHESIS_RELATION" == "unclassified" ]]; then
   echo "   ⚠️  Связь с гипотезой не определена: до начала РП выберите tests/enables/responds/researches/operational" >&2
 fi
 
-# --- Шаг 2: archive stub ---
-echo "2/6 archive stub..."
-
-mkdir -p "$ARCHIVE_DIR"
-if ! cat > "$ARCHIVE_STUB" <<ARCHEOF
----
-wp: ${WP_NUM}
-title: "${TITLE}"
-created: ${TODAY}
-status: pending
----
-
-# WP-${WP_ID}: ${TITLE} — §Закрытие
-
-*(заполняется при закрытии РП)*
-ARCHEOF
-then
-  echo "❌ Не удалось записать archive stub: $ARCHIVE_STUB" >&2
-  rollback_wp_creation
-  exit 1
-fi
-echo "   ✅ $ARCHIVE_STUB"
-
-# --- Шаг 3: WP-REGISTRY.md ---
-echo "3/6 WP-REGISTRY.md..."
+# --- Шаг 2: WP-REGISTRY.md ---
+echo "2/5 WP-REGISTRY.md..."
 
 if ! python3 - "$REGISTRY" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO" "$STAKE_CELL" "$WP_ID" <<'PYEOF'
 import sys
@@ -556,8 +531,8 @@ if ! grep -qE "\| \*?\*?(WP-)?${WP_NUM}\*?\*? \|" "$REGISTRY"; then
   exit 1
 fi
 
-# --- Шаг 4: WeekPlan ---
-echo "4/6 WeekPlan..."
+# --- Шаг 3: WeekPlan ---
+echo "3/5 WeekPlan..."
 
 # WEEKPLAN уже найден выше (снимок для отката, issue WP-507 про формат имени файла
 # применён там же) — здесь используется тот же путь, не ищем повторно.
@@ -621,8 +596,8 @@ else
   echo "   ⚠️  WeekPlan не найден в current/ — добавить вручную" >&2
 fi
 
-# --- Шаг 5: Strategy.md (только если --result задан и бюджет ≥3h) ---
-echo "5/6 Strategy.md..."
+# --- Шаг 4: Strategy.md (только если --result задан и бюджет ≥3h) ---
+echo "4/5 Strategy.md..."
 
 BUDGET_H=$(echo "$BUDGET" | sed 's/[^0-9]//g')
 if [[ -n "$RESULT" && "${BUDGET_H:-0}" -ge 3 ]]; then
@@ -662,8 +637,8 @@ else
   echo "   ℹ️  РП <3h — маппинг в Strategy.md не требуется"
 fi
 
-# --- Шаг 6: active-wp.md ---
-echo "6/6 active-wp.md..."
+# --- Шаг 5: active-wp.md ---
+echo "5/5 active-wp.md..."
 
 BUILD_ACTIVE_WP=""
 if [[ -f "$STRATEGY/scripts/build-active-wp.py" ]]; then
@@ -680,11 +655,26 @@ else
   echo "   ⚠️  scripts/build-active-wp.py не найден (искали в \`$STRATEGY/scripts/\` и \`$IWE/FMT-exocortex-template/scripts/\`) — пересобрать вручную" >&2
 fi
 
-# --- Внешний трекер (условный пост-шаг, issue #321) ---
+# --- Внешний трекер (условный пост-шаг, #432) ---
+# The local transaction above is already complete.  The adapter is deliberately
+# best-effort: its UNAVAILABLE/INVALID_CONFIG result is visible but never rolls
+# back a valid local WP.
 echo ""
-echo "ℹ️  Внешний трекер (если подключён): создать issue вручную или через MCP"
-echo "   Linear MCP → create_issue title='WP-${WP_ID} ${TITLE}' teamId=TSR"
-echo "   MCP не подключён → штатно: отметить «внешний трекер: не подключён», локальная запись полна"
+TRACKER_ADAPTER=""
+if [[ -x "$IWE/scripts/external-tracker.py" ]]; then
+  TRACKER_ADAPTER="$IWE/scripts/external-tracker.py"
+elif [[ -x "$IWE/FMT-exocortex-template/scripts/external-tracker.py" ]]; then
+  TRACKER_ADAPTER="$IWE/FMT-exocortex-template/scripts/external-tracker.py"
+fi
+
+if [[ -n "$TRACKER_ADAPTER" && "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  TRACKER_OUTPUT=$(python3 "$TRACKER_ADAPTER" create --context "$WP_FILE" --repository "$REPO" 2>&1 || true)
+  echo "ℹ️  Внешний трекер: $TRACKER_OUTPUT"
+elif [[ -n "$TRACKER_ADAPTER" ]]; then
+  echo "ℹ️  Внешний трекер не вызывался: --repo должен иметь формат owner/repository"
+else
+  echo "ℹ️  Внешний трекер не установлен; локальная регистрация РП завершена"
+fi
 
 # --- Consent file остаётся в папке WP для аудит-следа ---
 # Ранее consent file удалялся здесь; это ломало последующие wp-gate-check
@@ -697,6 +687,6 @@ fi
 echo ""
 echo "✅ WP-${WP_ID} создан: $TITLE"
 echo "   context: inbox/WP-${WP_ID}/WP-${WP_ID}.md"
-echo "   archive: archive/wp-contexts/WP-${WP_ID}-${SLUG}.md"
+echo "   archive: будет создан close-wp.sh при закрытии РП"
 echo "   Следующий шаг: заполнить «Проблема», «Артефакт», «Фазы» в context file"
 echo "   Не забыть: issue во внешнем трекере (если подключён)"

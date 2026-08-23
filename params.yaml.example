@@ -58,6 +58,16 @@ github_wp_adopt_from: ""
 # github_wp_sync_enabled не используется.
 linear_sync_path: ""
 
+# Необязательная проекция локальных РП во внешний трекер. Локальный контекст
+# всегда остаётся источником истины; пустой allowlist запрещает внешние записи.
+external_tracker:
+  adapter: none # none | github_issues
+  failure_policy: preserve_local
+  source_of_truth: iwe
+  github:
+    owner: ""
+    repositories: []
+
 # === Расширения ===
 
 # Директория с пользовательскими расширениями протоколов

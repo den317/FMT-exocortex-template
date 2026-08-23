@@ -453,6 +453,9 @@ def ensure_workdir(workdir: Path) -> None:
         # so no concurrent git process holds it. (bug-2026-06-20-session-dispatcher-py39)
         (repo_dir / ".git" / "index.lock").unlink(missing_ok=True)
         run(["git", "fetch", "origin", GOV_BRANCH], cwd=repo_dir, timeout=60)
+        # Re-check right before the destructive op — closes the TOCTOU window
+        # left by only checking once at function entry (WP-7 Ф73).
+        _guard_repo_dir_is_isolated(repo_dir)
         run(["git", "reset", "--hard", f"origin/{GOV_BRANCH}"], cwd=repo_dir,
             timeout=30)
     # Configure git identity

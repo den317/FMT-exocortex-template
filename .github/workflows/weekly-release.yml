@@ -2,12 +2,21 @@ name: Weekly Release
 
 # Еженедельно (Вс 20:00 UTC = Пн 00:00 MSK+1) проверяет CHANGELOG.md:
 # если секция [Unreleased] непустая — бампает patch-версию в
-# update-manifest.json и коммитит, затем явно запускает release.yml,
-# который создаёт тег и GitHub Release.
+# update-manifest.json и коммитит.
 #
-# Явный запуск (не push-триггер): коммит идёт от github-actions[bot] через
-# стандартный GITHUB_TOKEN, а такие коммиты по политике GitHub не каскадируют
-# в другие workflow (anti-recursion), поэтому release.yml сам не подхватится.
+# WP-7 Ф62 (10.08.2026): раньше отсюда явно звали release.yml напрямую —
+# тег и релиз создавались БЕЗ единой проверки CI на этом коммите (сам бамп
+# нигде не тестировался). Теперь этот job явно зовёт validate-template.yml
+# (workflow_dispatch — коммит идёт от github-actions[bot] через стандартный
+# GITHUB_TOKEN, а такие коммиты по anti-recursion policy GitHub не
+# каскадируют в push-триггеры сами по себе) и на этом останавливается —
+# release.yml подписан на завершение Validate Template (workflow_run) и
+# сам создаст тег/релиз, если та проверка прошла зелёной. Раньше здесь же
+# был polling + gh run watch, чтобы дождаться результата и явно вызвать
+# release.yml — убрано (пир-ревью 2026-08-10-13-wp7-f62-release-gate-review):
+# опасная гонка (какой конкретно run соответствует какому push) была в
+# самом сопоставлении по SHA/времени, а не в том, что job не ждёт результата.
+# release.yml сам берёт SHA из события workflow_run — гонки нет по построению.
 #
 # Причина: раньше версия бампалась только вручную — паузы между
 # выпусками доходили до 2-3 недель, хотя коммиты в [Unreleased]
@@ -70,17 +79,48 @@ jobs:
         if: steps.check.outputs.has_content == 'true'
         run: bash scripts/changelog-flush.sh --version "${{ steps.bump.outputs.version }}"
 
+      # 2026-08-20 rake, reproduced empirically before this fix (WP-529): the
+      # bump commit changed version+CHANGELOG only. README badge stayed on the
+      # old version (release-sync red) and the manifest still carried the
+      # pre-flush CHANGELOG.md sha256 (validate B2 red) — release.yml, which
+      # is subscribed to a GREEN Validate Template, never fired, and every
+      # release needed a manual follow-up commit.
+      - name: Sync version badge and rebuild manifest for the bump commit
+        if: steps.check.outputs.has_content == 'true'
+        run: |
+          bash scripts/sync-version-badge.sh --fix
+          bash generate-manifest.sh
+
       - name: Commit and push
         if: steps.check.outputs.has_content == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add update-manifest.json CHANGELOG.md
+          git add update-manifest.json CHANGELOG.md README.md
           git commit -m "chore(release): weekly auto-bump to v${{ steps.bump.outputs.version }}"
           git push origin main
 
-      - name: Trigger Release workflow
+      - name: Validate the bump commit and close the release chain
+        # 2026-08-22, live half-release v0.38.7: a Validate run dispatched
+        # with GITHUB_TOKEN completes WITHOUT emitting workflow_run events
+        # (GitHub anti-recursion), so release.yml never fired for the bump
+        # commit — the version bumped, the tag never appeared, and the daily
+        # notify announced a release that did not exist. Fire-and-forget is
+        # not an option with the default token: wait for that exact Validate
+        # run and dispatch release.yml explicitly (API dispatches DO run).
         if: steps.check.outputs.has_content == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run release.yml --ref main
+        run: |
+          BUMP_SHA=$(git rev-parse HEAD)
+          gh workflow run validate-template.yml --ref main
+          sleep 20
+          RUN_ID=""
+          for i in $(seq 1 30); do
+            RUN_ID=$(gh run list --workflow validate-template.yml --branch main               --json databaseId,headSha,event               --jq ".[] | select(.headSha==\"$BUMP_SHA\" and .event==\"workflow_dispatch\") | .databaseId" | head -1)
+            [ -n "$RUN_ID" ] && break
+            sleep 10
+          done
+          [ -n "$RUN_ID" ] || { echo "Validate run for bump commit $BUMP_SHA never appeared"; exit 1; }
+          gh run watch "$RUN_ID" --exit-status
+          gh workflow run release.yml --ref main -f version="${{ steps.bump.outputs.version }}"

@@ -54,8 +54,8 @@ if ! command -v launchctl >/dev/null 2>&1; then
             echo "  ⊠ SETUP_CI: systemd activation skipped for $ROLE_NAME"
             exit 0
         fi
-        echo "Installing $ROLE_NAME systemd user service (Linux)..."
-        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+
+        source "$(cd "$SCRIPT_DIR/../lib" && pwd)/scheduler-cron.sh"
 
         if [ -n "${IWE_RUNTIME:-}" ] && [ -d "$IWE_RUNTIME/roles/$ROLE_NAME/scripts/systemd" ]; then
             SYSTEMD_SRC="$IWE_RUNTIME/roles/$ROLE_NAME/scripts/systemd"
@@ -71,8 +71,25 @@ if ! command -v launchctl >/dev/null 2>&1; then
             exit 2
         fi
 
-        mkdir -p "$SYSTEMD_USER_DIR"
         mkdir -p "$HOME/logs/extractor"
+
+        # issue #454: same functional bus probe as synchronizer/strategist
+        # install.sh. iwe-extractor-inbox-check.timer is interval-based
+        # (OnUnitActiveSec=3h, no OnCalendar), so there's nothing to parse —
+        # "every 3 hours starting at :00" is the direct cron equivalent.
+        if ! iwe_systemd_user_bus_ok; then
+            echo "  ⚠ systemd --user недоступен (нет пользовательской сессионной шины — типично для WSL2/контейнера/сервера без активного логина)"
+            echo "  Installing $ROLE_NAME via cron fallback (issue #454)..."
+            iwe_install_cron_fallback "extractor" \
+                "0 */3 * * * $(iwe_cron_env_prefix) $SCRIPT_TARGET inbox-check >> $HOME/logs/extractor/cron-inbox-check.log 2>&1"
+            echo "  ✓ Installed via crontab. Verify: crontab -l | grep extractor.sh"
+            echo "  ✓ Logs: ~/logs/extractor/"
+            exit 0
+        fi
+
+        echo "Installing $ROLE_NAME systemd user service (Linux)..."
+        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SYSTEMD_USER_DIR"
 
         cp "$SYSTEMD_SRC"/*.service "$SYSTEMD_SRC"/*.timer "$SYSTEMD_USER_DIR/"
         systemctl --user daemon-reload

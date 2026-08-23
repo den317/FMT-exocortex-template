@@ -25,9 +25,13 @@
 #   T21: legacy owner:user protocols migrate once with backup; other user files stay protected (issue #354)
 #   T22: Quick Close requires a runner card only when the runner and graph exist (issue #356)
 #   T23: wp-sync-bundle prefers folder cards and reads structured open phase statuses
-#   T24-T27: update safety, bootstrap/path contracts, multiplier opt-out,
-#             and day-close ownership/source selection
-#   T28: pinned update channel consistency and manifest identity
+#   T24-T27: update safety, bootstrap/path contracts, multiplier opt-out, #384/#387/#388
+#   T28: settings.json merge preview never touches inputs, honors merge rules (WP-7 F71)
+#   T29: author_mode skip classifier verdicts on synthetic template history (WP-7 F71)
+#   T30: update.sh wires stage-A observability scripts in (WP-7 F71)
+#   T31: extensions-gate is fail-closed: traversal/symlink/broken-manifest/manifest-edit block (WP-7 F71)
+#   T32: settings-merge-apply.sh applies with backup, rolls back on broken input (WP-7 F71 stage B)
+#   T33: update.sh wires stage-B flags with consensus safeguards (WP-7 F71)
 #
 # Exit: 0 = all PASS, N = N tests failed
 #
@@ -136,6 +140,11 @@ if [ "$CLAUDE_BEFORE" = "$CLAUDE_AFTER" ]; then
     pass "T1: CLAUDE.md unchanged after --check"
 else
     fail "T1: CLAUDE.md was mutated by --check mode"
+fi
+if [ ! -e "$TEMPLATE_DIR/.update-incomplete" ]; then
+    pass "T1: --check does not create an incomplete-update marker"
+else
+    fail "T1: --check created transaction state"
 fi
 
 # ============================================================
@@ -383,6 +392,7 @@ HEREDOC
 
 cp "$TEMPLATE_DIR/.exocortex.env" "$T8_WS/.exocortex.env" 2>/dev/null || cat > "$T8_WS/.exocortex.env" <<HEREDOC
 HOME_DIR=$HOME
+USER_NAME=test-user
 WORKSPACE_DIR=$T8_WS
 CLAUDE_PATH=/usr/bin/claude
 CLAUDE_PROJECT_SLUG=test
@@ -436,14 +446,17 @@ HEREDOC
 # this test, which would pass even if update.sh's real code diverged. A file
 # (not `python3 -c "$VAR"`) sidesteps bash re-quoting/escaping issues with the
 # block's embedded '\n' and mixed quotes.
+# issue #402: the block now invokes $PY_BIN (not a literal `python3`) and takes
+# its path via argv (`sys.argv[1]`), not an interpolated `$MCP_WORKSPACE` — the
+# marker and the post-extraction substitution both follow that shape now.
 T9_PY_BLOCK=$(awk '/^# === Step 6c: Migrate workspace \.mcp\.json to Gateway ===$/{found=1} found' "$TEMPLATE_DIR/update.sh" | \
-              sed -n '/^    python3 -c "$/,/^" 2>\/dev\/null$/p' | sed '1d;$d')
+              sed -n '/^    \$PY_BIN -c "$/,/^" "\$MCP_WORKSPACE" 2>\/dev\/null$/p' | sed '1d;$d')
 if [ -z "$T9_PY_BLOCK" ]; then
     fail "T9: could not extract Step 6c migration block from update.sh — marker comment moved?"
 else
     T9_PYFILE="$TEST_WS/t9-migration.py"
-    printf '%s' "$T9_PY_BLOCK" | sed "s|\$MCP_WORKSPACE|$T9_MCP|g" > "$T9_PYFILE"
-    python3 "$T9_PYFILE" >/dev/null 2>&1
+    printf '%s' "$T9_PY_BLOCK" > "$T9_PYFILE"
+    python3 "$T9_PYFILE" "$T9_MCP" >/dev/null 2>&1
 
     if python3 -c "
 import json
@@ -614,8 +627,9 @@ else
     # Case A: default installation (mandatory_daily_wps commented out in the
     # template default), DayPlan uses the real pilot phrasing from issue #328.
     T11_DIR="$TEST_WS/t11-dayplan"
-    mkdir -p "$T11_DIR/memory" "$T11_DIR/current"
+    mkdir -p "$T11_DIR/memory" "$T11_DIR/current" "$T11_DIR/scripts/lib"
     cp "$TEMPLATE_DIR/memory/day-rhythm-config.yaml" "$T11_DIR/memory/day-rhythm-config.yaml"
+    cp "$TEMPLATE_DIR/scripts/lib/find-python3.sh" "$T11_DIR/scripts/lib/find-python3.sh"
     cat > "$T11_DIR/current/DayPlan.md" <<'HEREDOC'
 ## Бюджет
 ~1.25 ч РП всего / 0 ч физической работы. Мультипликатор не считаю.
@@ -636,7 +650,8 @@ HEREDOC
     # section — must still fail. Proves Case A isn't passing because the
     # checks were silently disabled, not because the config was honored.
     T11_DIR_B="$TEST_WS/t11-dayplan-b"
-    mkdir -p "$T11_DIR_B/memory" "$T11_DIR_B/current"
+    mkdir -p "$T11_DIR_B/memory" "$T11_DIR_B/current" "$T11_DIR_B/scripts/lib"
+    cp "$TEMPLATE_DIR/scripts/lib/find-python3.sh" "$T11_DIR_B/scripts/lib/find-python3.sh"
     cat > "$T11_DIR_B/memory/day-rhythm-config.yaml" <<'HEREDOC'
 mandatory_daily_wps:
   - wp: 7
@@ -710,8 +725,7 @@ else
             "$T12_DST/extensions" \
             "$T12_DST/agent-fault-profile/audit" \
             "$T12_DST/hindsight" \
-            "$T12_DST/decisions" \
-            "$T12_DST/ai-builds"
+            "$T12_DST/decisions"
         echo "top-level" > "$T12_SRC/navigation.md"
         echo "nested" > "$T12_SRC/reference/agent-core.md"
         echo "blob" > "$T12_SRC/.git/objects/ab/deadbeef"
@@ -720,7 +734,6 @@ else
         echo "fault audit" > "$T12_DST/agent-fault-profile/audit/faults.md"
         echo "hindsight" > "$T12_DST/hindsight/notes.md"
         echo "legacy decision" > "$T12_DST/decisions/decision-log.md"
-        echo "independent archive" > "$T12_DST/ai-builds/build.md"
 
         rsync "${T12_FLAGS[@]}" "$T12_SRC/" "$T12_DST/" >/dev/null 2>&1
 
@@ -743,8 +756,7 @@ else
             extensions/day-close.after.md \
             agent-fault-profile/audit/faults.md \
             hindsight/notes.md \
-            decisions/decision-log.md \
-            ai-builds/build.md; do
+            decisions/decision-log.md; do
             [ -f "$T12_DST/$foreign" ] || T12_FOREIGN_MISSING=$((T12_FOREIGN_MISSING + 1))
         done
         if [ "$T12_FOREIGN_MISSING" -eq 0 ]; then
@@ -759,41 +771,6 @@ else
             fail "T12: ownership protection disabled stale-memory pruning"
         fi
     fi
-fi
-
-# ============================================================
-# T27: day-close prefers workspace memory and preserves foreign archives
-# ============================================================
-echo "--- T27: day-close source and ownership boundaries ---"
-T27_ROOT="$TEST_WS/t27-workspace"
-T27_HOME="$TEST_WS/t27-home"
-T27_AUTO_SLUG=$(printf '%s' "$T27_ROOT" | tr '/_ ' '-')
-mkdir -p \
-  "$T27_ROOT/memory" \
-  "$T27_ROOT/DS-strategy/exocortex/ai-builds" \
-  "$T27_HOME/.claude/projects/$T27_AUTO_SLUG/memory"
-printf 'workspace-current\n' > "$T27_ROOT/memory/current.md"
-printf 'auto-stale\n' > "$T27_HOME/.claude/projects/$T27_AUTO_SLUG/memory/stale.md"
-printf 'independent archive\n' > "$T27_ROOT/DS-strategy/exocortex/ai-builds/build.md"
-
-if HOME="$T27_HOME" WORKSPACE_DIR="$T27_ROOT" IWE_GOVERNANCE_REPO=DS-strategy \
-    bash "$TEMPLATE_DIR/scripts/day-close.sh" --backup >/dev/null 2>&1 && \
-   [ -f "$T27_ROOT/DS-strategy/exocortex/current.md" ] && \
-   ! [ -e "$T27_ROOT/DS-strategy/exocortex/stale.md" ] && \
-   [ -f "$T27_ROOT/DS-strategy/exocortex/ai-builds/build.md" ]; then
-    pass "T27: day-close uses workspace memory and preserves non-memory archives"
-else
-    fail "T27: day-close did not select workspace memory or deleted ai-builds"
-fi
-
-# ============================================================
-# T28: Codex role runners use codex exec without unsafe bypass flags
-# ============================================================
-echo "--- T28: Codex role runners ---"
-if bash "$TEMPLATE_DIR/setup/test-codex-role-runners.sh" >/dev/null; then
-    pass "T28: compiled strategist and extractor use safe Codex exec"
-else
-    fail "T28: Codex role runner regression"
 fi
 
 # ============================================================
@@ -899,6 +876,7 @@ T14_WS="$TEST_WS/t14-workspace"
 mkdir -p "$T14_WS"
 cat > "$T14_WS/.exocortex.env" <<HEREDOC
 HOME_DIR=$HOME
+USER_NAME=test-user
 WORKSPACE_DIR=$T14_WS
 CLAUDE_PATH=/usr/bin/claude
 CLAUDE_PROJECT_SLUG=test
@@ -1206,11 +1184,22 @@ fi
 echo "--- T19: orphan detection is diagnostic and CWD-independent ---"
 
 T19_BLOCK="$TEST_WS/t19-orphan-block.sh"
-awk '
-    /^# === Step 6f: Orphan detection/{found=1; next}
-    /^# === Step 7: Commit changes/{found=0}
-    found{print}
-' "$TEMPLATE_DIR/update.sh" > "$T19_BLOCK"
+{
+    # issue #402: Step 6f now gates on py_available(), defined in the Python
+    # resolution preamble (not part of the Step 6f slice) — an isolated
+    # extraction needs that dependency too, same reasoning as pulling in only
+    # the Step 6f block itself instead of the whole script.
+    awk '
+        /^# === Cross-platform Python resolution/{found=1}
+        /^py_available\(\) \{/{print; found=0; next}
+        found{print}
+    ' "$TEMPLATE_DIR/update.sh"
+    awk '
+        /^# === Step 6f: Orphan detection/{found=1; next}
+        /^# === Step 7: Validate applied changes/{found=0}
+        found{print}
+    ' "$TEMPLATE_DIR/update.sh"
+} > "$T19_BLOCK"
 
 if [ ! -s "$T19_BLOCK" ]; then
     fail "T19: could not extract the orphan-detection block"
@@ -1277,23 +1266,27 @@ else
 fi
 
 # ============================================================
-# T21: legacy platform protocols migrate safely (issue #354)
+# T21: legacy platform memory migrates safely (issues #354/#384)
 # ============================================================
-echo "--- T21: platform protocols migrate once with backup ---"
+echo "--- T21: platform memory migrates once with backup ---"
 
 T21_OWNER_FAILURES=0
-for protocol in protocol-open.md protocol-work.md protocol-close.md protocol-month-close.md; do
-    if [ "$(get_field "$TEMPLATE_DIR/memory/$protocol" owner)" != "platform" ]; then
+for platform_file in \
+    protocol-open.md protocol-work.md protocol-close.md protocol-month-close.md \
+    agent-architecture-framework.md agent-vendor-connect-pattern.md checklists.md \
+    dry-run-contract.md feedback_response_clarity_for_pilot.md hooks-design.md navigation.md \
+    reference/agent-core.md repo-type-rules.md r-questionnaire.md t-checklist.md templates-dayplan.md; do
+    if [ "$(get_field "$TEMPLATE_DIR/memory/$platform_file" owner)" != "platform" ]; then
         T21_OWNER_FAILURES=$((T21_OWNER_FAILURES + 1))
     fi
 done
 if [ "$T21_OWNER_FAILURES" -eq 0 ]; then
-    pass "T21: all four shared protocols declare owner:platform"
+    pass "T21: exact shared-memory allowlist declares owner:platform"
 else
-    fail "T21: $T21_OWNER_FAILURES shared protocol(s) still have the wrong owner"
+    fail "T21: $T21_OWNER_FAILURES shared memory file(s) still have the wrong owner"
 fi
 
-T21_WIRED_COUNT=$(grep -cE 'migrate_platform_protocol "\$(fpath|f)" "\$(mem_dst|dst)"' "$TEMPLATE_DIR/update.sh")
+T21_WIRED_COUNT=$(grep -cE 'migrate_platform_memory "\$(fpath|f)" "\$(mem_dst|dst)"' "$TEMPLATE_DIR/update.sh")
 if [ "$T21_WIRED_COUNT" -eq 2 ]; then
     pass "T21: migration is wired into repair-pass and normal propagation"
 else
@@ -1303,8 +1296,8 @@ fi
 if (
     eval "$(awk '/^hash_file\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
     eval "$(awk '/^is_author_mode\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-    eval "$(awk '/^is_platform_protocol_path\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-    eval "$(awk '/^migrate_platform_protocol\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
+    eval "$(awk '/^is_migrated_platform_memory_path\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
+    eval "$(awk '/^migrate_platform_memory\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 
     SCRIPT_DIR="$TEMPLATE_DIR"
     WORKSPACE_DIR="$TEST_WS/t21-workspace"
@@ -1318,7 +1311,7 @@ owner: user
 Pilot custom protocol content.
 HEREDOC
 
-    migrate_platform_protocol memory/protocol-open.md "$target"
+    migrate_platform_memory memory/protocol-open.md "$target"
     backup="$WORKSPACE_DIR/.backups/protocol-owner-migration/protocol-open.md"
     grep -q 'Pilot custom protocol content' "$backup"
     cmp -s "$target" "$TEMPLATE_DIR/memory/protocol-open.md"
@@ -1326,7 +1319,7 @@ HEREDOC
 
     # The deployed copy is now owner:platform, so a repeat must be a no-op and
     # must not replace the saved user version.
-    if migrate_platform_protocol memory/protocol-open.md "$target"; then
+    if migrate_platform_memory memory/protocol-open.md "$target"; then
         exit 1
     fi
     [ "$backup_hash" = "$(hash_file "$backup")" ]
@@ -1340,7 +1333,7 @@ owner: user
 ---
 Unrelated user content.
 HEREDOC
-    if migrate_platform_protocol memory/protocol-dt-integration.md "$unrelated"; then
+    if migrate_platform_memory memory/protocol-dt-integration.md "$unrelated"; then
         exit 1
     fi
     grep -q 'Unrelated user content' "$unrelated"
@@ -1354,10 +1347,26 @@ owner: user
 ---
 Author unpublished content.
 HEREDOC
-    if migrate_platform_protocol memory/protocol-work.md "$author_target"; then
+    if migrate_platform_memory memory/protocol-work.md "$author_target"; then
         exit 1
     fi
     grep -q 'Author unpublished content' "$author_target"
+
+    # #384 extends the exact migration to platform-maintained references without
+    # weakening user-owned FPF snapshots and author distinctions.
+    rm -f "$WORKSPACE_DIR/params.yaml"
+    reference_target="$TEST_WS/t21-agent-core.md"
+    cat > "$reference_target" <<'HEREDOC'
+---
+owner: user
+---
+Legacy platform reference with a pilot note.
+HEREDOC
+    migrate_platform_memory memory/reference/agent-core.md "$reference_target"
+    cmp -s "$reference_target" "$TEMPLATE_DIR/memory/reference/agent-core.md"
+    if migrate_platform_memory memory/fpf-reference.md "$unrelated"; then
+        exit 1
+    fi
 ); then
     pass "T21: migration preserves the user copy, is idempotent, allowlisted and author-safe"
 else
@@ -1497,6 +1506,23 @@ else
     fail "T23: legacy checkbox fallback regressed (rc=$T23_LEGACY_RC): $T23_LEGACY_OUT"
 fi
 
+mkdir -p "$T23_GOV/archive/wp-contexts"
+cat > "$T23_GOV/archive/wp-contexts/WP-469-unrelated.md" <<'HEREDOC'
+---
+wp: 469
+status: done
+---
+HEREDOC
+
+T23_PREFIX_OUT=$(IWE_WORKSPACE="$T23_ROOT" IWE_GOVERNANCE_REPO=governance \
+    bash "$TEMPLATE_DIR/.claude/scripts/wp-sync-bundle.sh" WP-46 2>&1)
+T23_PREFIX_RC=$?
+if [ "$T23_PREFIX_RC" -eq 1 ] && [[ "$T23_PREFIX_OUT" == *'WP-46: файл не найден'* ]]; then
+    pass "T23: a shorter WP ID does not resolve a longer numeric prefix"
+else
+    fail "T23: numeric-prefix archive lookup regressed (rc=$T23_PREFIX_RC): $T23_PREFIX_OUT"
+fi
+
 # ============================================================
 # T24: public-fork CLAUDE bases stay raw and rules survive repair
 # ============================================================
@@ -1508,6 +1534,7 @@ mkdir -p "$T24_TEMPLATE" "$T24_ROOT/.claude/rules"
 cat > "$T24_ROOT/.exocortex.env" <<EOF
 WORKSPACE_DIR="$T24_ROOT"
 HOME_DIR="$T24_ROOT/home"
+USER_NAME="test-user"
 CLAUDE_PATH="$T24_ROOT/bin/claude"
 IWE_TEMPLATE="$T24_TEMPLATE"
 IWE_RUNTIME="$T24_ROOT/.iwe-runtime"
@@ -1531,6 +1558,9 @@ else
 fi
 
 RULES_BACKUP_RUN=""
+RULES_SAFE_TO_UPDATE="|.claude/rules/example.md|"
+eval "$(awk '/^hash_file\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
+eval "$(awk '/^rule_was_safe_to_update\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 eval "$(awk '/^backup_rule_before_overwrite\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 eval "$(awk '/^copy_platform_file_preserving_user_space\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 cat > "$T24_ROOT/rule-upstream.md" <<'EOF'
@@ -1550,6 +1580,30 @@ if grep -q 'Platform rule v2' "$T24_ROOT/.claude/rules/example.md" && \
     pass "T24: rule update preserves USER-SPACE and creates a recoverable pre-image"
 else
     fail "T24: rule preservation or transactional backup failed"
+fi
+
+RULES_SAFE_TO_UPDATE="|"
+cat > "$T24_ROOT/.claude/rules/diverged.md" <<'EOF'
+# Pilot corrected an existing platform rule
+EOF
+cat > "$T24_ROOT/rule-diverged-upstream.md" <<'EOF'
+# Platform replacement
+EOF
+diverged_before=$(hash_file "$T24_ROOT/.claude/rules/diverged.md")
+copy_platform_file_preserving_user_space \
+    "$T24_ROOT/rule-diverged-upstream.md" \
+    "$T24_ROOT/.claude/rules/diverged.md" \
+    ".claude/rules/diverged.md" || true
+diverged_after=$(hash_file "$T24_ROOT/.claude/rules/diverged.md")
+copy_platform_file_preserving_user_space \
+    "$T24_ROOT/rule-diverged-upstream.md" \
+    "$T24_ROOT/.claude/rules/diverged.md" \
+    ".claude/rules/diverged.md" || true
+if [ "$diverged_before" = "$diverged_after" ] && \
+   grep -q 'Pilot corrected' "$T24_ROOT/.claude/rules/diverged.md"; then
+    pass "T24: diverged rule survives repeated repair attempts unchanged"
+else
+    fail "T24: repair overwrote a user-corrected existing rule"
 fi
 
 # ============================================================
@@ -1636,21 +1690,11 @@ T25_NATIVE_PLISTS=$(grep -l '{{HOME_DIR}}/.local/bin:' \
   "$TEMPLATE_DIR/roles/strategist/scripts/launchd/com.strategist.weekreview.plist" \
   "$TEMPLATE_DIR/roles/extractor/scripts/launchd/com.extractor.inbox-check.plist" \
   "$TEMPLATE_DIR/roles/synchronizer/scripts/launchd/com.exocortex.scheduler.plist" | wc -l | tr -d ' ')
-T25_FAILFAST=$(grep -l 'return 127' "$TEMPLATE_DIR/roles/strategist/scripts/strategist.sh" "$TEMPLATE_DIR/roles/extractor/scripts/extractor.sh" | wc -l | tr -d ' ' || true)
-T25_UTC_TIMER_LINES=$(grep -hE '^OnCalendar=' \
-  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-morning.timer" \
-  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-weekreview.timer" \
-  "$TEMPLATE_DIR/roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.timer" | grep -c ' UTC$' || true)
-T25_UTC_SERVICES=$(grep -l '^Environment=TZ=UTC$' \
-  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-morning.service" \
-  "$TEMPLATE_DIR/roles/strategist/scripts/systemd/iwe-strategist-weekreview.service" \
-  "$TEMPLATE_DIR/roles/extractor/scripts/systemd/iwe-extractor-inbox-check.service" \
-  "$TEMPLATE_DIR/roles/synchronizer/scripts/systemd/iwe-exocortex-scheduler.service" | wc -l | tr -d ' ')
-if [ "$T25_NATIVE_RUNNERS" -eq 2 ] && [ "$T25_NATIVE_PLISTS" -eq 4 ] && [ "$T25_FAILFAST" -eq 2 ] && \
-   [ "$T25_UTC_TIMER_LINES" -eq 12 ] && [ "$T25_UTC_SERVICES" -eq 4 ]; then
-    pass "T25: runners fail with return 127; plists and systemd timers preserve the declared UTC contract"
+T25_FAILFAST=$(grep -l 'exit 127' "$TEMPLATE_DIR/roles/strategist/scripts/strategist.sh" "$TEMPLATE_DIR/roles/extractor/scripts/extractor.sh" | wc -l | tr -d ' ')
+if [ "$T25_NATIVE_RUNNERS" -eq 2 ] && [ "$T25_NATIVE_PLISTS" -eq 4 ] && [ "$T25_FAILFAST" -eq 2 ]; then
+    pass "T25: both runners and all four plists support native Claude; runners fail with 127"
 else
-    fail "T25: native runners=$T25_NATIVE_RUNNERS/2 plists=$T25_NATIVE_PLISTS/4 fail-fast=$T25_FAILFAST/2 utc-timers=$T25_UTC_TIMER_LINES/12 utc-services=$T25_UTC_SERVICES/4"
+    fail "T25: native Claude runners=$T25_NATIVE_RUNNERS/2 plists=$T25_NATIVE_PLISTS/4 fail-fast=$T25_FAILFAST/2"
 fi
 
 # ============================================================
@@ -1682,136 +1726,358 @@ else
 fi
 
 # ============================================================
-# T28: one pinned channel owns self-update, manifest and payload
+# T27: bootstrap isolation, runtime hot list and memory schema (#384/#387/#388)
 # ============================================================
-echo "--- T28: pinned update channel is consistent and fail-closed ---"
-T28_ROOT="$TEST_WS/t28-workspace"
-T28_TEMPLATE="$T28_ROOT/FMT-exocortex-template"
-T28_BIN="$T28_ROOT/bin"
-mkdir -p "$T28_TEMPLATE" "$T28_BIN"
-cp "$TEMPLATE_DIR/update.sh" "$T28_TEMPLATE/update.sh"
-cp "$TEMPLATE_DIR/CLAUDE.md" "$T28_TEMPLATE/CLAUDE.md"
-cat > "$T28_ROOT/.exocortex.env" <<'EOF'
-IWE_UPDATE_REPO=den317/FMT-exocortex-template
-IWE_UPDATE_BRANCH=main
+echo "--- T27: bootstrap, hot-files and memory frontmatter contracts ---"
+T27_ROOT="$TEST_WS/t27-workspace"
+T27_TEMPLATE="$T27_ROOT/FMT-exocortex-template"
+mkdir -p "$T27_TEMPLATE/.claude/lib" "$T27_ROOT/.claude/rules" "$T27_ROOT/GOV" "$T27_ROOT/memory"
+cp "$TEMPLATE_DIR/.claude/lib/iwe-env-bootstrap.sh" "$T27_TEMPLATE/.claude/lib/"
+if env -u WORKSPACE_DIR -u IWE_ROOT bash -c \
+    'SCRIPT_DIR=caller-owned; source "$1"; [ "$SCRIPT_DIR" = caller-owned ]' -- \
+    "$T27_TEMPLATE/.claude/lib/iwe-env-bootstrap.sh"; then
+    pass "T27: bootstrap leaves the caller's SCRIPT_DIR unchanged"
+else
+    fail "T27: bootstrap still overwrites the caller's SCRIPT_DIR"
+fi
+
+if WORKSPACE_DIR="$T27_ROOT" IWE_ROOT="$T27_ROOT" \
+    bash "$TEMPLATE_DIR/scripts/memory-bleed.sh" --dir "$T27_ROOT/memory" --hot-only >/dev/null; then
+    pass "T27: memory-bleed starts successfully with the shared bootstrap"
+else
+    fail "T27: memory-bleed still fails during bootstrap"
+fi
+
+printf '# t27 rule\n' > "$T27_ROOT/.claude/rules/t27-rule.md"
+printf '# root\n' > "$T27_ROOT/CLAUDE.md"
+printf '# governance\n' > "$T27_ROOT/GOV/CLAUDE.md"
+printf 'GOVERNANCE_REPO=GOV\n' > "$T27_ROOT/.exocortex.env"
+T27_RUNTIME="$T27_ROOT/.iwe-runtime"
+WORKSPACE_DIR="$T27_ROOT" IWE_ROOT="$T27_ROOT" IWE_RUNTIME="$T27_RUNTIME" \
+    bash "$TEMPLATE_DIR/scripts/verify-context-budget.sh" >/dev/null 2>&1 || true
+if [ ! -e "$T27_RUNTIME" ]; then
+    pass "T27: read-only context check does not create runtime state on a fresh clone"
+else
+    fail "T27: context check created runtime state instead of using the shipped fallback"
+fi
+
+T27_SHIPPED_HASH_BEFORE=$(shasum -a 256 "$TEMPLATE_DIR/scripts/hot-files.list" | cut -d' ' -f1)
+IWE_ROOT="$T27_ROOT" IWE_RUNTIME="$T27_RUNTIME" \
+    bash "$TEMPLATE_DIR/scripts/generate-hot-files-list.sh" >/dev/null
+T27_SHIPPED_HASH_AFTER=$(shasum -a 256 "$TEMPLATE_DIR/scripts/hot-files.list" | cut -d' ' -f1)
+if [ "$T27_SHIPPED_HASH_BEFORE" = "$T27_SHIPPED_HASH_AFTER" ] && \
+   grep -q '\$IWE_ROOT/GOV/CLAUDE.md' "$T27_RUNTIME/hot-files.list" && \
+   grep -q 't27-rule.md' "$T27_RUNTIME/hot-files.list"; then
+    pass "T27: install-specific hot list is generated only in runtime"
+else
+    fail "T27: hot-list generation changed the template or missed install-specific paths"
+fi
+
+if MEMORY_OUTPUT=$(WORKSPACE_DIR="$TEMPLATE_DIR" IWE_ROOT="$TEMPLATE_DIR" \
+    bash "$TEMPLATE_DIR/scripts/memory-validate.sh" --dir "$TEMPLATE_DIR/memory" --quiet) && \
+   grep -qE 'Итог: ([0-9]+)/\1 файлов OK' <<<"$MEMORY_OUTPUT" && \
+   WORKSPACE_DIR="$TEMPLATE_DIR" IWE_ROOT="$TEMPLATE_DIR" \
+    bash "$TEMPLATE_DIR/scripts/memory-validate.sh" "$TEMPLATE_DIR/memory/reference/agent-core.md" --quiet >/dev/null; then
+    pass "T27: every shipped memory frontmatter checked by the validator is valid"
+else
+    fail "T27: shipped memory frontmatter still violates its own schema"
+fi
+
+# T28: settings-merge-preview.py builds a merged preview and never touches inputs (WP-7 F71 stage A)
+echo ""
+echo "--- T28: settings.json merge preview (WP-7 F71 stage A) ---"
+T28_DIR="$TEST_WS/t28"
+mkdir -p "$T28_DIR"
+cat > "$T28_DIR/template.json" <<'EOF'
+{"model": "opus", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "tpl-hook.sh"}]}], "SessionStart": [{"hooks": [{"type": "command", "command": "new-hook.sh"}]}]}, "permissions": {"allow": ["Bash(ls:*)", "Bash(git status:*)"]}, "newKey": true}
 EOF
-cat > "$T28_ROOT/manifest.json" <<'EOF'
-{
-  "schema_version": 2,
-  "version": "test",
-  "source_repo": "den317/FMT-exocortex-template",
-  "source_branch": "main",
-  "files": []
+cat > "$T28_DIR/workspace.json" <<'EOF'
+{"model": "sonnet", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "my-custom.sh"}]}, {"matcher": "Bash", "hooks": [{"type": "command", "command": "tpl-hook.sh"}]}]}, "permissions": {"allow": ["Bash(ls:*)", "mcp__my__*"]}, "userOnly": 1}
+EOF
+T28_WS_HASH_BEFORE=$(shasum -a 256 "$T28_DIR/workspace.json" | cut -d' ' -f1)
+T28_REPORT=$(python3 "$TEMPLATE_DIR/.claude/scripts/settings-merge-preview.py" \
+    "$T28_DIR/template.json" "$T28_DIR/workspace.json" "$T28_DIR/preview.json")
+T28_RC=$?
+T28_WS_HASH_AFTER=$(shasum -a 256 "$T28_DIR/workspace.json" | cut -d' ' -f1)
+if [ "$T28_RC" -eq 0 ] && python3 -m json.tool "$T28_DIR/preview.json" >/dev/null 2>&1; then
+    pass "T28: preview is generated and is valid JSON"
+else
+    fail "T28: preview missing or invalid JSON (rc=$T28_RC)"
+fi
+if grep -Fq 'my-custom.sh' "$T28_DIR/preview.json" && grep -Fq 'new-hook.sh' "$T28_DIR/preview.json"; then
+    pass "T28: user hook preserved AND template-new hook added"
+else
+    fail "T28: hook union lost a side (user or template)"
+fi
+if python3 -c '
+import json, sys
+p = json.load(open(sys.argv[1]))
+sys.exit(0 if p["model"] == "sonnet" and p["newKey"] is True and p["userOnly"] == 1 else 1)
+' "$T28_DIR/preview.json"; then
+    pass "T28: conflict keeps user value; template-new and user-only keys survive"
+else
+    fail "T28: scalar merge rules violated (conflict/user-only/template-new)"
+fi
+if grep -Fq '"model"' <<<"$T28_REPORT" && grep -Fq '"hooks_deduped": 1' <<<"$T28_REPORT"; then
+    pass "T28: report names the conflict key and counts deduped hooks"
+else
+    fail "T28: report misses conflict key or dedup counter: $T28_REPORT"
+fi
+if [ "$T28_WS_HASH_BEFORE" = "$T28_WS_HASH_AFTER" ]; then
+    pass "T28: workspace settings.json is byte-identical after preview"
+else
+    fail "T28: preview run modified workspace settings.json"
+fi
+echo '{broken' > "$T28_DIR/bad.json"
+if python3 "$TEMPLATE_DIR/.claude/scripts/settings-merge-preview.py" \
+    "$T28_DIR/bad.json" "$T28_DIR/workspace.json" "$T28_DIR/bad-preview.json" >/dev/null 2>&1; then
+    fail "T28: broken input JSON was accepted"
+else
+    if [ ! -f "$T28_DIR/bad-preview.json" ]; then
+        pass "T28: broken input rejected, no preview written"
+    else
+        fail "T28: broken input rejected but a torn preview file exists"
+    fi
+fi
+
+# T29: classify-workspace-copy.sh verdicts on a synthetic template history (WP-7 F71 stage A)
+echo ""
+echo "--- T29: author_mode skip classifier (WP-7 F71 stage A) ---"
+T29_DIR="$TEST_WS/t29"
+mkdir -p "$T29_DIR/repo"
+git -C "$T29_DIR/repo" init -q
+git -C "$T29_DIR/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m root
+echo "v1" > "$T29_DIR/repo/f.md"
+git -C "$T29_DIR/repo" add f.md
+git -C "$T29_DIR/repo" -c user.email=t@t -c user.name=t commit -qm v1
+echo "v2" > "$T29_DIR/repo/f.md"
+git -C "$T29_DIR/repo" add f.md
+git -C "$T29_DIR/repo" -c user.email=t@t -c user.name=t commit -qm v2
+echo "v1" > "$T29_DIR/dst-stale"
+echo "edited by user" > "$T29_DIR/dst-authored"
+echo "v2" > "$T29_DIR/dst-uptodate"
+T29_CLS="$TEMPLATE_DIR/.claude/scripts/classify-workspace-copy.sh"
+t29_case() {
+    local expect="$1"; shift
+    local got
+    got=$(bash "$T29_CLS" "$@")
+    if [ "$got" = "$expect" ]; then
+        pass "T29: $expect"
+    else
+        fail "T29: expected '$expect', got '$got' (args: $*)"
+    fi
 }
-EOF
-cp "$T28_ROOT/manifest.json" "$T28_TEMPLATE/update-manifest.json"
-cat > "$T28_BIN/curl" <<'EOF'
-#!/bin/bash
-set -e
-out="" url=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -o) out="$2"; shift 2 ;;
-        http*) url="$1"; shift ;;
-        *) shift ;;
-    esac
-done
-printf '%s\n' "$url" >> "$T28_CURL_LOG"
-[ "${T28_FAIL_NETWORK:-0}" = "1" ] && exit 22
-case "$url" in
-    */update.sh) cp "$T28_UPDATE_SOURCE" "$out" ;;
-    */update-manifest.json) cp "$T28_MANIFEST_SOURCE" "$out" ;;
-    *) echo "unexpected URL: $url" >&2; exit 22 ;;
-esac
-EOF
-chmod +x "$T28_BIN/curl"
-
-T28_CURL_LOG="$T28_ROOT/curl.log" \
-T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
-T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
-PATH="$T28_BIN:$PATH" \
-bash "$T28_TEMPLATE/update.sh" --check --fast > "$T28_ROOT/check.out" 2>&1
-if grep -q '^Канал обновления: den317/FMT-exocortex-template@main$' "$T28_ROOT/check.out" && \
-   [ "$(grep -c '^https://raw.githubusercontent.com/den317/FMT-exocortex-template/main/' "$T28_ROOT/curl.log")" -eq 2 ] && \
-   ! grep -v -q '^https://raw.githubusercontent.com/den317/FMT-exocortex-template/main/' "$T28_ROOT/curl.log"; then
-    pass "T28: self-update and manifest use only the pinned den317 channel"
+echo "never committed" > "$T29_DIR/repo/orphan.md"
+t29_case "unknown no-history" "$T29_DIR/repo" orphan.md "$T29_DIR/dst-authored"
+t29_case "stale history"     "$T29_DIR/repo" f.md "$T29_DIR/dst-stale"
+t29_case "authored diverged" "$T29_DIR/repo" f.md "$T29_DIR/dst-authored"
+t29_case "uptodate current"  "$T29_DIR/repo" f.md "$T29_DIR/dst-uptodate"
+t29_case "unknown no-git"    "$T29_DIR"      f.md "$T29_DIR/dst-authored"
+if [ "$(bash "$T29_CLS" --templated "$T29_DIR/repo" f.md "$T29_DIR/dst-authored")" = "unknown templated" ]; then
+    pass "T29: --templated downgrades authored to unknown (substituted placeholders)"
 else
-    fail "T28: pinned channel leaked or was not used consistently"
+    fail "T29: --templated must not claim 'authored' for substituted files"
 fi
 
-python3 - "$T28_ROOT/manifest.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-data = json.load(open(path, encoding="utf-8"))
-data["source_repo"] = "other-owner/FMT-exocortex-template"
-json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
-PY
-rm -f "$T28_ROOT/curl.log" "$T28_TEMPLATE/.update-incomplete"
-set +e
-T28_CURL_LOG="$T28_ROOT/curl.log" \
-T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
-T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
-PATH="$T28_BIN:$PATH" \
-bash "$T28_TEMPLATE/update.sh" --check --fast > "$T28_ROOT/mismatch.out" 2>&1
-T28_MISMATCH_RC=$?
-set -e
-if [ "$T28_MISMATCH_RC" -eq 49 ] && \
-   grep -q 'Манифест не принадлежит выбранному каналу' "$T28_ROOT/mismatch.out" && \
-   [ ! -e "$T28_TEMPLATE/.update-incomplete" ]; then
-    pass "T28: a manifest from another channel stops before any write"
+# T30: update.sh wires the stage-A scripts in (grep-level, same idiom as T16)
+echo ""
+echo "--- T30: update.sh integration of stage-A observability (WP-7 F71) ---"
+if grep -Fq 'classify-workspace-copy.sh' "$TEMPLATE_DIR/update.sh" && \
+   grep -Fq 'settings-merge-preview.py' "$TEMPLATE_DIR/update.sh" && \
+   grep -Fq 'report_author_skip_summary' "$TEMPLATE_DIR/update.sh"; then
+    pass "T30: update.sh calls classifier, merge preview and prints the skip summary"
 else
-    fail "T28: mismatched channel rc=$T28_MISMATCH_RC (expected 49, no writes)"
+    fail "T30: update.sh lost a stage-A integration point"
+fi
+T30_GENERIC=$(grep -c 'author_mode: рабочая копия не тронута' "$TEMPLATE_DIR/update.sh" || true)
+if [ "${T30_GENERIC:-0}" -le 1 ]; then
+    pass "T30: generic skip message survives only as the degraded-mode fallback"
+else
+    fail "T30: $T30_GENERIC generic skip messages remain — a skip site bypasses the classifier"
 fi
 
-# A channel outage must stop; it must not retry against the canonical default.
-python3 - "$T28_ROOT/manifest.json" <<'PY'
-import json, sys
-path = sys.argv[1]
-data = json.load(open(path, encoding="utf-8"))
-data["source_repo"] = "den317/FMT-exocortex-template"
-json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
-PY
-T28_UPDATE_HASH=$(sha256sum "$T28_TEMPLATE/update.sh" | cut -d' ' -f1)
-rm -f "$T28_ROOT/curl.log" "$T28_TEMPLATE/.update-incomplete"
-set +e
-T28_FAIL_NETWORK=1 \
-T28_CURL_LOG="$T28_ROOT/curl.log" \
-T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
-T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
-PATH="$T28_BIN:$PATH" \
-bash "$T28_TEMPLATE/update.sh" --yes > "$T28_ROOT/offline.out" 2>&1
-T28_OFFLINE_RC=$?
-set -e
-if [ "$T28_OFFLINE_RC" -eq 2 ] && \
-   [ "$T28_UPDATE_HASH" = "$(sha256sum "$T28_TEMPLATE/update.sh" | cut -d' ' -f1)" ] && \
-   [ ! -e "$T28_TEMPLATE/.update-incomplete" ] && \
-   ! grep -v -q '^https://raw.githubusercontent.com/den317/FMT-exocortex-template/main/' "$T28_ROOT/curl.log"; then
-    pass "T28: a den317 outage stops without fallback or writes"
+# T31: extensions-gate is fail-closed (отчёт Константина 14.08.2026, WP-7 F71)
+echo ""
+echo "--- T31: extensions-gate fail-closed matrix (WP-7 F71) ---"
+T31_WS="$TEST_WS/t31-ws"
+mkdir -p "$T31_WS/.claude/hooks" "$T31_WS/.claude/skills/my-skill" \
+         "$T31_WS/.claude/skills/day-open" "$T31_WS/memory"
+cp "$TEMPLATE_DIR/.claude/hooks/extensions-gate.sh" "$T31_WS/.claude/hooks/"
+printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/update-manifest.json"
+touch "$T31_WS/.claude/skills/my-skill/SKILL.md" "$T31_WS/.claude/skills/day-open/SKILL.md" \
+      "$T31_WS/memory/protocol-open.md"
+ln -s "$T31_WS/.claude/skills/day-open/SKILL.md" "$T31_WS/.claude/skills/my-skill/link.md"
+t31_gate() {
+    printf '{"tool_input": {"file_path": "%s"}}' "$1" | bash "$T31_WS/.claude/hooks/extensions-gate.sh"
+}
+t31_blocked() {
+    local out
+    out=$(t31_gate "$1")
+    if grep -Fq '"decision": "block"' <<<"$out"; then
+        pass "T31: $2"
+    else
+        fail "T31: $2 — гейт пропустил: $out"
+    fi
+}
+t31_allowed() {
+    local out
+    out=$(t31_gate "$1")
+    if grep -Fq '"decision": "block"' <<<"$out"; then
+        fail "T31: $2 — гейт заблокировал: $out"
+    else
+        pass "T31: $2"
+    fi
+}
+t31_allowed "$T31_WS/.claude/skills/my-skill/SKILL.md"                "own skill (not in manifest) is allowed"
+t31_allowed "$T31_WS/README.md"                                       "ordinary file is allowed"
+t31_blocked "$T31_WS/.claude/skills/day-open/SKILL.md"                "platform skill is blocked"
+t31_blocked "$T31_WS/memory/protocol-open.md"                         "memory/protocol-* is blocked"
+t31_blocked "$T31_WS/.claude/skills/my-skill/../day-open/SKILL.md"    "traversal via .. is blocked before classification"
+t31_blocked "$T31_WS/update-manifest.json"                            "manifest itself is always blocked"
+t31_blocked "$T31_WS/.claude/skills/my-skill/link.md"                 "symlink into a platform skill is blocked by real path"
+printf '%s\n' '{broken' > "$T31_WS/update-manifest.json"
+t31_blocked "$T31_WS/.claude/skills/my-skill/SKILL.md"                "broken manifest fails closed (no allow on tool failure)"
+printf '%s\n' '{"files": []}' > "$T31_WS/update-manifest.json"
+t31_blocked "$T31_WS/.claude/skills/my-skill/SKILL.md"                "empty manifest .files fails closed"
+printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/update-manifest.json"
+t31_allowed "$T31_WS/.claude/skills/my-skill/SKILL.md"                "restoring the manifest restores the allow"
+if grep -Fq '"defaultMode": "default"' "$TEMPLATE_DIR/.claude/settings.json"; then
+    pass "T31: template settings.json ships defaultMode=default (not acceptEdits)"
 else
-    fail "T28: channel outage rc=$T28_OFFLINE_RC (expected 2, no fallback/writes)"
+    fail "T31: template settings.json must not ship auto-accept edit mode"
 fi
 
-# An installation without channel settings keeps the canonical default.
-rm -f "$T28_ROOT/.exocortex.env" "$T28_ROOT/curl.log"
-T28_DEFAULT_REPO=$(sed -n 's/^DEFAULT_UPDATE_REPO="\([^"]*\)"/\1/p' "$T28_TEMPLATE/update.sh")
-python3 - "$T28_ROOT/manifest.json" "$T28_DEFAULT_REPO" <<'PY'
+# T32: settings-merge-apply.sh applies with backup and never leaves a torn file (WP-7 F71 stage B)
+echo ""
+echo "--- T32: settings.json merge APPLY with backup/rollback (WP-7 F71 stage B) ---"
+T32_WS="$TEST_WS/t32-ws"
+mkdir -p "$T32_WS/.claude"
+cp "$TEST_WS/t28/template.json" "$T32_WS/template.json"
+cp "$TEST_WS/t28/workspace.json" "$T32_WS/.claude/settings.json"
+T32_APPLY_OUT=$(bash "$TEMPLATE_DIR/.claude/scripts/settings-merge-apply.sh" \
+    "$T32_WS/template.json" "$T32_WS/.claude/settings.json" python3 2>&1)
+T32_RC=$?
+if [ "$T32_RC" -eq 0 ] && python3 -c '
 import json, sys
-path = sys.argv[1]
-data = json.load(open(path, encoding="utf-8"))
-data["source_repo"] = sys.argv[2]
-json.dump(data, open(path, "w", encoding="utf-8"), indent=2)
-PY
-cp "$T28_ROOT/manifest.json" "$T28_TEMPLATE/update-manifest.json"
-T28_CURL_LOG="$T28_ROOT/curl.log" \
-T28_UPDATE_SOURCE="$T28_TEMPLATE/update.sh" \
-T28_MANIFEST_SOURCE="$T28_ROOT/manifest.json" \
-PATH="$T28_BIN:$PATH" \
-bash "$T28_TEMPLATE/update.sh" --check --fast > "$T28_ROOT/default.out" 2>&1
-if grep -Fq "Канал обновления: $T28_DEFAULT_REPO@main" "$T28_ROOT/default.out" && \
-   [ "$(grep -F -c "https://raw.githubusercontent.com/$T28_DEFAULT_REPO/main/" "$T28_ROOT/curl.log")" -eq 2 ]; then
-    pass "T28: an unconfigured installation keeps the canonical default"
+p = json.load(open(sys.argv[1]))
+hooks = json.dumps(p.get("hooks", {}))
+sys.exit(0 if p["model"] == "sonnet" and p["newKey"] is True and "my-custom.sh" in hooks and "new-hook.sh" in hooks else 1)
+' "$T32_WS/.claude/settings.json"; then
+    pass "T32: merge applied — user values kept, template additions present"
 else
-    fail "T28: default channel compatibility regressed"
+    fail "T32: apply failed or merged content wrong (rc=$T32_RC): $T32_APPLY_OUT"
+fi
+T32_BACKUP=$(find "$T32_WS/.backups/settings-merge" -name 'settings.json.*' 2>/dev/null | head -1)
+if [ -n "$T32_BACKUP" ] && grep -Fq '"userOnly": 1' "$T32_BACKUP"; then
+    pass "T32: backup of the pre-merge settings.json exists"
+else
+    fail "T32: no backup written before apply"
+fi
+if [ ! -f "$T32_WS/.claude/settings.merged.preview.json" ]; then
+    pass "T32: preview file is consumed after a successful apply"
+else
+    fail "T32: preview file left behind after apply"
+fi
+printf '%s\n' '{broken' > "$T32_WS/broken-template.json"
+T32_BEFORE=$(shasum -a 256 "$T32_WS/.claude/settings.json" | cut -d' ' -f1)
+if bash "$TEMPLATE_DIR/.claude/scripts/settings-merge-apply.sh" \
+    "$T32_WS/broken-template.json" "$T32_WS/.claude/settings.json" python3 >/dev/null 2>&1; then
+    fail "T32: broken template input was accepted by apply"
+else
+    T32_AFTER=$(shasum -a 256 "$T32_WS/.claude/settings.json" | cut -d' ' -f1)
+    if [ "$T32_BEFORE" = "$T32_AFTER" ]; then
+        pass "T32: broken input rejected, workspace settings.json byte-identical"
+    else
+        fail "T32: broken input rejected but workspace settings.json changed"
+    fi
+fi
+
+# T33: update.sh wires stage-B flags with their consensus safeguards (WP-7 F71)
+echo ""
+echo "--- T33: stage-B flags contract in update.sh (WP-7 F71) ---"
+if grep -Fq -- '--apply-settings-merge) APPLY_SETTINGS_MERGE=true' "$TEMPLATE_DIR/update.sh" && \
+   grep -Fq -- '--refresh-stale)    REFRESH_STALE=true' "$TEMPLATE_DIR/update.sh"; then
+    pass "T33: both stage-B flags are parsed and default to off"
+else
+    fail "T33: stage-B flag parsing missing in update.sh"
+fi
+if grep -Fq -- '--refresh-stale отклонён' "$TEMPLATE_DIR/update.sh" && \
+   grep -Fq '.backups/refresh-stale/' "$TEMPLATE_DIR/update.sh"; then
+    pass "T33: refresh-stale refuses on unknown>0 and backs up before overwrite"
+else
+    fail "T33: refresh-stale safeguards (unknown block / backup) missing"
+fi
+if grep -Fq 'settings-merge-apply.sh' "$TEMPLATE_DIR/update.sh"; then
+    pass "T33: update.sh delegates settings apply to the standalone tested script"
+else
+    fail "T33: update.sh does not call settings-merge-apply.sh"
+fi
+
+# ============================================================
+# T34: code-style cap uses the same Unicode unit for count and slice (#435)
+# ============================================================
+echo ""
+echo "--- T34: code-style Unicode cap contract (#435) ---"
+T34_BASE="$TEST_WS/t34-base.json"
+T34_CAPPED="$TEST_WS/t34-capped.json"
+T34_PAYLOAD="{\"session_id\":\"t34-base\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$T16_PROJ/t16-fixture.py\"}}"
+if printf '%s' "$T34_PAYLOAD" | HOME="$T16_HOME" CLAUDE_PROJECT_DIR="$T16_PROJ" \
+    IWE_GOVERNANCE_REPO="DS-strategy" bash "$TEMPLATE_DIR/.claude/hooks/inject-code-style.sh" > "$T34_BASE" 2>/dev/null; then
+    T34_CHARS=$(python3 -c "import json; print(len(json.load(open('$T34_BASE'))['hookSpecificOutput']['additionalContext']))")
+    T34_BYTES=$(python3 -c "import json; print(len(json.load(open('$T34_BASE'))['hookSpecificOutput']['additionalContext'].encode()))")
+    T34_PAYLOAD="{\"session_id\":\"t34-capped\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$T16_PROJ/t16-fixture.py\"}}"
+    if [ "$T34_BYTES" -gt "$T34_CHARS" ] && \
+       printf '%s' "$T34_PAYLOAD" | HOME="$T16_HOME" CLAUDE_PROJECT_DIR="$T16_PROJ" \
+          IWE_GOVERNANCE_REPO="DS-strategy" CODE_STYLE_INJECT_CAP="$T34_CHARS" \
+          bash "$TEMPLATE_DIR/.claude/hooks/inject-code-style.sh" > "$T34_CAPPED" 2>/dev/null && \
+       python3 - "$T34_BASE" "$T34_CAPPED" <<'PY'
+import json
+import sys
+
+baseline = json.load(open(sys.argv[1], encoding="utf-8"))["hookSpecificOutput"]["additionalContext"]
+capped = json.load(open(sys.argv[2], encoding="utf-8"))["hookSpecificOutput"]["additionalContext"]
+raise SystemExit(0 if baseline == capped and "[…обрезано до лимита" not in capped else 1)
+PY
+    then
+        pass "T34: Cyrillic context at its character cap is not falsely truncated by bytes"
+    else
+        fail "T34: code-style cap count and slice diverge on Cyrillic"
+    fi
+else
+    fail "T34: inject-code-style did not produce a baseline context"
+fi
+
+# ============================================================
+# T35: /extend lists every extension point that a protocol invokes (#436)
+# ============================================================
+echo ""
+echo "--- T35: /extend catalog matches protocol extension points (#436) ---"
+if python3 - "$TEMPLATE_DIR" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+call_re = re.compile(r"load-extensions\.sh\s+([a-z-]+)\s+(before|after|checks|sync)")
+row_re = re.compile(r"^\| `([^`]+)` \| `([^`]+)` \| `extensions/", re.MULTILINE)
+
+sources = [root / "memory/protocol-close.md", root / "memory/protocol-open.md"]
+sources.extend(path for path in (root / ".claude/skills").rglob("*.md") if path != root / ".claude/skills/extend/SKILL.md")
+called = {
+    match.groups()
+    for path in sources
+    for match in call_re.finditer(path.read_text(encoding="utf-8"))
+}
+catalog = set(row_re.findall((root / ".claude/skills/extend/SKILL.md").read_text(encoding="utf-8")))
+if len(called) != 16 or catalog != called:
+    missing = sorted(called - catalog)
+    extra = sorted(catalog - called)
+    raise SystemExit(f"called={len(called)} catalog={len(catalog)} missing={missing} extra={extra}")
+PY
+then
+    pass "T35: /extend lists all 16 invoked extension points"
+else
+    fail "T35: /extend catalog differs from invoked extension points"
 fi
 
 # ============================================================

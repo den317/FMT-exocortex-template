@@ -47,6 +47,13 @@ cat {{WORKSPACE_DIR}}/params.yaml 2>/dev/null
 | `week-close` | `before` | `extensions/week-close.before.md` | Перед ротацией уроков |
 | `week-close` | `after` | `extensions/week-close.after.md` | После аудита memory |
 | `protocol-open` | `after` | `extensions/protocol-open.after.md` | После ритуала согласования |
+| `protocol-open` | `sync` | `extensions/protocol-open.sync.md` | Переопределяет поведение синхронизации на шаге 3b |
+| `day-open` | `checks` | `extensions/day-open.checks.md` | Перед commit, после подготовки DayPlan |
+| `day-close` | `before` | `extensions/day-close.before.md` | Перед первыми шагами закрытия дня |
+| `month-close` | `before` | `extensions/month-close.before.md` | Перед первыми шагами закрытия месяца |
+| `month-close` | `after` | `extensions/month-close.after.md` | После итогов месяца, перед верификацией |
+| `strategy-session` | `before` | `extensions/strategy-session.before.md` | Перед началом стратегической сессии |
+| `strategy-session` | `after` | `extensions/strategy-session.after.md` | После итогов стратегической сессии |
 
 **Несколько файлов одного hook** — загружаются в алфавитном порядке.
 Пример: `day-close.after.md` + `day-close.after.health.md` — оба выполнятся.

@@ -19,7 +19,10 @@
 #   HERMES_SESSION_ID  — ID сессии для продолжения диалога (опционально)
 #   HERMES_MAX_TURNS   — лимит итераций (default: 1, peer-сессия не использует инструменты)
 
-set -euo pipefail
+# Fail-closed: we deliberately inspect nonzero CLI exit codes below and
+# normalize them to 1. Keeping `set -e` would abort the script before the
+# normalization, so the adapter only runs with `set -uo pipefail`.
+set -uo pipefail
 
 HERMES_BIN="${HERMES_BIN:-$(command -v hermes 2>/dev/null || true)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,6 +108,15 @@ if [ "$PERL_EXIT" -eq 142 ]; then
   exit 1
 fi
 
+# WP-516 Ф5 (§0в.1, находка Codex 12.08): non-timeout ненулевой exit CLI
+# обязан нормализоваться в 1 — иначе текст ошибки CLI в OUT_FILE принимался
+# за успешный ответ пира.
+if [ "$PERL_EXIT" -ne 0 ]; then
+  echo "ERROR: Hermes peer call failed with exit code $PERL_EXIT (cli_exit=$PERL_EXIT)" >&2
+  tail -20 "$OUT_FILE" >&2 2>/dev/null || true
+  exit 1
+fi
+
 if [ ! -s "$OUT_FILE" ]; then
   echo "ERROR: hermes returned empty output" >&2
   exit 1
@@ -127,6 +139,17 @@ if [ "${IWE_PEER_PLAIN:-0}" != "1" ]; then
   if [ "$_FIRST_LINE" != "---" ] || [ "${_FM_FENCES:-0}" -lt 2 ]; then
     echo "ERROR: peer response missing frontmatter (first non-empty line must be '---' with a closing '---')." >&2
     exit 1
+  fi
+
+  # WP-484 Ф89: alert-only self-check — доля кириллицы в ответе после
+  # вычитания кода/путей/A2-глосс. Никогда не блокирует вывод, только
+  # предупреждает в stderr — не peer-реплика (IWE_PEER_PLAIN=1) её не видит.
+  _LANG_CHECK="$SCRIPT_DIR/lib/language-check.py"
+  if [ -f "$_LANG_CHECK" ]; then
+    _LANG_RESULT=$(printf '%s' "$RESPONSE" | python3 "$_LANG_CHECK" 2>/dev/null || true)
+    if printf '%s' "$_LANG_RESULT" | grep -q '"alert": true'; then
+      echo "WARNING: peer response may not be in Russian (language-check alert) — $_LANG_RESULT" >&2
+    fi
   fi
 fi
 

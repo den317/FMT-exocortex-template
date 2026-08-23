@@ -49,6 +49,10 @@
         <string>{{HOME_DIR}}/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>HOME</key>
         <string>{{HOME_DIR}}</string>
+        <key>USER</key>
+        <string>{{USER_NAME}}</string>
+        <key>LOGNAME</key>
+        <string>{{USER_NAME}}</string>
         <key>IWE_TEMPLATE</key>
         <string>{{IWE_TEMPLATE}}</string>
         <key>IWE_WORKSPACE</key>
