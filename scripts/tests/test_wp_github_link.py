@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import subprocess
 import tempfile
@@ -396,6 +397,26 @@ class LinkTests(unittest.TestCase):
     def test_repo_allowlist_blocks_unknown_repository(self) -> None:
         with self.assertRaises(MODULE.LinkError):
             MODULE.validate_repo("den317/unknown")
+
+    def test_repo_allowlist_uses_configured_governance_repository(self) -> None:
+        with patch.dict(
+            os.environ, {"IWE_GOVERNANCE_REPO": "pilot-governance"}, clear=False
+        ):
+            self.assertEqual(
+                MODULE.validate_repo("den317/pilot-governance"),
+                "den317/pilot-governance",
+            )
+            with self.assertRaises(MODULE.LinkError):
+                MODULE.validate_repo("den317/DS-strategy")
+
+    def test_repo_allowlist_rejects_governance_path(self) -> None:
+        with patch.dict(
+            os.environ, {"IWE_GOVERNANCE_REPO": "nested/governance"}, clear=False
+        ):
+            with self.assertRaisesRegex(
+                MODULE.LinkError, "must be a repository name"
+            ):
+                MODULE.validate_repo("den317/governance")
 
     def test_audit_includes_archive_and_counts_pre_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

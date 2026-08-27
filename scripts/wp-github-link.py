@@ -21,7 +21,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-ALLOWED_REPOS = {"DS-strategy", "IWE", "FMT-exocortex-template"}
 COLUMN_ALIASES = {
     "Приоритет": "P",
     "Статус": "Ст",
@@ -32,6 +31,17 @@ COLUMN_ALIASES = {
 
 class LinkError(RuntimeError):
     """A safe, user-actionable linkage failure."""
+
+
+def allowed_repositories() -> set[str]:
+    governance = (
+        os.environ.get("IWE_GOVERNANCE_REPO", "").strip() or "DS-strategy"
+    )
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", governance):
+        raise LinkError(
+            "IWE_GOVERNANCE_REPO must be a repository name, not a path"
+        )
+    return {governance, "IWE", "FMT-exocortex-template"}
 
 
 @dataclass(frozen=True)
@@ -114,10 +124,11 @@ def write_repo(context: Context, repo: str) -> None:
 
 
 def validate_repo(repo: str) -> str:
+    allowed_repos = allowed_repositories()
     name = repo.rsplit("/", 1)[-1]
-    if name not in ALLOWED_REPOS or "/" not in repo:
+    if name not in allowed_repos or "/" not in repo:
         raise LinkError(
-            f"owner-repository must be OWNER/{{{','.join(sorted(ALLOWED_REPOS))}}}: {repo}"
+            f"owner-repository must be OWNER/{{{','.join(sorted(allowed_repos))}}}: {repo}"
         )
     return repo
 

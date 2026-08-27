@@ -2647,7 +2647,7 @@
     },
     {
       "path": "scripts/wp-github-link.py",
-      "sha256": "44f51ec470039bd72e6de41c86af8934a9751584f3c9aab6d6cd864d59265a4d"
+      "sha256": "c02335b51f44ebd00572fad3cc2d76ddfef4f75693471fc852a989237dd05cb5"
     },
     {
       "path": "scripts/wp-list.py",
