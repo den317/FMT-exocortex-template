@@ -5,9 +5,10 @@
 # clean on the real tree with its own baseline, (2) catch a genuinely NEW
 # bare python3/python call on a repo-owned .py file, (3) NOT flag an
 # already-baselined call as new, (4) NOT flag a call that goes through the
-# resolver ($PYTHON3/$RESOLVED_PYTHON3). Runs against an isolated copy of
-# scripts/setup/roles (REPO_ROOT override), not the real tree — a mutation
-# test that edits tracked files in place would be its own footgun.
+# resolver ($PYTHON3/$RESOLVED_PYTHON3), (5) cover dynamic script variables in
+# .claude/hooks and .claude/skills. Runs against an isolated copy of the scan
+# perimeter (REPO_ROOT override), not the real tree — a mutation test that
+# edits tracked files in place would be its own footgun.
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SELF_DIR/../.." && pwd)"
@@ -17,10 +18,17 @@ TEST_ROOT="/tmp/iwe-wp529-python-resolver-contract-test-$$"
 FAIL=0
 fail() { echo "  ❌ FAIL: $*" >&2; FAIL=$((FAIL+1)); }
 pass() { echo "  ✅ PASS: $*"; }
+# Invoked indirectly by the trap below.
+# shellcheck disable=SC2329
 cleanup() { local rc=$?; [ "${KEEP:-0}" = "1" ] || rm -rf "$TEST_ROOT"; exit "$rc"; }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$TEST_ROOT/scripts/tests/fixtures" "$TEST_ROOT/setup" "$TEST_ROOT/roles"
+mkdir -p \
+    "$TEST_ROOT/scripts/tests/fixtures" \
+    "$TEST_ROOT/setup" \
+    "$TEST_ROOT/roles" \
+    "$TEST_ROOT/.claude/hooks" \
+    "$TEST_ROOT/.claude/skills/example/scripts"
 cp "$GATE" "$TEST_ROOT/scripts/check-python-resolver-contract.sh"
 chmod +x "$TEST_ROOT/scripts/check-python-resolver-contract.sh"
 
@@ -84,6 +92,27 @@ else
     fail "сценарий 4: гейт неожиданно упал после легитимного резолвер-вызова (см. /tmp/scenario4-out-$$)"
 fi
 rm -f /tmp/scenario4-out-$$
+
+# --- Сценарий 5: dynamic *.py variable in both .claude shell perimeters ---
+cat > "$TEST_ROOT/.claude/hooks/new-hook.sh" <<'EOF'
+#!/bin/bash
+python3 "$RESIDENCY_GATE_PY" check-activation example manifest.md
+EOF
+cat > "$TEST_ROOT/.claude/skills/example/scripts/run.sh" <<'EOF'
+#!/bin/bash
+python3 "$SKILL_PROGRAM" --check
+EOF
+if bash "$TEST_ROOT/scripts/check-python-resolver-contract.sh" >/tmp/scenario5-out-$$ 2>&1; then
+    fail "сценарий 5: голые python3-вызовы через переменные в .claude периметре не пойманы"
+else
+    if grep -q '.claude/hooks/new-hook.sh' /tmp/scenario5-out-$$ \
+        && grep -q '.claude/skills/example/scripts/run.sh' /tmp/scenario5-out-$$; then
+        pass "сценарий 5: hooks/skills и dynamic script variables входят в ratchet"
+    else
+        fail "сценарий 5: гейт упал, но не назвал оба .claude нарушения (см. /tmp/scenario5-out-$$)"
+    fi
+fi
+rm -f /tmp/scenario5-out-$$
 
 if [ "$FAIL" -eq 0 ]; then
     echo "python-resolver-contract: все сценарии прошли"

@@ -14,10 +14,15 @@
 set -uo pipefail
 
 DS_STRATEGY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IWE="${IWE_ROOT:-$(cd "$DS_STRATEGY/.." && pwd)}"
+IWE="$(cd "$DS_STRATEGY/.." && pwd)"
 # Child patch steps (4.2/4.3) fall back to ~/IWE when IWE_ROOT is unset —
 # a launchd/cron env typically has no IWE_ROOT, so pass the resolved root down.
 export IWE_ROOT="$IWE"
+# Every child process, including the background snapshot refresh below, must
+# resolve the same governance repository as this pipeline. launchd/cron do not
+# inherit the interactive shell setting, so derive it from the script location
+# before the first child process starts.
+export IWE_GOVERNANCE_REPO="$(basename "$DS_STRATEGY")"
 CONFIG="$DS_STRATEGY/exocortex/day-rhythm-config.yaml"
 # shellcheck source=lib/ledger-path.sh
 . "$DS_STRATEGY/scripts/lib/ledger-path.sh"
@@ -695,10 +700,6 @@ fi
 
 mkdir -p "$IWE/.tmp"
 bash "$IWE/scripts/server-calendar.sh" "$DATE" "$CONFIG" > "$CALENDAR_OUT" 2>/dev/null || true
-
-# Export so that day-open-scaffold.sh uses correct repo when run from launchd
-# (launchd doesn't inherit shell env where IWE_GOVERNANCE_REPO is set via .zshrc)
-export IWE_GOVERNANCE_REPO="${IWE_GOVERNANCE_REPO:-$(basename "$DS_STRATEGY")}"
 
 # Generate scaffold to temp file first (for hash guard)
 SCAFFOLD_TEMP="$DAYPLAN_PATH.scaffold.tmp"

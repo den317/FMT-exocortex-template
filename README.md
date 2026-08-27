@@ -1,7 +1,7 @@
 # IWE — Intellectual Work Environment
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.38.7-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.38.11-blue.svg)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(Git%20Bash)-lightgrey.svg)]()
 [![EN sync](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/TserenTserenov/FMT-exocortex-template/en-draft/badge-data.json)](https://github.com/TserenTserenov/FMT-exocortex-template/tree/en-draft)
 
@@ -232,7 +232,7 @@ A: Формализованная область знаний — единств
 A: Три зоны защиты: локальная, GitHub (приватные репо), платформа (per-user изоляция). Подробнее: [DATA-POLICY.md](docs/DATA-POLICY.md).
 
 **Q: Чем IWE отличается от Obsidian / Notion / Logseq?**
-A: Obsidian — хранилище заметок. IWE — **рабочая среда** с протоколами, ИИ-агентами и формализацией знаний. Вы можете использовать Obsidian внутри IWE для заметок, но IWE даёт структуру, планирование и накопление компетенций.
+A: Obsidian — хранилище заметок. IWE — **рабочая среда** с протоколами, ИИ-агентами и формализацией знаний. Для заметок можно открыть в Obsidian отдельный governance-репозиторий (`DS-strategy`) — именно эту папку как vault. Корень IWE (`~/IWE`) как Obsidian vault не поддерживается: в нём могут быть очень большие Markdown-файлы (например, `FPF/FPF-Spec.md`), из-за которых Obsidian показывает белый экран. Весь workspace безопасно просматривать через VS Code.
 
 **Q: Нужно ли программировать?**
 A: Нет. Шаблон — готовая конфигурация. Установка через setup.sh. Работа — через Claude Code на естественном языке.

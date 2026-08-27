@@ -147,6 +147,126 @@ if [ -f "$MANIFEST" ]; then
   [ "$n" -eq 1 ] && pass "manifest exactly once: extensions/day-open.checks.md" || fail "manifest entries for extensions/day-open.checks.md: $n (expected 1)"
 fi
 
+# --- 2d. Snapshot updater resolves the installed workspace -------------------
+echo "=== 2d. Derived snapshot path contract ==="
+SNAPSHOT_ROOT_SCRIPT="$REPO_ROOT/scripts/update-derived-snapshot.py"
+SNAPSHOT_SEED_SCRIPT="$SEED_SCRIPTS/update-derived-snapshot.py"
+SNAPSHOT_TEST_ROOT="/tmp/iwe-snapshot-path-test-$$"
+SNAPSHOT_PY=$("$REPO_ROOT/scripts/lib/find-python3.sh" 2>/dev/null) || SNAPSHOT_PY=""
+[ -n "$SNAPSHOT_PY" ] || SNAPSHOT_PY=python3
+SNAPSHOT_CONFIG_ROOT="$SNAPSHOT_TEST_ROOT/configured-workspace"
+SNAPSHOT_EXPECTED="$SNAPSHOT_CONFIG_ROOT/custom-governance/inbox/WP-425/cache/derived_snapshot.json"
+
+SNAPSHOT_ACTUAL=$(IWE_ROOT="$SNAPSHOT_CONFIG_ROOT" IWE_GOVERNANCE_REPO=custom-governance \
+  "$SNAPSHOT_PY" - "$SNAPSHOT_ROOT_SCRIPT" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("snapshot_path_contract", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.SNAPSHOT_PATH)
+PY
+)
+if [ "$SNAPSHOT_ACTUAL" = "$SNAPSHOT_EXPECTED" ]; then
+  pass "template source uses the configured IWE_ROOT/governance path"
+else
+  fail "template source resolved the wrong snapshot path: $SNAPSHOT_ACTUAL"
+fi
+
+SNAPSHOT_INSTALLED_REPO="$SNAPSHOT_TEST_ROOT/physical-workspace/custom-governance"
+mkdir -p "$SNAPSHOT_INSTALLED_REPO/scripts"
+cp "$SNAPSHOT_SEED_SCRIPT" "$SNAPSHOT_INSTALLED_REPO/scripts/update-derived-snapshot.py"
+cp "$REPO_ROOT/seed/strategy/REPO-TYPE.md" "$SNAPSHOT_INSTALLED_REPO/REPO-TYPE.md"
+SNAPSHOT_INSTALLED_REPO_PHYSICAL=$(cd "$SNAPSHOT_INSTALLED_REPO" && pwd -P)
+SNAPSHOT_INSTALLED_EXPECTED="$SNAPSHOT_INSTALLED_REPO_PHYSICAL/inbox/WP-425/cache/derived_snapshot.json"
+SNAPSHOT_INSTALLED_ACTUAL=$( \
+  IWE_ROOT="$SNAPSHOT_TEST_ROOT/stale-workspace" \
+  IWE_GOVERNANCE_REPO=stale-governance \
+  "$SNAPSHOT_PY" - "$SNAPSHOT_INSTALLED_REPO/scripts/update-derived-snapshot.py" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("installed_snapshot_path_contract", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.SNAPSHOT_PATH)
+PY
+)
+if [ "$SNAPSHOT_INSTALLED_ACTUAL" = "$SNAPSHOT_INSTALLED_EXPECTED" ]; then
+  pass "installed updater derives custom governance from its physical location"
+else
+  fail "installed updater trusted stale caller identity: $SNAPSHOT_INSTALLED_ACTUAL"
+fi
+
+for snapshot_script in "$SNAPSHOT_ROOT_SCRIPT" "$SNAPSHOT_SEED_SCRIPT"; do
+  if grep -Fq '${IWE_GOVERNANCE_REPO:-DS-strategy}' "$snapshot_script"; then
+    fail "shell parameter expansion remains literal in ${snapshot_script#"$REPO_ROOT"/}"
+  else
+    pass "no shell-literal governance path: ${snapshot_script#"$REPO_ROOT"/}"
+  fi
+done
+
+grep -vF '# SNAPSHOT — synced manually via script-promote.sh from FMT-exocortex-template/scripts/. Do not edit here directly.' \
+  "$SNAPSHOT_SEED_SCRIPT" > "$SNAPSHOT_TEST_ROOT.seed-body"
+if cmp -s "$SNAPSHOT_ROOT_SCRIPT" "$SNAPSHOT_TEST_ROOT.seed-body"; then
+  pass "root and seed snapshot implementations are identical"
+else
+  fail "root and seed snapshot implementations drifted"
+fi
+rm -rf "$SNAPSHOT_TEST_ROOT" "$SNAPSHOT_TEST_ROOT.seed-body"
+
+# --- 2e. Day Open exports the governance identity before background work -----
+# A non-interactive launch does not inherit the user's shell configuration.
+# The snapshot updater is the first child process, so it must receive the
+# repository identity derived from the pipeline location, not the legacy
+# DS-strategy default.
+echo "=== 2e. Governance identity reaches the first child process ==="
+PIPELINE_ENV_FIXTURE="/tmp/iwe-dayopen-governance-env-$$"
+PIPELINE_ENV_GOV="$PIPELINE_ENV_FIXTURE/custom-governance"
+PIPELINE_ENV_CAPTURE="$PIPELINE_ENV_FIXTURE/captured-governance.txt"
+mkdir -p "$PIPELINE_ENV_GOV/scripts/lib" "$PIPELINE_ENV_GOV/logs" \
+  "$PIPELINE_ENV_FIXTURE/scripts"
+printf '#!/bin/bash\nexit 0\n' > "$PIPELINE_ENV_FIXTURE/scripts/session-guard.sh"
+chmod +x "$PIPELINE_ENV_FIXTURE/scripts/session-guard.sh"
+printf '# test fixture: no ledger helpers needed before snapshot launch\n' \
+  > "$PIPELINE_ENV_GOV/scripts/lib/ledger-path.sh"
+cat > "$PIPELINE_ENV_GOV/scripts/update-derived-snapshot.py" <<'PY'
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+
+Path(os.environ["SNAPSHOT_ENV_CAPTURE"]).write_text(
+    os.environ.get("IWE_ROOT", "")
+    + "|"
+    + os.environ.get("IWE_GOVERNANCE_REPO", ""),
+    encoding="utf-8",
+)
+PY
+awk '{ print } /echo "  snapshot refresh pid=\$SNAPSHOT_PID/ { exit }' "$PIPELINE" \
+  > "$PIPELINE_ENV_GOV/scripts/day-open-prefix.sh"
+printf '\nwait "$SNAPSHOT_PID"\n' >> "$PIPELINE_ENV_GOV/scripts/day-open-prefix.sh"
+if env -i HOME="${HOME:-/tmp}" PATH="${PATH:-/usr/bin:/bin}" \
+    SNAPSHOT_ENV_CAPTURE="$PIPELINE_ENV_CAPTURE" \
+    bash "$PIPELINE_ENV_GOV/scripts/day-open-prefix.sh" >/dev/null 2>&1 \
+    && [ "$(cat "$PIPELINE_ENV_CAPTURE" 2>/dev/null)" = "$PIPELINE_ENV_FIXTURE|custom-governance" ]; then
+  pass "minimal environment passes custom governance identity to snapshot updater"
+else
+  fail "snapshot updater did not receive governance identity before background launch"
+fi
+printf 'not-overwritten' > "$PIPELINE_ENV_CAPTURE"
+if env -i HOME="${HOME:-/tmp}" PATH="${PATH:-/usr/bin:/bin}" \
+    IWE_ROOT="/tmp/stale-foreign-workspace" \
+    IWE_GOVERNANCE_REPO="stale-foreign-governance" \
+    SNAPSHOT_ENV_CAPTURE="$PIPELINE_ENV_CAPTURE" \
+    bash "$PIPELINE_ENV_GOV/scripts/day-open-prefix.sh" >/dev/null 2>&1 \
+    && [ "$(cat "$PIPELINE_ENV_CAPTURE" 2>/dev/null)" = "$PIPELINE_ENV_FIXTURE|custom-governance" ]; then
+  pass "physical pipeline location overrides stale inherited workspace identity"
+else
+  fail "stale inherited workspace identity escaped into snapshot updater"
+fi
+rm -rf "$PIPELINE_ENV_FIXTURE"
+
 # --- 3. Entry points run from a foreign cwd with a clean PYTHONPATH -----------
 echo "=== 3. Foreign-cwd smoke (clean PYTHONPATH) ==="
 RESOLVED_PY=""

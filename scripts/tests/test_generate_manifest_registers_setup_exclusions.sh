@@ -33,10 +33,46 @@ trap cleanup EXIT INT TERM
 # for the wrong reason. `git clone --local` gives a real repo at HEAD.
 git clone --local --quiet "$ROOT" "$SCRATCH" \
     || { fail "git clone of $ROOT failed"; exit 1; }
+# A local clone contains committed HEAD only. Overlay the generator under test
+# so the check observes the current working-tree implementation before commit.
+cp "$ROOT/generate-manifest.sh" "$SCRATCH/generate-manifest.sh"
 
 echo "--- generate-manifest.sh must register EVERY setup/ file it skips ---"
 ( cd "$SCRATCH" && bash generate-manifest.sh >/dev/null 2>&1 ) \
     || { fail "generate-manifest.sh itself failed"; exit 1; }
+
+echo "--- platform delivery infrastructure is the only seed/ upgrade allow-list ---"
+PLATFORM_HOOK_PATHS="
+seed/strategy/.githooks/pre-commit
+seed/strategy/.githooks/pre-push
+seed/strategy/scripts/install-hooks.sh
+seed/strategy/scripts/update-derived-snapshot.py
+"
+PLATFORM_HOOK_FAILURES=""
+for hook_path in $PLATFORM_HOOK_PATHS; do
+    PRESENT=$(cd "$SCRATCH" && python3 -c "
+import json
+manifest = json.load(open('update-manifest.json'))
+print('1' if any(entry['path'] == '$hook_path' for entry in manifest['files']) else '0')
+")
+    [ "$PRESENT" = "1" ] || PLATFORM_HOOK_FAILURES="$PLATFORM_HOOK_FAILURES $hook_path"
+done
+if [ -z "$PLATFORM_HOOK_FAILURES" ]; then
+    pass "all platform delivery files are delivered through files[]"
+else
+    fail "platform delivery files missing from files[]:$PLATFORM_HOOK_FAILURES"
+fi
+
+UNRELATED_SEED_PRESENT=$(cd "$SCRATCH" && python3 -c "
+import json
+manifest = json.load(open('update-manifest.json'))
+print('1' if any(entry['path'] == 'seed/strategy/CLAUDE.md' for entry in manifest['files']) else '0')
+")
+if [ "$UNRELATED_SEED_PRESENT" = "0" ]; then
+    pass "unrelated seed user-space remains outside update delivery"
+else
+    fail "seed/strategy/CLAUDE.md leaked into files[] with the platform hook allow-list"
+fi
 
 # Cross-check against the REAL setup/ tree, not a fixture: any tracked file
 # under setup/ that generate-manifest.sh silently drops is exactly the

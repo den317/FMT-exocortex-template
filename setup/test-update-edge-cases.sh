@@ -32,6 +32,9 @@
 #   T31: extensions-gate is fail-closed: traversal/symlink/broken-manifest/manifest-edit block (WP-7 F71)
 #   T32: settings-merge-apply.sh applies with backup, rolls back on broken input (WP-7 F71 stage B)
 #   T33: update.sh wires stage-B flags with consensus safeguards (WP-7 F71)
+#   T34: Unicode context caps count characters, not bytes (issue #435)
+#   T35: /extend catalog matches every invoked extension point (issues #436/#508)
+#   T36: extension loader sorts suffixes and preserves no-op/error exit codes (issue #508)
 #
 # Exit: 0 = all PASS, N = N tests failed
 #
@@ -679,74 +682,69 @@ fi
 # ============================================================
 echo "--- T12: memory backup keeps nested files ---"
 
-# The rsync flag list is READ OUT OF day-close.sh, not retyped here: a hand-copied
-# flag list would keep passing after someone drops --include='*/' from the real script,
-# which is exactly the failure this test exists to catch.
+# Run the production backup, not a retyped copy primitive. Since issue #536 the
+# destination is multi-writer and stale pruning is driven by the ownership
+# manifest rather than by a global rsync --delete.
 T12_SCRIPT="$TEMPLATE_DIR/scripts/day-close.sh"
 if [ ! -f "$T12_SCRIPT" ]; then
     fail "T12: scripts/day-close.sh not found"
 else
-    # Slice the rsync invocation: from the `rsync -aL --delete \` line up to (not
-    # including) the line carrying the source/destination pair.
-    # while-read, not mapfile: macOS ships bash 3.2, where mapfile does not exist.
-    # T12_FLAG_COUNT is tracked separately because this harness runs under `set -u`,
-    # and bash 3.2 treats ${#EMPTY_ARRAY[@]} as an unbound variable — the crash would
-    # land on exactly the branch meant to report "extraction produced nothing".
-    T12_FLAGS=()
-    T12_FLAG_COUNT=0
-    while IFS= read -r t12_flag; do
-        T12_FLAGS+=("$t12_flag")
-        T12_FLAG_COUNT=$((T12_FLAG_COUNT + 1))
-    done < <(
-        # Anchored on the `rsync` keyword and the MEMORY_SRC line, NOT on a specific
-        # short-flag set: pinning `rsync -aL --delete` made the extraction return
-        # nothing the moment -m was added, turning correct code into a red test.
-        # The short flags on the rsync line itself are captured too (everything after
-        # the command name) — otherwise the test would run its own -aL and never
-        # exercise the -m the real script relies on. One token per line, since a
-        # source line may carry several flags.
-        awk '/^[[:space:]]*rsync[[:space:]]/{grab=1; for (i = 2; i <= NF; i++) if ($i != "\\") print $i; next}
-             grab && /MEMORY_SRC/{exit}
-             grab {for (i = 1; i <= NF; i++) if ($i != "\\") print $i}' "$T12_SCRIPT" \
-        | tr -d "'"
+    T12_ROOT="$TEST_WS/t12"
+    T12_WS="$T12_ROOT/workspace"
+    T12_SRC="$T12_ROOT/memory"
+    T12_DST="$T12_WS/governance/exocortex"
+    T12_HOME="$T12_ROOT/home"
+    mkdir -p \
+        "$T12_HOME" \
+        "$T12_SRC/reference" \
+        "$T12_SRC/.git/objects/ab" \
+        "$T12_DST/reference" \
+        "$T12_DST/extensions" \
+        "$T12_DST/agent-fault-profile/audit" \
+        "$T12_DST/hindsight" \
+        "$T12_DST/decisions"
+    echo "top-level" > "$T12_SRC/navigation.md"
+    echo "nested" > "$T12_SRC/reference/agent-core.md"
+    echo "owned then removed" > "$T12_SRC/reference/stale-memory.md"
+    echo "blob" > "$T12_SRC/.git/objects/ab/deadbeef"
+    echo "extension" > "$T12_DST/extensions/day-close.after.md"
+    echo "fault audit" > "$T12_DST/agent-fault-profile/audit/faults.md"
+    echo "hindsight" > "$T12_DST/hindsight/notes.md"
+    echo "legacy decision" > "$T12_DST/decisions/decision-log.md"
+
+    T12_ENV=(
+        HOME="$T12_HOME"
+        WORKSPACE_DIR="$T12_WS"
+        IWE_ROOT="$T12_WS"
+        IWE_WORKSPACE="$T12_WS"
+        IWE_TEMPLATE="$TEMPLATE_DIR"
+        IWE_SCRIPTS="$TEMPLATE_DIR/scripts"
+        IWE_GOVERNANCE_REPO="governance"
+        GOVERNANCE_REPO="governance"
+        IWE_MEMORY_SRC="$T12_SRC"
+        IWE_DAY_CLOSE_LOG="$T12_ROOT/day-close.log"
     )
+    T12_FIRST_RC=0
+    env "${T12_ENV[@]}" bash "$T12_SCRIPT" --backup \
+        > "$T12_ROOT/first.out" 2>&1 || T12_FIRST_RC=$?
+    rm -f -- "$T12_SRC/reference/stale-memory.md"
+    T12_SECOND_RC=0
+    env "${T12_ENV[@]}" bash "$T12_SCRIPT" --backup \
+        > "$T12_ROOT/second.out" 2>&1 || T12_SECOND_RC=$?
 
-    if [ "$T12_FLAG_COUNT" -eq 0 ]; then
-        fail "T12: could not extract rsync flags from day-close.sh — test cannot verify anything"
+    if [ "$T12_FIRST_RC" -ne 0 ] || [ "$T12_SECOND_RC" -ne 0 ]; then
+        fail "T12: real day-close backup failed ($T12_FIRST_RC/$T12_SECOND_RC)"
     else
-        T12_SRC="$TEST_WS/t12/memory"
-        T12_DST="$TEST_WS/t12/exocortex"
-        # .git/objects/ab mirrors what the live memory source actually contains: its
-        # files are dropped by the trailing --exclude, so the directory must not survive.
-        mkdir -p \
-            "$T12_SRC/reference" \
-            "$T12_SRC/.git/objects/ab" \
-            "$T12_DST/reference" \
-            "$T12_DST/extensions" \
-            "$T12_DST/agent-fault-profile/audit" \
-            "$T12_DST/hindsight" \
-            "$T12_DST/decisions"
-        echo "top-level" > "$T12_SRC/navigation.md"
-        echo "nested" > "$T12_SRC/reference/agent-core.md"
-        echo "blob" > "$T12_SRC/.git/objects/ab/deadbeef"
-        echo "stale memory" > "$T12_DST/reference/stale-memory.md"
-        echo "extension" > "$T12_DST/extensions/day-close.after.md"
-        echo "fault audit" > "$T12_DST/agent-fault-profile/audit/faults.md"
-        echo "hindsight" > "$T12_DST/hindsight/notes.md"
-        echo "legacy decision" > "$T12_DST/decisions/decision-log.md"
-
-        rsync "${T12_FLAGS[@]}" "$T12_SRC/" "$T12_DST/" >/dev/null 2>&1
-
         if [ -f "$T12_DST/reference/agent-core.md" ] && [ -f "$T12_DST/navigation.md" ]; then
             pass "T12: nested memory/reference/agent-core.md reaches the backup"
         elif [ -f "$T12_DST/navigation.md" ]; then
-            fail "T12: top-level file copied but memory/reference/agent-core.md was dropped (missing --include='*/')"
+            fail "T12: top-level file copied but memory/reference/agent-core.md was dropped"
         else
-            fail "T12: backup produced nothing — flags extracted: ${T12_FLAGS[*]}"
+            fail "T12: production backup copied no memory files"
         fi
 
         if [ -d "$T12_DST/.git" ]; then
-            fail "T12: empty .git skeleton was mirrored into the backup (missing -m / --prune-empty-dirs)"
+            fail "T12: empty .git skeleton was mirrored into the backup"
         else
             pass "T12: directory skeletons with no matching files are not mirrored"
         fi
@@ -760,15 +758,21 @@ else
             [ -f "$T12_DST/$foreign" ] || T12_FOREIGN_MISSING=$((T12_FOREIGN_MISSING + 1))
         done
         if [ "$T12_FOREIGN_MISSING" -eq 0 ]; then
-            pass "T12: --delete preserves all declared non-memory writer subtrees"
+            pass "T12: ownership sync preserves all non-memory writer subtrees"
         else
-            fail "T12: --delete removed $T12_FOREIGN_MISSING file(s) owned by other exocortex writers"
+            fail "T12: ownership sync removed $T12_FOREIGN_MISSING foreign file(s)"
         fi
 
         if [ ! -f "$T12_DST/reference/stale-memory.md" ]; then
-            pass "T12: --delete still prunes stale files inside a memory-owned subtree"
+            pass "T12: manifest prunes an unchanged formerly-owned memory file"
         else
-            fail "T12: ownership protection disabled stale-memory pruning"
+            fail "T12: manifest did not prune an unchanged formerly-owned file"
+        fi
+
+        if [ -s "$T12_DST/.day-close-backup-manifest.json" ]; then
+            pass "T12: ownership manifest records the production backup"
+        else
+            fail "T12: ownership manifest is missing"
         fi
     fi
 fi
@@ -1026,17 +1030,17 @@ if t16_run inject-code-style.sh "{\"session_id\":\"t16-code\",\"tool_name\":\"Ed
     fi
 fi
 
-# inject-fault-profile: with a reminder fixture in the governance path, a real
+# inject-fault-profile: with a canonical CLI fixture in the workspace, a real
 # payload must yield the reminder AND the traversal-shaped session_id must be
 # sanitized before landing in the state-file name.
-mkdir -p "$T16_PROJ/DS-strategy/scripts"
+mkdir -p "$T16_PROJ/scripts/agent-fault"
 printf '#!/usr/bin/env python3\nprint("\\U0001F534 [CRITICAL | n=5] test-reminder-fixture")\n' \
-    > "$T16_PROJ/DS-strategy/scripts/agent_fault_remind.py"
+    > "$T16_PROJ/scripts/agent-fault/iwe_checklist_memory.py"
 if t16_run inject-fault-profile.sh '{"session_id":"t16-../../evil","prompt":"x"}'; then
     T16_EV=$(t16_json "d['hookSpecificOutput']['hookEventName']")
     T16_HAS=$(t16_json "'test-reminder-fixture' in d['hookSpecificOutput']['additionalContext']")
     if [ "$T16_EV" = "UserPromptSubmit" ] && [ "$T16_HAS" = "True" ]; then
-        pass "T16: inject-fault-profile serves reminders from the governance fixture"
+        pass "T16: inject-fault-profile serves reminders from the canonical CLI fixture"
     else
         fail "T16: inject-fault-profile event='$T16_EV' reminder='$T16_HAS'"
     fi
@@ -1900,13 +1904,23 @@ fi
 echo ""
 echo "--- T31: extensions-gate fail-closed matrix (WP-7 F71) ---"
 T31_WS="$TEST_WS/t31-ws"
+T31_EXTERNAL="$TEST_WS/t31-external"
+T31_PREFIX_COLLISION="$TEST_WS/t31-ws-other"
 mkdir -p "$T31_WS/.claude/hooks" "$T31_WS/.claude/skills/my-skill" \
-         "$T31_WS/.claude/skills/day-open" "$T31_WS/memory"
+         "$T31_WS/.claude/skills/day-open" "$T31_WS/memory" \
+         "$T31_EXTERNAL/.claude/skills/my-skill" \
+         "$T31_PREFIX_COLLISION/.claude/skills/day-open"
 cp "$TEMPLATE_DIR/.claude/hooks/extensions-gate.sh" "$T31_WS/.claude/hooks/"
 printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/update-manifest.json"
 touch "$T31_WS/.claude/skills/my-skill/SKILL.md" "$T31_WS/.claude/skills/day-open/SKILL.md" \
-      "$T31_WS/memory/protocol-open.md"
+      "$T31_WS/memory/protocol-open.md" \
+      "$T31_EXTERNAL/.claude/skills/my-skill/SKILL.md" \
+      "$T31_EXTERNAL/update-manifest.json" \
+      "$T31_EXTERNAL/external-target.md" \
+      "$T31_PREFIX_COLLISION/.claude/skills/day-open/SKILL.md"
 ln -s "$T31_WS/.claude/skills/day-open/SKILL.md" "$T31_WS/.claude/skills/my-skill/link.md"
+ln -s "$T31_EXTERNAL/external-target.md" "$T31_WS/.claude/skills/my-skill/external-link.md"
+ln -s "$T31_WS/.claude/skills/day-open/SKILL.md" "$T31_EXTERNAL/.claude/skills/platform-link.md"
 t31_gate() {
     printf '{"tool_input": {"file_path": "%s"}}' "$1" | bash "$T31_WS/.claude/hooks/extensions-gate.sh"
 }
@@ -1928,13 +1942,32 @@ t31_allowed() {
         pass "T31: $2"
     fi
 }
+t31_blocked_reason() {
+    local out
+    out=$(t31_gate "$1")
+    if grep -Fq '"decision": "block"' <<<"$out" && grep -Fq "$3" <<<"$out"; then
+        pass "T31: $2"
+    else
+        fail "T31: $2 — нет ожидаемой причины '$3': $out"
+    fi
+}
 t31_allowed "$T31_WS/.claude/skills/my-skill/SKILL.md"                "own skill (not in manifest) is allowed"
+t31_allowed "$T31_WS/.claude/skills/brand-new/SKILL.md"               "nonexistent leaf of a new own skill is classified and allowed"
 t31_allowed "$T31_WS/README.md"                                       "ordinary file is allowed"
+t31_allowed "$T31_EXTERNAL/.claude/skills/my-skill/SKILL.md"          "global/user skill outside workspace is allowed"
+t31_allowed "$T31_EXTERNAL/update-manifest.json"                      "external manifest is outside gate ownership"
+t31_allowed "$T31_PREFIX_COLLISION/.claude/skills/day-open/SKILL.md"  "workspace prefix collision stays outside gate ownership"
 t31_blocked "$T31_WS/.claude/skills/day-open/SKILL.md"                "platform skill is blocked"
+t31_blocked "$T31_WS/.claude/skills/day-open/new-file.md"             "nonexistent leaf under a platform skill is blocked"
 t31_blocked "$T31_WS/memory/protocol-open.md"                         "memory/protocol-* is blocked"
+t31_blocked "$T31_WS/memory/protocol-new.md"                          "nonexistent protocol leaf is blocked"
 t31_blocked "$T31_WS/.claude/skills/my-skill/../day-open/SKILL.md"    "traversal via .. is blocked before classification"
 t31_blocked "$T31_WS/update-manifest.json"                            "manifest itself is always blocked"
 t31_blocked "$T31_WS/.claude/skills/my-skill/link.md"                 "symlink into a platform skill is blocked by real path"
+t31_allowed "$T31_WS/.claude/skills/my-skill/external-link.md"        "symlink to external user territory is allowed"
+t31_blocked "$T31_EXTERNAL/.claude/skills/platform-link.md"           "external symlink into platform skill is blocked by real path"
+rm -f "$T31_WS/update-manifest.json"
+t31_blocked_reason "$T31_WS/.claude/skills/my-skill/SKILL.md"         "missing manifest names the real failure" "update-manifest.json отсутствует"
 printf '%s\n' '{broken' > "$T31_WS/update-manifest.json"
 t31_blocked "$T31_WS/.claude/skills/my-skill/SKILL.md"                "broken manifest fails closed (no allow on tool failure)"
 printf '%s\n' '{"files": []}' > "$T31_WS/update-manifest.json"
@@ -1945,6 +1978,30 @@ if grep -Fq '"defaultMode": "default"' "$TEMPLATE_DIR/.claude/settings.json"; th
     pass "T31: template settings.json ships defaultMode=default (not acceptEdits)"
 else
     fail "T31: template settings.json must not ship auto-accept edit mode"
+fi
+if python3 - "$TEMPLATE_DIR/.claude/settings.json" <<'PY'
+import json
+import sys
+
+settings = json.load(open(sys.argv[1]))
+matches = []
+for group in settings.get("hooks", {}).get("PreToolUse", []):
+    commands = [hook.get("command", "") for hook in group.get("hooks", [])]
+    if any(command.endswith("/.claude/hooks/extensions-gate.sh") for command in commands):
+        matches.append(group.get("matcher"))
+raise SystemExit(0 if matches == ["Edit|Write"] else 1)
+PY
+then
+    pass "T31: extensions-gate declares its actual Edit|Write enforcement scope"
+else
+    fail "T31: extensions-gate matcher drifted from the documented scope"
+fi
+if grep -Fq 'советующее в целом' "$TEMPLATE_DIR/CLAUDE.md" && \
+   grep -Fq 'не разбирает произвольные Bash-команды' "$TEMPLATE_DIR/CLAUDE.md" && \
+   grep -Fq 'новый project-local skill допустим' "$TEMPLATE_DIR/CLAUDE.md"; then
+    pass "T31: docs disclose Bash bypass and preserve the issue-311 local-skill path"
+else
+    fail "T31: docs overstate enforcement or contradict project-local skills"
 fi
 
 # T32: settings-merge-apply.sh applies with backup and never leaves a torn file (WP-7 F71 stage B)
@@ -2060,6 +2117,7 @@ import sys
 root = Path(sys.argv[1])
 call_re = re.compile(r"load-extensions\.sh\s+([a-z-]+)\s+(before|after|checks|sync)")
 row_re = re.compile(r"^\| `([^`]+)` \| `([^`]+)` \| `extensions/", re.MULTILINE)
+readme_row_re = re.compile(r"^\| `([^`]+)` \| `([^`]+)` \|", re.MULTILINE)
 
 sources = [root / "memory/protocol-close.md", root / "memory/protocol-open.md"]
 sources.extend(path for path in (root / ".claude/skills").rglob("*.md") if path != root / ".claude/skills/extend/SKILL.md")
@@ -2069,15 +2127,631 @@ called = {
     for match in call_re.finditer(path.read_text(encoding="utf-8"))
 }
 catalog = set(row_re.findall((root / ".claude/skills/extend/SKILL.md").read_text(encoding="utf-8")))
-if len(called) != 16 or catalog != called:
+readme_catalog = set(
+    readme_row_re.findall((root / "extensions/README.md").read_text(encoding="utf-8"))
+)
+required = {
+    (protocol, hook)
+    for protocol in ("iwe-update", "verify", "archgate")
+    for hook in ("before", "checks", "after")
+}
+if catalog != called or readme_catalog != called or not required.issubset(called):
     missing = sorted(called - catalog)
     extra = sorted(catalog - called)
-    raise SystemExit(f"called={len(called)} catalog={len(catalog)} missing={missing} extra={extra}")
+    readme_missing = sorted(called - readme_catalog)
+    readme_extra = sorted(readme_catalog - called)
+    absent_required = sorted(required - called)
+    raise SystemExit(
+        f"called={len(called)} catalog={len(catalog)} "
+        f"missing={missing} extra={extra} readme_missing={readme_missing} "
+        f"readme_extra={readme_extra} absent_required={absent_required}"
+    )
+
+for protocol in ("iwe-update", "verify", "archgate"):
+    skill = (root / ".claude/skills" / protocol / "SKILL.md").read_text(encoding="utf-8")
+    positions = [skill.index(f"load-extensions.sh {protocol} {hook}") for hook in ("before", "checks", "after")]
+    if positions != sorted(positions):
+        raise SystemExit(f"{protocol} lifecycle order is not before -> checks -> after: {positions}")
+
+archgate = (root / ".claude/skills/archgate/SKILL.md").read_text(encoding="utf-8")
+calls = [f"load-extensions.sh archgate {hook}" for hook in ("before", "checks", "after")]
+if any(archgate.count(call) != 1 for call in calls):
+    raise SystemExit("archgate must invoke each lifecycle phase exactly once")
+markers = [
+    calls[0],
+    "## Шаг 0.",
+    "## Шаг 4.6.",
+    calls[1],
+    "## Шаг 5.",
+    calls[2],
+]
+marker_positions = [archgate.index(marker) for marker in markers]
+if marker_positions != sorted(marker_positions):
+    raise SystemExit(f"archgate phase boundaries are out of order: {marker_positions}")
+
+step3 = archgate.split("## Шаг 3.", 1)[1].split("## Шаг 4.", 1)[0]
+pre_checks = archgate.split("## Шаг 4.7.", 1)[0]
+normalized_archgate = " ".join(archgate.split())
+required_contracts = (
+    "extension_check_error",
+    "блокирует начало оценки",
+    "не может переписать, отозвать или понизить",
+    "продолжая со следующим даже после ошибки предыдущего",
+    "запрещено вызывать `/archgate`",
+    "Шаг 4.7",
+    "единственная точка",
+    "явный `BLOCK`/`STOP`",
+    "содержательное возражение рецензента",
+    "Не исполнять собранную через `eval`",
+    "получения всех обязательных explicit acknowledgement",
+    "ARCHGATE_EXTENSION: PASS",
+    "ARCHGATE_EXTENSION: BLOCK",
+    "extension_check_blocked",
+    "pending_ack",
+)
+missing_contracts = [
+    contract for contract in required_contracts if contract not in normalized_archgate
+]
+if missing_contracts:
+    raise SystemExit(f"archgate lifecycle semantics missing: {missing_contracts}")
+if "Перейди к шагу 5 и завершай" in step3:
+    raise SystemExit("rejected core result bypasses archgate checks")
+for bypass in ("перейди к шагу 5", "переходи к Шагу 5"):
+    if bypass.lower() in pre_checks.lower():
+        raise SystemExit(f"pre-check lifecycle contains direct verdict bypass: {bypass}")
+if "| **Вердикт**" in pre_checks or "ПРОХОДИТ/НЕТ" in pre_checks:
+    raise SystemExit("archgate publishes a verdict before extension checks")
+if "оформи DRR" in pre_checks or "финализируй DRR" in pre_checks:
+    raise SystemExit("archgate persists an accepted DRR before extension checks")
+rejected_no_ack = "Если `core_result = rejected`, обязательные подтверждения рисков не запрашивай"
+passing_ack = "Только если ядро прошло, **сначала собери обязательные подтверждения.**"
+if rejected_no_ack not in archgate or passing_ack not in archgate:
+    raise SystemExit("acknowledgements are not conditional on a passing core result")
+ack_position = archgate.index(passing_ack)
+final_position = archgate.index("**После всех обязательных подтверждений опубликуй ровно один вердикт:**")
+after_position = archgate.index(calls[2])
+if not ack_position < final_position < after_position:
+    raise SystemExit("acknowledgement, final verdict and after phases are out of order")
 PY
 then
-    pass "T35: /extend lists all 16 invoked extension points"
+    pass "T35: /extend lists every invoked point and new skill lifecycles are ordered"
 else
     fail "T35: /extend catalog differs from invoked extension points"
+fi
+
+# ============================================================
+# T36: extension loader sorting, no-op, and usage error contract (#508)
+# ============================================================
+echo ""
+echo "--- T36: extension loader lifecycle contract (#508) ---"
+T36_ROOT="$TEST_WS/t36-workspace"
+T36_EXT="$T36_ROOT/extensions"
+T36_OUT="$TEST_WS/t36-found.txt"
+mkdir -p "$T36_EXT"
+: > "$T36_EXT/archgate.before.20-second.md"
+: > "$T36_EXT/archgate.before.10-first.md"
+: > "$T36_EXT/archgate.before.md"
+
+if IWE_WORKSPACE="$T36_ROOT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" archgate before > "$T36_OUT"; then
+    T36_NAMES=$(sed 's#.*/##' "$T36_OUT" | paste -sd ' ' -)
+    if [ "$T36_NAMES" = "archgate.before.10-first.md archgate.before.20-second.md archgate.before.md" ]; then
+        pass "T36a: suffix and manifest extensions are returned in stable lexical order"
+    else
+        fail "T36a: unexpected extension order: $T36_NAMES"
+    fi
+else
+    fail "T36a: loader did not return matching extensions"
+fi
+
+if IWE_WORKSPACE="$T36_ROOT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" archgate checks >/dev/null 2>&1; then
+    T36_NOOP_RC=0
+else
+    T36_NOOP_RC=$?
+fi
+if [ "$T36_NOOP_RC" -eq 1 ]; then
+    pass "T36b: no matching extension is an explicit no-op (rc=1)"
+else
+    fail "T36b: no-match returned rc=$T36_NOOP_RC instead of 1"
+fi
+
+if bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" >/dev/null 2>&1; then
+    T36_USAGE_RC=0
+else
+    T36_USAGE_RC=$?
+fi
+if [ "$T36_USAGE_RC" -eq 2 ]; then
+    pass "T36c: malformed loader invocation is distinguishable from no-op (rc=2)"
+else
+    fail "T36c: malformed invocation returned rc=$T36_USAGE_RC instead of 2"
+fi
+
+T36_BROKEN="$TEST_WS/t36-broken-workspace"
+mkdir -p "$T36_BROKEN/.claude/scripts"
+cp "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" "$T36_BROKEN/.claude/scripts/"
+if IWE_WORKSPACE="$T36_BROKEN" WORKSPACE_DIR="$T36_BROKEN" IWE_ROOT="$T36_BROKEN" IWE="$T36_BROKEN" \
+    bash "$T36_BROKEN/.claude/scripts/load-extensions.sh" archgate checks \
+    >"$TEST_WS/t36-broken.out" 2>&1; then
+    T36_BROKEN_RC=0
+else
+    T36_BROKEN_RC=$?
+fi
+if [ "$T36_BROKEN_RC" -eq 3 ] && grep -Fq '[extension_loader_error]' "$TEST_WS/t36-broken.out"; then
+    pass "T36d: missing extensions directory is a typed loader failure, not a no-op"
+else
+    fail "T36d: missing extensions directory returned rc=$T36_BROKEN_RC"
+fi
+
+ln -s "$T36_ROOT/extensions/missing-before.md" "$T36_EXT/archgate.checks.md"
+if IWE_WORKSPACE="$T36_ROOT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" \
+    archgate checks >"$TEST_WS/t36-broken-link.out" 2>&1; then
+    T36_LINK_RC=0
+else
+    T36_LINK_RC=$?
+fi
+if [ "$T36_LINK_RC" -eq 3 ] && grep -Fq 'symlink target is missing' "$TEST_WS/t36-broken-link.out"; then
+    pass "T36e: configured dangling extension is a typed failure, not a no-op"
+else
+    fail "T36e: dangling extension returned rc=$T36_LINK_RC"
+fi
+rm "$T36_EXT/archgate.checks.md"
+mkdir "$T36_EXT/archgate.checks.md"
+if IWE_WORKSPACE="$T36_ROOT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" \
+    archgate checks >"$TEST_WS/t36-wrong-type.out" 2>&1; then
+    T36_TYPE_RC=0
+else
+    T36_TYPE_RC=$?
+fi
+if [ "$T36_TYPE_RC" -eq 3 ] && grep -Fq 'not a regular file' "$TEST_WS/t36-wrong-type.out"; then
+    pass "T36f: matching non-file extension is a typed failure, not a no-op"
+else
+    fail "T36f: matching directory returned rc=$T36_TYPE_RC"
+fi
+
+T36_EXPLICIT="$TEST_WS/t36-explicit-without-extensions"
+mkdir -p "$T36_EXPLICIT"
+if IWE_WORKSPACE="$T36_EXPLICIT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" \
+    archgate before >"$TEST_WS/t36-explicit.out" 2>&1; then
+    T36_EXPLICIT_RC=0
+else
+    T36_EXPLICIT_RC=$?
+fi
+if [ "$T36_EXPLICIT_RC" -eq 3 ] && grep -Fq 'extensions directory is unavailable' "$TEST_WS/t36-explicit.out"; then
+    pass "T36g: existing explicit workspace cannot fail open into script fallback"
+else
+    fail "T36g: explicit workspace without extensions returned rc=$T36_EXPLICIT_RC"
+fi
+
+rm -rf "$T36_EXT/archgate.checks.md"
+printf '%s\n' 'ARCHGATE_EXTENSION: PASS' > "$T36_EXT/archgate.after.10-healthy.md"
+ln -s "$T36_ROOT/extensions/missing-after.md" "$T36_EXT/archgate.after.20-broken.md"
+if IWE_WORKSPACE="$T36_ROOT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" \
+    archgate after >"$TEST_WS/t36-mixed.out" 2>"$TEST_WS/t36-mixed.err"; then
+    T36_MIXED_RC=0
+else
+    T36_MIXED_RC=$?
+fi
+if [ "$T36_MIXED_RC" -eq 3 ] && \
+   grep -Fq 'archgate.after.10-healthy.md' "$TEST_WS/t36-mixed.out" && \
+   ! grep -Fq 'archgate.after.20-broken.md' "$TEST_WS/t36-mixed.out" && \
+   grep -Fq 'symlink target is missing' "$TEST_WS/t36-mixed.err"; then
+    pass "T36h: mixed after set preserves healthy paths while reporting damage"
+else
+    fail "T36h: damaged after file suppressed healthy files or lost diagnosis (rc=$T36_MIXED_RC)"
+fi
+
+rm "$T36_EXT/archgate.after.20-broken.md"
+for T36_PHASE in before checks after; do
+    rm -f "$T36_EXT"/archgate."$T36_PHASE"*.md
+    printf '%s\n' 'bash .claude/scripts/load-extensions.sh archgate checks' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-plain.md"
+    printf '%s\n' 'bash .claude/scripts/load-extensions.sh '\''archgate'\'' "checks"' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-quoted.md"
+    printf '%s\n' 'Вызови `/archgate повторно`.' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-slash.md"
+    printf '%s\n' 'Вызови "/archgate" повторно.' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-double-quote.md"
+    printf '%s\n' "Вызови '/archgate' повторно." \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-single-quote.md"
+    printf '%s\n' 'Вызови (/archgate); повторно.' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-paren.md"
+    printf '%s\n' 'then;/archgate|next' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-shell-separator.md"
+    printf '%s\n' 'Вызови /ARCHGATE повторно.' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-uppercase.md"
+    printf '%s\n' 'bash .claude/scripts/load-extensions.sh ArchGate checks' \
+        > "$T36_EXT/archgate.$T36_PHASE.recursive-mixed-case-loader.md"
+    printf '%s\n' '/archgate-extra foo/archgate /archgate.md' \
+        > "$T36_EXT/archgate.$T36_PHASE.nonrecursive-lookalikes.md"
+    if IWE_WORKSPACE="$T36_ROOT" bash "$TEMPLATE_DIR/.claude/scripts/load-extensions.sh" \
+        archgate "$T36_PHASE" >"$TEST_WS/t36-recursive-$T36_PHASE.out" \
+        2>"$TEST_WS/t36-recursive-$T36_PHASE.err"; then
+        T36_RECURSIVE_RC=0
+    else
+        T36_RECURSIVE_RC=$?
+    fi
+    if [ "$T36_PHASE" = "after" ]; then
+        T36_RECURSIVE_MARKER='ARCHGATE_EXTENSION: WARN'
+    else
+        T36_RECURSIVE_MARKER='ARCHGATE_EXTENSION: BLOCK'
+    fi
+    if [ "$T36_RECURSIVE_RC" -eq 3 ] && \
+       [ "$(wc -l < "$TEST_WS/t36-recursive-$T36_PHASE.out" | tr -d ' ')" -eq 1 ] && \
+       grep -Fq "archgate.$T36_PHASE.nonrecursive-lookalikes.md" \
+           "$TEST_WS/t36-recursive-$T36_PHASE.out" && \
+       [ "$(grep -Fc "$T36_RECURSIVE_MARKER" "$TEST_WS/t36-recursive-$T36_PHASE.err")" -eq 9 ]; then
+        pass "T36i/$T36_PHASE: recursion delimiters are rejected without blocking lookalikes ($T36_RECURSIVE_MARKER)"
+    else
+        fail "T36i/$T36_PHASE: recursion contract failed (rc=$T36_RECURSIVE_RC)"
+    fi
+done
+
+# ============================================================
+# T37: update preview names governance backfill targets (#508)
+# ============================================================
+echo ""
+echo "--- T37: governance backfills are explicit in update preview (#508) ---"
+T37_WS="$TEST_WS/t37-workspace"
+T37_TEMPLATE="$T37_WS/template"
+T37_RUNNER="$TEST_WS/t37-preview-runner.sh"
+mkdir -p "$T37_TEMPLATE"
+printf 'GOVERNANCE_REPO=legacy-governance\n' > "$T37_TEMPLATE/.exocortex.env"
+awk '/^effective_governance_repo\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' \
+    "$TEMPLATE_DIR/update.sh" > "$T37_RUNNER"
+awk '/^print_extra_write_targets\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' \
+    "$TEMPLATE_DIR/update.sh" >> "$T37_RUNNER"
+cat >> "$T37_RUNNER" <<EOF
+SCRIPT_DIR="$T37_TEMPLATE"
+WORKSPACE_DIR="$T37_WS"
+CLAUDE_MEMORY_DIR="$T37_WS/memory"
+ENV_GOVERNANCE_REPO=""
+IWE_GOVERNANCE_REPO=""
+print_extra_write_targets
+EOF
+T37_OUT=$(bash "$T37_RUNNER" 2>&1)
+if printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/scripts/install-hooks.sh" && \
+   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/.githooks/pre-commit" && \
+   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/scripts/update-derived-snapshot.py" && \
+   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/scripts/executor-catalog.yaml" && \
+   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/.iwe-paths" && \
+   printf '%s\n' "$T37_OUT" | grep -Fq '/.zshenv' && \
+   printf '%s\n' "$T37_OUT" | grep -Fq 'local core.hooksPath'; then
+    pass "T37: preview resolves legacy config and lists every governance backfill target"
+else
+    fail "T37: preview omits or mis-resolves governance backfill targets: $T37_OUT"
+fi
+if grep -Fq '/ (ваше планирование)' "$TEMPLATE_DIR/update.sh"; then
+    fail "T37: update preview still promises the whole governance repository is untouched"
+else
+    pass "T37: no broad untouched-governance promise remains"
+fi
+
+# ============================================================
+# T38: State-Transition Gate hot trigger resolves fail-closed (#481)
+# ============================================================
+echo ""
+echo "--- T38: State-Transition Gate lazy trigger contract (#481) ---"
+T38_RC=0
+IWE_ROOT="$TEMPLATE_DIR" bash "$TEMPLATE_DIR/scripts/sync-agent-instructions.sh" --check >/dev/null 2>&1 || T38_RC=$?
+if [ "$T38_RC" -eq 0 ]; then
+    pass "T38a: generated AGENTS.md matches the CLAUDE.md hot source"
+else
+    fail "T38a: generated AGENTS.md has drift (rc=$T38_RC)"
+fi
+
+if python3 - "$TEMPLATE_DIR" <<'PY'
+from pathlib import Path
+import re
+import shutil
+import tempfile
+import sys
+
+root = Path(sys.argv[1])
+target_reference = ".claude/rules-lazy/state-transition-gate.md"
+claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
+agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+lazy = (root / target_reference).read_text(encoding="utf-8")
+blocking = (root / ".claude/rules-lazy/blocking-rules-full.md").read_text(encoding="utf-8")
+
+if claude.count(target_reference) != 1 or agents.count(target_reference) != 1:
+    raise SystemExit("hot source must contain exactly one mandatory lazy reference")
+
+state_block = claude.split("## State-Transition Gate — CRITICAL", 1)[1].split("\n## ", 1)[0]
+def validate_hot(hot: str, governance: str) -> str:
+    normalized = " ".join(hot.split())
+    expected = (
+        f"**Есть `{governance}/docs/state-axes-registry.yaml` → до любого "
+        "нетривиального действия или РП полностью прочитать и выполнить "
+        "`.claude/rules-lazy/state-transition-gate.md`; lazy-файл отсутствует "
+        "или нечитаем → только inventory, СТОП. Реестра нет → гейт неактивен.**"
+    )
+    if normalized != expected:
+        raise ValueError("hot trigger differs from the normative fail-closed rule")
+    match = re.search(r"`(\.claude/rules-lazy/[^`]+\.md)`", hot)
+    if match is None:
+        raise ValueError("lazy target missing from hot trigger")
+    return match.group(1)
+
+def validate_lazy(full_rule: str) -> None:
+    normalized = " ".join(full_rule.split())
+    expected = " ".join("""
+# State-Transition Gate — полный контракт
+
+> Hot-триггер: `CLAUDE.md`, Agent Core. Этот файл обязателен целиком, когда в
+> governance-репозитории существует `docs/state-axes-registry.yaml` (WP-457).
+
+Перед любым нетривиальным действием или РП назвать целевой переход состояния
+пользователя в форме `{тип состояния, из→в}`.
+
+## Допустимый переход
+
+1. Тип состояния брать только из того же
+   `docs/state-axes-registry.yaml` governance-репозитория, наличие которого
+   активировало hot-триггер.
+2. Использовать только ось с `gate_ready: true`.
+3. Дать ссылку на объявленного владельца конечного автомата
+   (`declared FSM-owner`) этой оси.
+4. Свободный текст вместо зарегистрированного типа состояния не принимается.
+
+Если тип не зарегистрирован, ось не имеет `gate_ready: true` или ссылка на
+владельца отсутствует, разрешён только сбор фактов (`inventory`) → СТОП и
+отложить нетривиальное действие или РП.
+
+Для перехода по нескольким осям применять правила cross-axis из
+`memory/reference/agent-core.md`. Авторская концептуальная модель может быть
+доступна в `archive/wp-contexts/WP-457/CONCEPT-user-states.md §5`, но не является
+обязательной для понимания и исполнения этого поставляемого контракта.
+""".split())
+    if normalized != expected:
+        raise ValueError("lazy rule differs from the normative structural contract")
+    if re.search(r"{{[A-Z][A-Z0-9_]*}}", full_rule):
+        raise ValueError("raw install placeholder leaked into shipped lazy rule")
+
+validate_hot(state_block, "{{GOVERNANCE_REPO}}")
+validate_lazy(lazy)
+if blocking.count(target_reference) != 1 or "Полный текст → Agent Core" in blocking:
+    raise SystemExit("blocking-rules pointer duplicates or points back to hot core")
+
+def resolve_lazy(fixture: Path, governance: str, registry_present: bool):
+    registry = fixture / governance / "docs/state-axes-registry.yaml"
+    hot = (fixture / "CLAUDE.md").read_text(encoding="utf-8")
+    target_reference_from_hot = validate_hot(hot, governance)
+    if not registry_present:
+        if registry.exists():
+            raise AssertionError("no-registry fixture unexpectedly has a registry")
+        return None
+    if not registry.is_file():
+        raise RuntimeError("registry expected but absent")
+    target = fixture / target_reference_from_hot
+    if not target.is_file():
+        raise RuntimeError(f"lazy target missing or unreadable: {target}")
+    resolved = target.read_text(encoding="utf-8")
+    validate_lazy(resolved)
+    return resolved
+
+with tempfile.TemporaryDirectory(prefix="iwe-state-gate-") as raw_fixture:
+    fixture = Path(raw_fixture)
+    governance = "pilot-governance"
+    installed_hot = state_block.replace("{{GOVERNANCE_REPO}}", governance)
+    (fixture / "CLAUDE.md").write_text(installed_hot, encoding="utf-8")
+    target = fixture / target_reference
+    target.parent.mkdir(parents=True)
+    shutil.copy2(root / target_reference, target)
+
+    if resolve_lazy(fixture, governance, registry_present=False) is not None:
+        raise SystemExit("fresh install loaded the full rule without a registry")
+
+    registry = fixture / governance / "docs/state-axes-registry.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("axes: {}\n", encoding="utf-8")
+    resolved = resolve_lazy(fixture, governance, registry_present=True)
+    if resolved is None or "gate_ready" not in resolved:
+        raise SystemExit("author install did not resolve the full lazy contract")
+
+    hot_mutations = (
+        installed_hot.replace("Есть `", "Нет `"),
+        installed_hot.replace("полностью прочитать", "не читать"),
+        installed_hot.replace("только inventory, СТОП", "продолжить"),
+        installed_hot.replace(governance, "wrong-governance"),
+    )
+    for mutated in hot_mutations:
+        try:
+            validate_hot(mutated, governance)
+        except ValueError:
+            continue
+        raise SystemExit("dangerous hot-trigger mutation passed semantic validation")
+
+    lazy_mutations = (
+        lazy.replace("`gate_ready: true`", "`gate_ready: false`", 1),
+        lazy.replace("не принимается", "принимается", 1),
+        lazy.replace("Дать ссылку", "Не давать ссылку", 1),
+        lazy.replace("Использовать только ось", "Не: Использовать только ось", 1),
+        lazy.replace("Дать ссылку", "Не следует: Дать ссылку", 1),
+        lazy.replace(
+            "Свободный текст вместо зарегистрированного типа состояния не принимается",
+            "Неверно, что Свободный текст вместо зарегистрированного типа состояния не принимается",
+            1,
+        ),
+        lazy + "\n{{WORKSPACE_DIR}}\n",
+    )
+    for mutated_lazy in lazy_mutations:
+        try:
+            validate_lazy(mutated_lazy)
+        except ValueError:
+            continue
+        raise SystemExit("dangerous full-rule mutation passed semantic validation")
+
+    missing_target = installed_hot.replace(
+        target_reference, ".claude/rules-lazy/missing.md"
+    )
+    (fixture / "CLAUDE.md").write_text(missing_target, encoding="utf-8")
+    try:
+        resolve_lazy(fixture, governance, registry_present=True)
+    except (RuntimeError, ValueError):
+        pass
+    else:
+        raise SystemExit("missing lazy target did not fail closed")
+PY
+then
+    pass "T38b: trigger, full rule, fresh/author routing and negative mutation pass"
+else
+    fail "T38b: State-Transition Gate lazy contract is incomplete"
+fi
+
+T38_SYNC_RUNNER="$TEST_WS/t38-sync-agents.sh"
+{
+    printf '%s\n' '#!/bin/bash' 'set -e'
+    if [ "$(uname -s)" = "Darwin" ]; then
+        printf '%s\n' 'sed_inplace() { sed -i "" "$@"; }'
+    else
+        printf '%s\n' 'sed_inplace() { sed -i "$@"; }'
+    fi
+    awk '/^sed_escape_replacement\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/update.sh"
+    awk '/^substitute_claude_placeholders\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/update.sh"
+    awk '/^sync_workspace_agents\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/update.sh"
+} > "$T38_SYNC_RUNNER"
+T38_SYNC_ROOT="$TEST_WS/t38-sync"
+mkdir -p "$T38_SYNC_ROOT/template" "$T38_SYNC_ROOT/workspace" "$T38_SYNC_ROOT/tmp"
+printf '%s\n' 'registry={{GOVERNANCE_REPO}}' > "$T38_SYNC_ROOT/template/AGENTS.md"
+printf '%s\n' 'GOVERNANCE_REPO="governance-live"' > "$T38_SYNC_ROOT/workspace/.exocortex.env"
+if SCRIPT_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   TMPDIR_UPDATE="$T38_SYNC_ROOT/tmp" CLAUDE_PROJECT_SLUG=test \
+   bash -c 'source "$1"; sync_workspace_agents; printf stale > "$WORKSPACE_DIR/AGENTS.md"; sync_workspace_agents' \
+   t38 "$T38_SYNC_RUNNER" && \
+   grep -Fxq 'registry=governance-live' "$T38_SYNC_ROOT/workspace/AGENTS.md" && \
+   python3 - "$TEMPLATE_DIR/update.sh" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = text.index("repair_pass() {")
+end = text.index("\n}", start)
+if text[start:end].count("sync_workspace_agents") != 1:
+    raise SystemExit("repair_pass must centrally sync AGENTS.md exactly once")
+if text.count("sync_workspace_agents") != 2:
+    raise SystemExit("AGENTS sync must have one definition and one repair call")
+PY
+then
+    pass "T38c: setup/update recovery delivers and repairs substituted workspace AGENTS.md"
+else
+    fail "T38c: workspace AGENTS.md delivery is incomplete"
+fi
+
+T38_VICTIM="$T38_SYNC_ROOT/outside-victim.md"
+printf '%s\n' 'outside-bytes-must-survive' > "$T38_VICTIM"
+rm -f "$T38_SYNC_ROOT/workspace/AGENTS.md"
+ln -s "$T38_VICTIM" "$T38_SYNC_ROOT/workspace/AGENTS.md"
+if SCRIPT_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   TMPDIR_UPDATE="$T38_SYNC_ROOT/tmp" CLAUDE_PROJECT_SLUG=test \
+   bash -c 'source "$1"; sync_workspace_agents' t38 "$T38_SYNC_RUNNER" \
+   >/dev/null 2>&1; then
+    T38_UPDATE_LINK_RC=0
+else
+    T38_UPDATE_LINK_RC=$?
+fi
+
+T38_SETUP_RUNNER="$TEST_WS/t38-setup-instruction.sh"
+{
+    printf '%s\n' '#!/bin/bash' 'set -e'
+    if [ "$(uname -s)" = "Darwin" ]; then
+        printf '%s\n' 'sed_inplace() { sed -i "" "$@"; }'
+    else
+        printf '%s\n' 'sed_inplace() { sed -i "$@"; }'
+    fi
+    awk '/^sed_escape_replacement\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/setup.sh"
+    awk '/^install_workspace_instruction\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/setup.sh"
+    awk '/^install_workspace_merge_base\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/setup.sh"
+    awk '/^install_agent_instruction_bundle\(\)/ { copy=1 } copy { print } copy && /^}/ { copy=0 }' "$TEMPLATE_DIR/setup.sh"
+} > "$T38_SETUP_RUNNER"
+if TEMPLATE_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   GITHUB_USER=test CLAUDE_PATH=claude CLAUDE_PROJECT_SLUG=test \
+   TIMEZONE_HOUR=4 TIMEZONE_DESC=utc HOME_DIR="$T38_SYNC_ROOT" \
+   GOVERNANCE_REPO=governance-live IWE_TEMPLATE_PATH="$T38_SYNC_ROOT/template" \
+   IWE_RUNTIME_PATH="$T38_SYNC_ROOT/runtime" \
+   bash -c 'source "$1"; install_workspace_instruction AGENTS.md' \
+   t38 "$T38_SETUP_RUNNER" >/dev/null 2>&1; then
+    T38_SETUP_LINK_RC=0
+else
+    T38_SETUP_LINK_RC=$?
+fi
+
+if [ "$T38_UPDATE_LINK_RC" -ne 0 ] && [ "$T38_SETUP_LINK_RC" -ne 0 ] && \
+   [ -L "$T38_SYNC_ROOT/workspace/AGENTS.md" ] && \
+   grep -Fxq 'outside-bytes-must-survive' "$T38_VICTIM"; then
+    pass "T38d: setup and update reject AGENTS symlinks without touching the target"
+else
+    fail "T38d: instruction delivery followed/replaced a symlink (update=$T38_UPDATE_LINK_RC setup=$T38_SETUP_LINK_RC)"
+fi
+
+rm "$T38_SYNC_ROOT/workspace/AGENTS.md"
+mkdir "$T38_SYNC_ROOT/workspace/AGENTS.md"
+if SCRIPT_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   TMPDIR_UPDATE="$T38_SYNC_ROOT/tmp" CLAUDE_PROJECT_SLUG=test \
+   bash -c 'source "$1"; sync_workspace_agents' t38 "$T38_SYNC_RUNNER" \
+   >/dev/null 2>&1; then
+    T38_UPDATE_DIR_RC=0
+else
+    T38_UPDATE_DIR_RC=$?
+fi
+if TEMPLATE_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   GITHUB_USER=test CLAUDE_PATH=claude CLAUDE_PROJECT_SLUG=test \
+   TIMEZONE_HOUR=4 TIMEZONE_DESC=utc HOME_DIR="$T38_SYNC_ROOT" \
+   GOVERNANCE_REPO=governance-live IWE_TEMPLATE_PATH="$T38_SYNC_ROOT/template" \
+   IWE_RUNTIME_PATH="$T38_SYNC_ROOT/runtime" \
+   bash -c 'source "$1"; install_workspace_instruction AGENTS.md' \
+   t38 "$T38_SETUP_RUNNER" >/dev/null 2>&1; then
+    T38_SETUP_DIR_RC=0
+else
+    T38_SETUP_DIR_RC=$?
+fi
+if [ "$T38_UPDATE_DIR_RC" -ne 0 ] && [ "$T38_SETUP_DIR_RC" -ne 0 ] && \
+   [ -d "$T38_SYNC_ROOT/workspace/AGENTS.md" ] && \
+   [ -z "$(ls -A "$T38_SYNC_ROOT/workspace/AGENTS.md")" ]; then
+    pass "T38e: setup and update reject non-file AGENTS targets without fail-open"
+else
+    fail "T38e: non-file AGENTS target was accepted (update=$T38_UPDATE_DIR_RC setup=$T38_SETUP_DIR_RC)"
+fi
+
+rmdir "$T38_SYNC_ROOT/workspace/AGENTS.md"
+printf '%s\n' 'claude={{GOVERNANCE_REPO}}' > "$T38_SYNC_ROOT/template/CLAUDE.md"
+T38_CLAUDE_VICTIM="$T38_SYNC_ROOT/outside-claude-victim.md"
+printf '%s\n' 'claude-victim-must-survive' > "$T38_CLAUDE_VICTIM"
+ln -s "$T38_CLAUDE_VICTIM" "$T38_SYNC_ROOT/workspace/CLAUDE.md"
+rm -f "$T38_SYNC_ROOT/workspace/.claude.md.base"
+if TEMPLATE_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   GITHUB_USER=test CLAUDE_PATH=claude CLAUDE_PROJECT_SLUG=test \
+   TIMEZONE_HOUR=4 TIMEZONE_DESC=utc HOME_DIR="$T38_SYNC_ROOT" \
+   GOVERNANCE_REPO=governance-live IWE_TEMPLATE_PATH="$T38_SYNC_ROOT/template" \
+   IWE_RUNTIME_PATH="$T38_SYNC_ROOT/runtime" \
+   bash -c 'source "$1"; install_agent_instruction_bundle' \
+   t38 "$T38_SETUP_RUNNER" >/dev/null 2>&1; then
+    T38_BUNDLE_LINK_RC=0
+else
+    T38_BUNDLE_LINK_RC=$?
+fi
+if [ "$T38_BUNDLE_LINK_RC" -ne 0 ] && \
+   [ -L "$T38_SYNC_ROOT/workspace/CLAUDE.md" ] && \
+   [ ! -e "$T38_SYNC_ROOT/workspace/.claude.md.base" ] && \
+   grep -Fxq 'claude-victim-must-survive' "$T38_CLAUDE_VICTIM"; then
+    pass "T38f: actual setup bundle aborts before a CLAUDE symlink can poison merge base"
+else
+    fail "T38f: setup bundle ignored an unsafe CLAUDE target (rc=$T38_BUNDLE_LINK_RC)"
+fi
+
+rm "$T38_SYNC_ROOT/workspace/CLAUDE.md"
+T38_SPECIAL='pilot&co|team\ops'
+if TEMPLATE_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspace" \
+   GITHUB_USER=test CLAUDE_PATH=claude CLAUDE_PROJECT_SLUG=test \
+   TIMEZONE_HOUR=4 TIMEZONE_DESC=utc HOME_DIR="$T38_SYNC_ROOT" \
+   GOVERNANCE_REPO="$T38_SPECIAL" IWE_TEMPLATE_PATH="$T38_SYNC_ROOT/template" \
+   IWE_RUNTIME_PATH="$T38_SYNC_ROOT/runtime" \
+   bash -c 'source "$1"; install_agent_instruction_bundle' \
+   t38 "$T38_SETUP_RUNNER" >/dev/null 2>&1 && \
+   grep -Fxq "registry=$T38_SPECIAL" "$T38_SYNC_ROOT/workspace/AGENTS.md" && \
+   grep -Fxq "claude=$T38_SPECIAL" "$T38_SYNC_ROOT/workspace/CLAUDE.md" && \
+   cmp -s "$T38_SYNC_ROOT/workspace/CLAUDE.md" \
+          "$T38_SYNC_ROOT/workspace/.claude.md.base"; then
+    pass "T38g: setup safely substitutes &, | and backslash and preserves merge-base parity"
+else
+    fail "T38g: setup corrupted a special-character replacement or its merge base"
 fi
 
 # ============================================================

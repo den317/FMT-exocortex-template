@@ -24,6 +24,9 @@ EXIT_TAINTED=4   # peer-session 2026-08-21-09: grep-fallback manifest parsing ra
                  # takes priority over this code, it never masks one.
 EXIT_CONFLICT=49
 EXIT_GENERAL=1
+GITHUB_API_AUTH_FAILURE=90
+GITHUB_API_INVALID_TOKEN=91
+GITHUB_API_UNSAFE_CURL_OPTIONS=92
 
 trap 'echo "ОШИБКА: update.sh прервался на строке ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
@@ -35,8 +38,9 @@ BRANCH="$DEFAULT_UPDATE_BRANCH"
 # Delivery channel (WP-529 F7, pilot decision 2026-08-21, prompted by an
 # external user's report): "release" (default) pins the delivery to the last
 # published release tag — users must not receive unreleased, possibly red,
-# main. IWE_UPDATE_CHANNEL=main opts back into the moving branch (author/dev
-# workflow, and the automatic fallback when no release exists yet).
+# main. IWE_UPDATE_CHANNEL=main is the ONLY way onto the moving branch
+# (author/dev workflow) — a failed release lookup aborts fail-closed (#501),
+# it never falls back to main automatically.
 UPDATE_CHANNEL="${IWE_UPDATE_CHANNEL:-release}"
 RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
 API_BASE="https://api.github.com/repos/$REPO"
@@ -48,6 +52,22 @@ FAST_CHECK=false
 # только наблюдает (stage A) и ничего не пишет в пользовательские файлы.
 APPLY_SETTINGS_MERGE=false
 REFRESH_STALE=false
+
+# #533: governance compatibility entrypoints are upgraded as one ownership
+# unit.  The updater may write them only after every target passes the same
+# provenance/import-consumer preflight; no member is migrated independently.
+AGENT_FAULT_LEGACY_SHIMS=(
+    "scripts/iwe_checklist_memory.py"
+    "scripts/sync_feedback_to_memory.py"
+    "scripts/agent_fault_remind.py"
+    "scripts/agent_fault_remind.sh"
+)
+AGENT_FAULT_SHIM_PREFLIGHT_PATHS=()
+AGENT_FAULT_SHIM_TARGET_SNAPSHOTS=()
+AGENT_FAULT_SHIM_GIT_READY=()
+AGENT_FAULT_SHIM_GIT_PATHSPECS=()
+AGENT_FAULT_SHIM_TRACKED_SNAPSHOTS=()
+AGENT_FAULT_SHIM_STATUS_SNAPSHOTS=()
 
 # Allow extra curl flags via env var (e.g. CURL_OPTS="--insecure" for Windows corporate firewall).
 # --max-time 20: without it a stalled/slow connection hangs update.sh forever with no
@@ -636,6 +656,922 @@ finish_update_transaction() {
     UPDATE_TRANSACTION_STARTED=false
 }
 
+effective_governance_repo() {
+    local configured="${ENV_GOVERNANCE_REPO:-}"
+    local env_file
+
+    # Normal installs keep the file in the workspace root. Older installs can
+    # still have it inside the template repository, so a zero-diff recovery
+    # must honour the same fallback as the main update path. Parse only the one
+    # data line; never source either file.
+    for env_file in "$WORKSPACE_DIR/.exocortex.env" "$SCRIPT_DIR/.exocortex.env"; do
+        [ -z "$configured" ] || break
+        [ -f "$env_file" ] || continue
+        configured=$(grep -E '^GOVERNANCE_REPO=' "$env_file" 2>/dev/null \
+            | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    done
+    configured="${configured:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
+    case "$configured" in
+        ""|.|..|.*|*/*|*[!A-Za-z0-9._-]*)
+            echo "ОШИБКА: GOVERNANCE_REPO должен быть именем каталога, не путём: $configured" >&2
+            return 1
+            ;;
+    esac
+    if [ -L "$WORKSPACE_DIR/$configured" ]; then
+        echo "ОШИБКА: governance repo является symlink; backfill запрещён: $WORKSPACE_DIR/$configured" >&2
+        return 1
+    fi
+    if [ -d "$WORKSPACE_DIR/$configured" ] && [ -d "$SCRIPT_DIR" ]; then
+        local governance_real script_real
+        governance_real=$(cd -P "$WORKSPACE_DIR/$configured" 2>/dev/null && pwd -P) || return 1
+        script_real=$(cd -P "$SCRIPT_DIR" 2>/dev/null && pwd -P) || return 1
+        if [ "$governance_real" = "$script_real" ]; then
+            echo "ОШИБКА: GOVERNANCE_REPO указывает на template repo; backfill запрещён: $configured" >&2
+            return 1
+        fi
+    fi
+    printf '%s\n' "$configured"
+}
+
+atomic_copy_executable() {
+    if [ "$#" -ne 2 ]; then
+        echo "ОШИБКА: atomic_copy_executable требует <source> <target>" >&2
+        return 1
+    fi
+    local source_path="$1" target_path="$2" target_dir temporary_path
+    target_dir=$(dirname "$target_path")
+    if [ -L "$target_dir" ]; then
+        echo "ОШИБКА: каталог назначения является symlink: $target_dir" >&2
+        return 1
+    fi
+    if ! mkdir -p "$target_dir"; then
+        echo "ОШИБКА: не удалось создать каталог $target_dir" >&2
+        return 1
+    fi
+    if ! temporary_path=$(mktemp "$target_dir/.iwe-update-copy.XXXXXX"); then
+        echo "ОШИБКА: не удалось создать временный файл рядом с $target_path" >&2
+        return 1
+    fi
+    if ! cp "$source_path" "$temporary_path" || \
+       ! chmod +x "$temporary_path" || \
+       ! mv -f "$temporary_path" "$target_path"; then
+        rm -f "$temporary_path"
+        echo "ОШИБКА: атомарная доставка $target_path не завершена" >&2
+        return 1
+    fi
+}
+
+agent_fault_git() {
+    if [ "$#" -lt 2 ]; then
+        echo "ОШИБКА: agent_fault_git требует <repo> <git-args...>" >&2
+        return 1
+    fi
+    local repository="$1"
+    shift
+    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        -u GIT_CEILING_DIRECTORIES \
+        GIT_OPTIONAL_LOCKS=0 \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        git -C "$repository" "$@"
+}
+
+agent_fault_target_snapshot() {
+    if [ "$#" -ne 1 ] || [ -z "${PY_BIN:-}" ]; then
+        echo "agent-fault target snapshot requires Python 3 and one path" >&2
+        return 2
+    fi
+    # PY_BIN can intentionally be the two-word Windows launcher `py -3`.
+    # shellcheck disable=SC2086
+    $PY_BIN -c '
+import hashlib
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    before = os.lstat(path)
+except FileNotFoundError:
+    print("missing")
+    raise SystemExit(0)
+if not stat.S_ISREG(before.st_mode):
+    print(json.dumps(["non-regular", before.st_dev, before.st_ino, before.st_mode]))
+    raise SystemExit(0)
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(path, flags)
+try:
+    opened = os.fstat(descriptor)
+    identity = (
+        before.st_dev, before.st_ino, before.st_mode, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns,
+    )
+    if (
+        opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size,
+        opened.st_mtime_ns, opened.st_ctime_ns,
+    ) != identity:
+        raise RuntimeError("target identity changed before snapshot")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+finally:
+    os.close(descriptor)
+after = os.lstat(path)
+after_identity = (
+    after.st_dev, after.st_ino, after.st_mode, after.st_size,
+    after.st_mtime_ns, after.st_ctime_ns,
+)
+if after_identity != identity:
+    raise RuntimeError("target identity changed during snapshot")
+print(json.dumps(["file", *identity, digest.hexdigest()], separators=(",", ":")))
+' "$1"
+}
+
+agent_fault_legacy_hash_is_blessed() {
+    if [ "$#" -ne 2 ]; then
+        return 1
+    fi
+    local relative_path="$1" digest="$2"
+    # Exact bytes formerly shipped by FMT.  Keep provenance per path: a digest
+    # valid for one legacy command never authorizes replacement of another.
+    # c180e6a (v0.33.0): Python reminder + feedback importer + shell reminder.
+    # ceca611: shell reminder gained its platform routing header.
+    case "$relative_path:$digest" in
+        scripts/agent_fault_remind.py:9e4e354e3829c558fa4c35659084fdc6b024d3fb1dd69ff1640e9c58d7c98b60|\
+        scripts/sync_feedback_to_memory.py:776a18c30c45ba164e21376e17872b5070274aab72a911d5ad1363773c48ad67|\
+        scripts/agent_fault_remind.sh:913779508fc0144cfae0f345ec9e733b95d64333c74b42d17c84ed5d9ce0f03d|\
+        scripts/agent_fault_remind.sh:632ef75c7d1ed5d3bbb5546c279edf58b730a15706ee8e47ee5240bbe4b17cc3)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+scan_legacy_agent_fault_import_consumers() {
+    if [ "$#" -ne 1 ] || [ -z "${PY_BIN:-}" ]; then
+        echo "agent-fault consumer scan requires Python 3" >&2
+        return 2
+    fi
+    local scripts_dir="$1"
+    [ -d "$scripts_dir" ] || return 0
+    # PY_BIN can intentionally be the two-word Windows launcher `py -3`.
+    # shellcheck disable=SC2086
+    $PY_BIN -c '
+import ast
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+matches = []
+
+def is_legacy_module(name):
+    return name == "iwe_checklist_memory" or name.endswith(".iwe_checklist_memory")
+
+try:
+    for directory, names, files in os.walk(root, followlinks=False):
+        for name in names:
+            candidate_directory = Path(directory, name)
+            if candidate_directory.is_symlink():
+                print(
+                    f"consumer scan refused symlinked directory: {candidate_directory}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            candidate = Path(directory, name)
+            if candidate.is_symlink():
+                print(
+                    f"consumer scan refused symlinked Python file: {candidate}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+            try:
+                tree = ast.parse(text, filename=str(candidate))
+            except (SyntaxError, ValueError) as exc:
+                line = getattr(exc, "lineno", None) or 1
+                message = getattr(exc, "msg", type(exc).__name__)
+                print(
+                    f"consumer scan failed to parse {candidate}:{line}: {message}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    found = any(is_legacy_module(alias.name) for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    found = bool(node.module and is_legacy_module(node.module)) or any(
+                        is_legacy_module(alias.name) for alias in node.names
+                    )
+                else:
+                    found = False
+                if found:
+                    matches.append(f"{candidate}:{node.lineno}")
+except OSError as exc:
+    print(f"consumer scan failed: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+print("\n".join(matches))
+' "$scripts_dir"
+}
+
+print_legacy_agent_fault_manual_remediation() {
+    if [ "$#" -ne 1 ]; then
+        return 1
+    fi
+    local governance_dir="$1" relative_path source_path target_path backup_path
+    echo "  Manual remediation prerequisites (do not run copy commands yet):" >&2
+    echo "    1. Migrate every listed legacy import consumer to canonical immutable read_faults(...)." >&2
+    echo "    2. Review each source/target diff and keep a backup." >&2
+    echo "  Only after both reviews, run the applicable command:" >&2
+    for relative_path in "${AGENT_FAULT_LEGACY_SHIMS[@]}"; do
+        source_path="$SCRIPT_DIR/seed/strategy/$relative_path"
+        target_path="$governance_dir/$relative_path"
+        backup_path="$target_path.before-fmt-533"
+        if [ -f "$target_path" ] && [ ! -L "$target_path" ]; then
+            printf '    mkdir -p %q && cp -p %q %q && cp %q %q && chmod +x %q\n' \
+                "$(dirname "$backup_path")" "$target_path" "$backup_path" \
+                "$source_path" "$target_path" "$target_path" >&2
+        else
+            printf '    mkdir -p %q && cp %q %q && chmod +x %q\n' \
+                "$(dirname "$target_path")" "$source_path" "$target_path" \
+                "$target_path" >&2
+        fi
+    done
+}
+
+preflight_legacy_agent_fault_shims() {
+    if [ "$#" -ne 1 ]; then
+        echo "ОШИБКА: preflight_legacy_agent_fault_shims требует <governance-dir>" >&2
+        return 1
+    fi
+    local governance_dir="$1" relative_path source_path target_path digest
+    local target_snapshot
+    local git_prefix git_relative_path git_pathspec tracked_paths
+    local git_ready=false tracked=false status_output consumer_matches
+    local blocked=0
+    AGENT_FAULT_SHIMS_TO_APPLY=()
+    AGENT_FAULT_SHIM_PREFLIGHT_PATHS=()
+    AGENT_FAULT_SHIM_TARGET_SNAPSHOTS=()
+    AGENT_FAULT_SHIM_GIT_READY=()
+    AGENT_FAULT_SHIM_GIT_PATHSPECS=()
+    AGENT_FAULT_SHIM_TRACKED_SNAPSHOTS=()
+    AGENT_FAULT_SHIM_STATUS_SNAPSHOTS=()
+
+    if [ -L "$governance_dir" ] || [ ! -d "$governance_dir" ]; then
+        echo "  ✗ governance must be an existing real directory; legacy shim migration refused." >&2
+        print_legacy_agent_fault_manual_remediation "$governance_dir"
+        return 1
+    fi
+    if [ -L "$governance_dir/scripts" ] || \
+       { [ -e "$governance_dir/scripts" ] && [ ! -d "$governance_dir/scripts" ]; }; then
+        echo "  ✗ governance/scripts must be a real directory; legacy shim migration refused." >&2
+        print_legacy_agent_fault_manual_remediation "$governance_dir"
+        return 1
+    fi
+    if agent_fault_git "$governance_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git_ready=true
+        if ! git_prefix=$(agent_fault_git "$governance_dir" rev-parse --show-prefix); then
+            echo "  ✗ cannot resolve governance path inside Git; legacy shim migration refused." >&2
+            print_legacy_agent_fault_manual_remediation "$governance_dir"
+            return 1
+        fi
+    fi
+
+    for relative_path in "${AGENT_FAULT_LEGACY_SHIMS[@]}"; do
+        source_path="$SCRIPT_DIR/seed/strategy/$relative_path"
+        target_path="$governance_dir/$relative_path"
+        if [ -L "$source_path" ] || [ ! -f "$source_path" ]; then
+            echo "  ✗ release payload is missing a real $relative_path shim." >&2
+            blocked=1
+            continue
+        fi
+        if [ -L "$target_path" ]; then
+            echo "  ✗ $relative_path is a symlink; automatic migration refused." >&2
+            blocked=1
+            continue
+        fi
+        if [ -e "$target_path" ] && [ ! -f "$target_path" ]; then
+            echo "  ✗ $relative_path is not a regular file; automatic migration refused." >&2
+            blocked=1
+            continue
+        fi
+        if ! target_snapshot=$(agent_fault_target_snapshot "$target_path"); then
+            echo "  ✗ cannot snapshot $relative_path before migration." >&2
+            blocked=1
+            continue
+        fi
+        tracked=false
+        tracked_paths=""
+        status_output=""
+        git_pathspec=""
+        if $git_ready; then
+            git_relative_path="${git_prefix}${relative_path}"
+            git_pathspec=":(top,icase,literal)${git_relative_path}"
+            if ! tracked_paths=$(agent_fault_git "$governance_dir" ls-files -- "$git_pathspec"); then
+                echo "  ✗ cannot inspect tracked paths for $relative_path; automatic migration refused." >&2
+                blocked=1
+                continue
+            fi
+            if [ -n "$tracked_paths" ]; then
+                tracked=true
+                if [ "$tracked_paths" != "$git_relative_path" ]; then
+                    echo "  ✗ $relative_path has a case-insensitive tracked alias; automatic migration refused." >&2
+                    blocked=1
+                    continue
+                fi
+            fi
+            if ! status_output=$(agent_fault_git "$governance_dir" \
+                status --porcelain=v1 --untracked-files=all -- "$git_pathspec"); then
+                echo "  ✗ cannot inspect Git state for $relative_path; automatic migration refused." >&2
+                blocked=1
+                continue
+            fi
+        fi
+        AGENT_FAULT_SHIM_PREFLIGHT_PATHS+=("$relative_path")
+        AGENT_FAULT_SHIM_TARGET_SNAPSHOTS+=("$target_snapshot")
+        if $git_ready; then
+            AGENT_FAULT_SHIM_GIT_READY+=("1")
+        else
+            AGENT_FAULT_SHIM_GIT_READY+=("0")
+        fi
+        AGENT_FAULT_SHIM_GIT_PATHSPECS+=("$git_pathspec")
+        AGENT_FAULT_SHIM_TRACKED_SNAPSHOTS+=("$tracked_paths")
+        AGENT_FAULT_SHIM_STATUS_SNAPSHOTS+=("$status_output")
+        if [ -f "$target_path" ] && cmp -s "$source_path" "$target_path"; then
+            if [ ! -x "$target_path" ]; then
+                AGENT_FAULT_SHIMS_TO_APPLY+=("$relative_path")
+            fi
+            continue
+        fi
+        if ! $git_ready; then
+            echo "  ✗ $relative_path needs migration but governance is non-Git; provenance cannot be proven." >&2
+            blocked=1
+            continue
+        fi
+        if [ ! -e "$target_path" ]; then
+            if $tracked; then
+                echo "  ✗ $relative_path is a tracked deletion; automatic resurrection refused." >&2
+                blocked=1
+                continue
+            fi
+            if [ -n "$status_output" ]; then
+                echo "  ✗ $relative_path has a case-insensitive untracked or staged alias; automatic migration refused." >&2
+                blocked=1
+            else
+                AGENT_FAULT_SHIMS_TO_APPLY+=("$relative_path")
+            fi
+            continue
+        fi
+        digest=$(hash_file "$target_path") || {
+            echo "  ✗ cannot hash $relative_path; automatic migration refused." >&2
+            blocked=1
+            continue
+        }
+        if agent_fault_legacy_hash_is_blessed "$relative_path" "$digest" && \
+           $tracked && [ -z "$status_output" ]; then
+            AGENT_FAULT_SHIMS_TO_APPLY+=("$relative_path")
+            continue
+        fi
+        if [ -n "$status_output" ]; then
+            echo "  ✗ $relative_path is dirty, staged, or untracked; automatic migration refused." >&2
+        elif $tracked; then
+            echo "  ✗ $relative_path is clean but has unknown bytes; it is not an FMT-owned version." >&2
+        else
+            echo "  ✗ $relative_path is an unknown untracked file; automatic migration refused." >&2
+        fi
+        blocked=1
+    done
+
+    if ! consumer_matches=$(scan_legacy_agent_fault_import_consumers "$governance_dir/scripts"); then
+        echo "  ✗ legacy import consumer scan failed; no compatibility shim was changed." >&2
+        blocked=1
+    elif [ -n "$consumer_matches" ]; then
+        echo "  ✗ legacy import consumer(s) still require init_db/DB_PATH-style facade removal:" >&2
+        printf '%s\n' "$consumer_matches" | sed 's/^/    /' >&2
+        echo "  Migrate them to the canonical immutable read_faults(...) API, then rerun update.sh." >&2
+        blocked=1
+    fi
+    if [ "$blocked" -ne 0 ]; then
+        AGENT_FAULT_SHIMS_TO_APPLY=()
+        print_legacy_agent_fault_manual_remediation "$governance_dir"
+        return 1
+    fi
+    if [ "${#AGENT_FAULT_SHIM_PREFLIGHT_PATHS[@]}" -ne \
+         "${#AGENT_FAULT_LEGACY_SHIMS[@]}" ]; then
+        echo "  ✗ incomplete legacy shim snapshot; automatic migration refused." >&2
+        AGENT_FAULT_SHIMS_TO_APPLY=()
+        return 1
+    fi
+}
+
+agent_fault_revalidate_shim_snapshot() {
+    if [ "$#" -ne 2 ]; then
+        return 1
+    fi
+    local governance_dir="$1" relative_path="$2" target_path
+    local expected_index=-1 index=0 snapshot_path
+    local current_snapshot current_tracked current_status
+    for snapshot_path in "${AGENT_FAULT_SHIM_PREFLIGHT_PATHS[@]}"; do
+        if [ "$snapshot_path" = "$relative_path" ]; then
+            expected_index=$index
+            break
+        fi
+        index=$((index + 1))
+    done
+    if [ "$expected_index" -lt 0 ]; then
+        echo "  ✗ no preflight snapshot for $relative_path; apply refused." >&2
+        return 1
+    fi
+    target_path="$governance_dir/$relative_path"
+    if ! current_snapshot=$(agent_fault_target_snapshot "$target_path") || \
+       [ "$current_snapshot" != \
+         "${AGENT_FAULT_SHIM_TARGET_SNAPSHOTS[$expected_index]}" ]; then
+        echo "  ✗ $relative_path changed after preflight; apply refused." >&2
+        return 1
+    fi
+    if [ "${AGENT_FAULT_SHIM_GIT_READY[$expected_index]}" = "1" ]; then
+        if ! current_tracked=$(agent_fault_git "$governance_dir" ls-files -- \
+                "${AGENT_FAULT_SHIM_GIT_PATHSPECS[$expected_index]}") || \
+           ! current_status=$(agent_fault_git "$governance_dir" \
+                status --porcelain=v1 --untracked-files=all -- \
+                "${AGENT_FAULT_SHIM_GIT_PATHSPECS[$expected_index]}"); then
+            echo "  ✗ Git state for $relative_path cannot be revalidated." >&2
+            return 1
+        fi
+        if [ "$current_tracked" != \
+             "${AGENT_FAULT_SHIM_TRACKED_SNAPSHOTS[$expected_index]}" ] || \
+           [ "$current_status" != \
+             "${AGENT_FAULT_SHIM_STATUS_SNAPSHOTS[$expected_index]}" ]; then
+            echo "  ✗ Git state for $relative_path changed after preflight; apply refused." >&2
+            return 1
+        fi
+    elif agent_fault_git "$governance_dir" \
+        rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "  ✗ $relative_path entered a Git worktree after preflight; apply refused." >&2
+        return 1
+    fi
+}
+
+apply_legacy_agent_fault_shims() {
+    if [ "$#" -ne 1 ]; then
+        echo "ОШИБКА: apply_legacy_agent_fault_shims требует <governance-dir>" >&2
+        return 1
+    fi
+    local governance_dir="$1" backup_root relative_path source_path target_path
+    local backup_path restore_temp index=0 applied_count=0 rollback_failed=0
+    local transaction_active=false transaction_signal="" transaction_code=1
+    local saved_exit saved_hup saved_int saved_term
+    local -a originals
+
+    if [ "${#AGENT_FAULT_SHIMS_TO_APPLY[@]}" -eq 0 ]; then
+        echo "  ✓ legacy agent-fault shims already match the release payload."
+        return 0
+    fi
+    if ! backup_root=$(mktemp -d "${TMPDIR_UPDATE:-${TMPDIR:-/tmp}}/iwe-agent-fault-shims.XXXXXX"); then
+        echo "  ✗ cannot create rollback storage for legacy shims." >&2
+        return 1
+    fi
+
+    saved_exit=$(trap -p EXIT)
+    saved_hup=$(trap -p HUP)
+    saved_int=$(trap -p INT)
+    saved_term=$(trap -p TERM)
+
+    agent_fault_restore_transaction_traps() {
+        trap - EXIT HUP INT TERM
+        [ -z "$saved_exit" ] || eval "$saved_exit"
+        [ -z "$saved_hup" ] || eval "$saved_hup"
+        [ -z "$saved_int" ] || eval "$saved_int"
+        [ -z "$saved_term" ] || eval "$saved_term"
+    }
+
+    agent_fault_rollback_applied_prefix() {
+        local rollback_index=0 rollback_relative rollback_target
+        local rollback_backup rollback_temp
+        rollback_failed=0
+        while [ "$rollback_index" -lt "$applied_count" ]; do
+            rollback_relative="${AGENT_FAULT_SHIMS_TO_APPLY[$rollback_index]}"
+            rollback_target="$governance_dir/$rollback_relative"
+            rollback_backup="$backup_root/$rollback_index"
+            if [ "${originals[$rollback_index]}" = "file" ]; then
+                rollback_temp="$rollback_target.iwe-rollback.$$.$rollback_index"
+                if ! cp -p "$rollback_backup" "$rollback_temp" || \
+                   ! mv -f "$rollback_temp" "$rollback_target"; then
+                    rm -f "$rollback_temp"
+                    rollback_failed=1
+                fi
+            elif ! rm -f "$rollback_target"; then
+                rollback_failed=1
+            fi
+            rollback_index=$((rollback_index + 1))
+        done
+        rm -rf "$backup_root"
+    }
+
+    agent_fault_transaction_exit() {
+        local exit_code=$?
+        if $transaction_active; then
+            transaction_active=false
+            agent_fault_rollback_applied_prefix
+        fi
+        agent_fault_restore_transaction_traps
+        exit "$exit_code"
+    }
+
+    agent_fault_transaction_signal() {
+        transaction_signal="$1"
+        transaction_code="$2"
+        if $transaction_active; then
+            transaction_active=false
+            agent_fault_rollback_applied_prefix
+        fi
+        agent_fault_restore_transaction_traps
+        kill -s "$transaction_signal" "$$"
+        return "$transaction_code"
+    }
+
+    transaction_active=true
+    trap 'agent_fault_transaction_exit' EXIT
+    trap 'agent_fault_transaction_signal HUP 129' HUP
+    trap 'agent_fault_transaction_signal INT 130' INT
+    trap 'agent_fault_transaction_signal TERM 143' TERM
+
+    originals=()
+    for relative_path in "${AGENT_FAULT_SHIMS_TO_APPLY[@]}"; do
+        target_path="$governance_dir/$relative_path"
+        backup_path="$backup_root/$index"
+        if [ -f "$target_path" ]; then
+            if ! cp -p "$target_path" "$backup_path"; then
+                echo "  ✗ cannot snapshot $relative_path before migration." >&2
+                transaction_active=false
+                rm -rf "$backup_root"
+                agent_fault_restore_transaction_traps
+                unset -f agent_fault_restore_transaction_traps \
+                    agent_fault_rollback_applied_prefix \
+                    agent_fault_transaction_exit agent_fault_transaction_signal
+                return 1
+            fi
+            originals+=("file")
+        else
+            originals+=("missing")
+        fi
+        index=$((index + 1))
+    done
+
+    index=0
+    for relative_path in "${AGENT_FAULT_SHIMS_TO_APPLY[@]}"; do
+        source_path="$SCRIPT_DIR/seed/strategy/$relative_path"
+        target_path="$governance_dir/$relative_path"
+        if ! agent_fault_revalidate_shim_snapshot "$governance_dir" "$relative_path"; then
+            echo "  ✗ apply precondition drift at $relative_path; rolling back applied legacy shims." >&2
+            break
+        fi
+        # Include the in-flight target in rollback: TERM may arrive after its
+        # atomic rename but before this loop regains control.
+        applied_count=$((index + 1))
+        if ! atomic_copy_executable "$source_path" "$target_path"; then
+            echo "  ✗ apply failed at $relative_path; rolling back applied legacy shims." >&2
+            break
+        fi
+        index=$((index + 1))
+    done
+
+    if [ "$index" -ne "${#AGENT_FAULT_SHIMS_TO_APPLY[@]}" ]; then
+        transaction_active=false
+        agent_fault_rollback_applied_prefix
+        agent_fault_restore_transaction_traps
+        if [ "$rollback_failed" -ne 0 ]; then
+            echo "  ✗ legacy shim rollback was incomplete; inspect all four paths manually." >&2
+        else
+            echo "  ✓ legacy shim apply failure rolled back without index changes." >&2
+        fi
+        unset -f agent_fault_restore_transaction_traps \
+            agent_fault_rollback_applied_prefix \
+            agent_fault_transaction_exit agent_fault_transaction_signal
+        return 1
+    fi
+
+    transaction_active=false
+    rm -rf "$backup_root"
+    agent_fault_restore_transaction_traps
+    unset -f agent_fault_restore_transaction_traps \
+        agent_fault_rollback_applied_prefix \
+        agent_fault_transaction_exit agent_fault_transaction_signal
+    echo "  ✓ four legacy agent-fault names now delegate to the canonical CLI."
+}
+
+backfill_legacy_agent_fault_shims() {
+    local governance_repo="${EFFECTIVE_GOVERNANCE_REPO:-}"
+    local governance_dir
+    if [ -z "$governance_repo" ]; then
+        governance_repo=$(effective_governance_repo) || return 1
+    fi
+    governance_dir="$WORKSPACE_DIR/$governance_repo"
+    if [ ! -e "$governance_dir" ] && [ ! -L "$governance_dir" ]; then
+        echo "  ○ $governance_repo: governance repo не найден, legacy agent-fault migration пропущена."
+        return 0
+    fi
+    preflight_legacy_agent_fault_shims "$governance_dir" || return 1
+    # The consumer scan may take long enough for a user/agent to create or
+    # stage one of the targets. Re-run the full read-only preflight so apply
+    # receives a snapshot taken after that scan, not before it.
+    preflight_legacy_agent_fault_shims "$governance_dir" || return 1
+    apply_legacy_agent_fault_shims "$governance_dir"
+}
+
+backfill_platform_hooks() {
+    local governance_repo="${EFFECTIVE_GOVERNANCE_REPO:-$(effective_governance_repo)}"
+    local governance_dir="$WORKSPACE_DIR/$governance_repo"
+    local source_installer="$SCRIPT_DIR/seed/strategy/scripts/install-hooks.sh"
+    local target_installer="$governance_dir/scripts/install-hooks.sh"
+    local backup_dir="$governance_dir/.git/hook-backups"
+    local backup backup_index
+
+    if [ -L "$governance_dir" ] || [ -L "$governance_dir/.git" ] || [ -L "$backup_dir" ]; then
+        echo "  ✗ $governance_repo: governance/.git/hook-backups symlink запрещён; platform hooks не изменены." >&2
+        return 1
+    fi
+    if [ -f "$governance_dir/.git" ]; then
+        echo "  ⚠ $governance_repo: обнаружен Git worktree (.git — файл); platform hooks не установлены. Используйте обычный clone или установите hooks вручную после проверки общего core.hooksPath." >&2
+        return 0
+    fi
+    if [ ! -d "$governance_dir/.git" ]; then
+        echo "  ○ $governance_repo: git-репозиторий не найден, миграция hooks пропущена."
+        return 0
+    fi
+    if [ -L "$governance_dir/scripts" ] || [ -L "$governance_dir/.githooks" ]; then
+        echo "  ✗ Каталоги scripts/.githooks в $governance_repo не должны быть symlink; platform hooks не изменены." >&2
+        return 1
+    fi
+
+    for source_path in \
+        "$source_installer" \
+        "$SCRIPT_DIR/seed/strategy/.githooks/pre-commit" \
+        "$SCRIPT_DIR/seed/strategy/.githooks/pre-push"
+    do
+        if [ -L "$source_path" ] || [ ! -f "$source_path" ]; then
+            echo "  ✗ Канонический platform-hook не доставлен: ${source_path#"$SCRIPT_DIR"/}" >&2
+            return 1
+        fi
+    done
+    if [ -L "$target_installer" ]; then
+        echo "  ✗ scripts/install-hooks.sh является symlink; автоматическая перезапись запрещена." >&2
+        return 1
+    fi
+
+    if ! mkdir -p "$governance_dir/scripts" "$backup_dir"; then
+        echo "  ✗ Не удалось подготовить каталоги platform hooks." >&2
+        return 1
+    fi
+    if [ -f "$target_installer" ] && ! cmp -s "$source_installer" "$target_installer"; then
+        backup="$backup_dir/install-hooks.sh.backup.$(date +%s)"
+        backup_index=0
+        while [ -e "$backup" ]; do
+            backup_index=$((backup_index + 1))
+            backup="$backup_dir/install-hooks.sh.backup.$(date +%s).$backup_index"
+        done
+        if ! cp "$target_installer" "$backup"; then
+            echo "  ✗ Не удалось сохранить backup существующего install-hooks.sh." >&2
+            return 1
+        fi
+        echo "  📝 Existing install-hooks.sh backed up to: $backup"
+    fi
+    if [ ! -f "$target_installer" ] || ! cmp -s "$source_installer" "$target_installer"; then
+        atomic_copy_executable "$source_installer" "$target_installer" || return 1
+    elif ! chmod +x "$target_installer"; then
+        echo "  ✗ Не удалось восстановить executable bit у install-hooks.sh." >&2
+        return 1
+    fi
+
+    if ! IWE_TEMPLATE="$SCRIPT_DIR" IWE_ROOT="$WORKSPACE_DIR" \
+        bash "$target_installer" "$governance_dir"; then
+        return 1
+    fi
+}
+
+backfill_executor_catalog() {
+    local governance_repo="${EFFECTIVE_GOVERNANCE_REPO:-$(effective_governance_repo)}"
+    local governance_dir="$WORKSPACE_DIR/$governance_repo"
+    local skills_dir="$WORKSPACE_DIR/.claude/skills"
+    local output_path="$governance_dir/scripts/executor-catalog.yaml"
+    local resolved_python catalog_output
+
+    if [ -L "$governance_dir" ]; then
+        echo "  ✗ executor-catalog.yaml не обновлён: governance repo является symlink." >&2
+        return 1
+    fi
+    if [ ! -d "$governance_dir" ] || [ ! -d "$skills_dir" ]; then
+        echo "  ○ executor-catalog.yaml: governance repo или skills не найдены, backfill пропущен."
+        return 0
+    fi
+    if [ -L "$governance_dir/scripts" ] || [ -L "$output_path" ]; then
+        echo "  ✗ executor-catalog.yaml не обновлён: scripts или сам target является symlink." >&2
+        return 1
+    fi
+    if ! resolved_python=$("$SCRIPT_DIR/scripts/lib/find-python3.sh" 2>/dev/null); then
+        echo "  ⚠ executor-catalog.yaml не сгенерирован: нет python3 с PyYAML." >&2
+        return 1
+    fi
+
+    if catalog_output=$(IWE_ROOT="$WORKSPACE_DIR" IWE_GOVERNANCE_REPO="$governance_repo" \
+        "$resolved_python" "$SCRIPT_DIR/scripts/generate-executor-catalog.py" \
+        --skills-dir "$skills_dir" --output "$output_path" 2>&1); then
+        [ -n "$catalog_output" ] && printf '%s\n' "$catalog_output" | sed 's/^/  /'
+        return 0
+    fi
+
+    [ -n "$catalog_output" ] && printf '%s\n' "$catalog_output" | sed 's/^/  /' >&2
+    echo "  ⚠ executor-catalog.yaml не сгенерирован: повторите после исправления ошибки выше." >&2
+    return 1
+}
+
+backfill_governance_seed_script() {
+    if [ "$#" -ne 1 ]; then
+        echo "ОШИБКА: backfill_governance_seed_script требует <relative-path>" >&2
+        return 1
+    fi
+    local governance_repo="${EFFECTIVE_GOVERNANCE_REPO:-$(effective_governance_repo)}"
+    local governance_dir="$WORKSPACE_DIR/$governance_repo"
+    local relative_path="$1"
+    local source_path="$SCRIPT_DIR/seed/strategy/$relative_path"
+    local target_path="$governance_dir/$relative_path"
+    local git_prefix git_relative_path git_pathspec tracked_paths status_output
+
+    if [ -L "$governance_dir" ]; then
+        echo "  ✗ $relative_path не обновлён: governance repo является symlink." >&2
+        return 1
+    fi
+    if [ ! -d "$governance_dir" ]; then
+        echo "  ○ $governance_repo: governance repo не найден, backfill $relative_path пропущен."
+        return 0
+    fi
+    if [ -L "$source_path" ] || [ ! -f "$source_path" ]; then
+        echo "  ✗ $relative_path не доставлен в целевом release payload." >&2
+        return 1
+    fi
+    if [ -L "$governance_dir/scripts" ]; then
+        echo "  ✗ $relative_path не обновлён: governance scripts является symlink." >&2
+        return 1
+    fi
+    if [ -L "$target_path" ]; then
+        echo "  ✗ $relative_path является symlink; автоматическая перезапись запрещена." >&2
+        return 1
+    fi
+
+    # Fresh installs receive the seed copy, including its provenance header.
+    # Existing installations may be upgraded only when their platform snapshot
+    # is either absent or a clean tracked file. A local deletion is a worktree
+    # change too: never silently resurrect it over the user's Git state.
+    if [ ! -f "$target_path" ] || ! cmp -s "$source_path" "$target_path"; then
+        if agent_fault_git "$governance_dir" \
+            rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            if ! git_prefix=$(agent_fault_git "$governance_dir" rev-parse --show-prefix); then
+                echo "  ✗ $relative_path: не удалось определить Git prefix; backfill запрещён." >&2
+                return 1
+            fi
+            git_relative_path="${git_prefix}${relative_path}"
+            git_pathspec=":(top,icase,literal)${git_relative_path}"
+            if ! tracked_paths=$(agent_fault_git "$governance_dir" \
+                    ls-files -- "$git_pathspec") || \
+               ! status_output=$(agent_fault_git "$governance_dir" \
+                    status --porcelain=v1 --untracked-files=all -- "$git_pathspec"); then
+                echo "  ✗ $relative_path: Git state не прочитан; backfill запрещён." >&2
+                return 1
+            fi
+            if [ -n "$tracked_paths" ] && \
+               [ "$tracked_paths" != "$git_relative_path" ]; then
+                echo "  ✗ $relative_path имеет case-insensitive tracked alias; backfill запрещён." >&2
+                return 1
+            fi
+            if [ -n "$status_output" ]; then
+                echo "  ✗ $relative_path содержит локальные изменения/удаление или case alias; сначала разберите Git state." >&2
+                return 1
+            fi
+            if [ -z "$tracked_paths" ] && [ -e "$target_path" ]; then
+                echo "  ✗ $relative_path существует как пользовательский untracked-файл; автоматическая перезапись запрещена." >&2
+                return 1
+            fi
+        elif [ -e "$target_path" ]; then
+            echo "  ✗ $relative_path отличается, а governance directory не является git-репозиторием; автоматическая перезапись запрещена." >&2
+            return 1
+        fi
+    fi
+
+    if [ ! -f "$target_path" ] || ! cmp -s "$source_path" "$target_path"; then
+        atomic_copy_executable "$source_path" "$target_path" || return 1
+        echo "  ⟳ $relative_path обновлён в $governance_repo."
+    else
+        echo "  ✓ $relative_path уже совпадает с release payload."
+    fi
+}
+
+backfill_derived_snapshot_updater() {
+    backfill_governance_seed_script "scripts/update-derived-snapshot.py"
+}
+
+backfill_day_open_fault_reader() {
+    backfill_governance_seed_script "scripts/day-open-llm-fill.py"
+}
+
+# #533: update is the one reliable point at which an existing private fault
+# profile can be brought onto the current schema and permission contract.  The
+# canonical CLI's no-create observational `stats` command is used here: it
+# deliberately migrates and hardens an existing untracked DB, but create=False
+# means a user who never enabled the profile gets no profile/.gitignore/DB as
+# update debris.
+# A tracked private DB remains fail-closed.  Surface that refusal as a warning
+# without ever running `git rm --cached` or otherwise mutating the user's index.
+harden_agent_fault_profile_after_update() {
+    local governance_repo="${EFFECTIVE_GOVERNANCE_REPO:-}"
+    local cli="$SCRIPT_DIR/scripts/agent-fault/iwe_checklist_memory.py"
+    local harden_output harden_status
+
+    if [ -z "$governance_repo" ] && \
+       ! governance_repo=$(effective_governance_repo); then
+        echo "  ⚠ agent-fault profile не проверен: governance repo не определён." >&2
+        return 0
+    fi
+    if [ ! -f "$cli" ]; then
+        echo "  ⚠ agent-fault profile не проверен: canonical CLI не доставлен." >&2
+        return 0
+    fi
+    if ! py_available; then
+        echo "  ⚠ agent-fault profile не проверен: Python 3 недоступен." >&2
+        return 0
+    fi
+
+    if harden_output=$(IWE_WORKSPACE="$WORKSPACE_DIR" \
+        IWE_GOVERNANCE_REPO="$governance_repo" \
+        "$PY_BIN" "$cli" stats 2>&1 >/dev/null); then
+        return 0
+    else
+        harden_status=$?
+    fi
+    printf '  ⚠ agent-fault profile оставлен без изменений (код %s): %s\n' \
+        "$harden_status" "$harden_output" >&2
+    return 0
+}
+
+run_post_apply_backfills_or_die() {
+    $CHECK_ONLY && return 0
+    if ! EFFECTIVE_GOVERNANCE_REPO=$(effective_governance_repo); then
+        return 1
+    fi
+
+    bash "$SCRIPT_DIR/setup/install-iwe-paths.sh" \
+        --workspace "$WORKSPACE_DIR" --governance "$EFFECTIVE_GOVERNANCE_REPO" \
+        --quiet 2>&1 | sed 's/^/  /'
+    local install_paths_status="${PIPESTATUS[0]}"
+    if [ "$install_paths_status" -ne 0 ]; then
+        echo "  ⚠ install-iwe-paths.sh завершился с ошибкой (exit $install_paths_status). Запустите вручную: bash $SCRIPT_DIR/setup/install-iwe-paths.sh --workspace $WORKSPACE_DIR --governance $EFFECTIVE_GOVERNANCE_REPO"
+    fi
+
+    echo ""
+    echo "Day Open fault reader (upgrade backfill)..."
+    if ! backfill_day_open_fault_reader; then
+        echo "  ОШИБКА: governance Day Open reader не обновлён; обновление оставлено незавершённым." >&2
+        return 1
+    fi
+
+    echo ""
+    echo "Agent fault profile (safe update hardening)..."
+    harden_agent_fault_profile_after_update
+
+    echo ""
+    echo "Agent fault legacy entrypoints (all-or-none upgrade)..."
+    if ! backfill_legacy_agent_fault_shims; then
+        echo "  ОШИБКА: legacy agent-fault entrypoints не мигрированы; canonical profile hardening уже выполнен независимо." >&2
+        return 1
+    fi
+
+    echo ""
+    echo "Platform hooks (upgrade backfill)..."
+    if ! backfill_platform_hooks; then
+        echo "  ОШИБКА: platform hooks не мигрированы; обновление оставлено незавершённым." >&2
+        return 1
+    fi
+
+    echo ""
+    echo "Derived snapshot updater (upgrade backfill)..."
+    if ! backfill_derived_snapshot_updater; then
+        echo "  ОШИБКА: governance snapshot updater не обновлён; обновление оставлено незавершённым." >&2
+        return 1
+    fi
+
+    echo ""
+    echo "Executor catalog (upgrade backfill)..."
+    backfill_executor_catalog || true
+}
+
 record_rule_workspace_state() {
     local fpath="$1" src dst
     case "$fpath" in .claude/rules/*) ;; *) return 0 ;; esac
@@ -713,11 +1649,27 @@ CLAUDE_MEMORY_DIR=$(resolve_workspace_memory_dir "$WORKSPACE_DIR") || exit 1
 # users found out by losing an edit. Called from every branch that shows a preview,
 # including the "no changes" one — there a repair-pass still writes to all of these.
 print_extra_write_targets() {
+    local governance_repo governance_dir
+    if governance_repo=$(effective_governance_repo 2>/dev/null); then
+        governance_dir="$WORKSPACE_DIR/$governance_repo"
+    else
+        governance_dir="$WORKSPACE_DIR/<invalid-GOVERNANCE_REPO>"
+    fi
     echo "Кроме перечисленного, обычный запуск (без --check) также пишет — это зоны возможной перезаписи, пофайлового прогноза для них превью не строит (issue #350):"
     echo "  • $WORKSPACE_DIR/.claude/ — рабочие копии скиллов, хуков, правил"
     echo "  • $CLAUDE_MEMORY_DIR — рабочие копии memory-файлов"
     echo "  • $WORKSPACE_DIR/.iwe-runtime/ — пересобирается целиком из шаблона"
     echo "  • $WORKSPACE_DIR/.exocortex.env, $SCRIPT_DIR/.claude.md.base, $SCRIPT_DIR/update-manifest.json"
+    echo "  • $WORKSPACE_DIR/.iwe-paths и $HOME/.zshenv — пересоздаваемое окружение путей"
+    echo "  • local core.hooksPath в git-репозиториях с .githooks под $WORKSPACE_DIR"
+    echo "  • $governance_dir/scripts/install-hooks.sh — установщик platform hooks"
+    echo "  • $governance_dir/.githooks/pre-commit и pre-push — platform hooks"
+    echo "  • $governance_dir/scripts/day-open-llm-fill.py — platform reader профиля ошибок для Day Open"
+    echo "  • $governance_dir/scripts/update-derived-snapshot.py — обновлятор derived snapshot"
+    echo "  • $governance_dir/scripts/executor-catalog.yaml — каталог исполнителей"
+    echo "  • $governance_dir/exocortex/agent-fault-profile/ — только миграция/права существующей приватной БД; отсутствующий профиль не создаётся"
+    echo "    Symlink-пути блокируют backfill. Отличающиеся installer/hooks сохраняются в .git/hook-backups/ и заменяются."
+    echo "    Локально изменённые Day Open reader/snapshot updater блокируют обновление; executor-catalog.yaml — генерируемый файл и заменяется при смысловом расхождении."
     echo "  Расхождение рабочей копии с шаблоном чинится независимо от списков выше."
     echo ""
 }
@@ -752,18 +1704,177 @@ exit_clean() {
 # Resolve main once before fetching the manifest.  Every subsequent download uses
 # that immutable commit, so a push between manifest and file requests cannot mix
 # hashes from one revision with content from another (issue #398).
+github_api_get() {
+    if [ "$#" -ne 1 ]; then
+        echo "ОШИБКА: github_api_get требует один GitHub API URL" >&2
+        return 1
+    fi
+    local trace_was_enabled=false
+    case "$-" in
+        *x*) trace_was_enabled=true; set +x ;;
+    esac
+    local api_url="$1" token="" auth_source="anonymous" endpoint result=0
+    local curl_option numeric_value expecting_numeric="" unsafe_curl_options=false
+    local glob_was_disabled=false
+    local -a authenticated_curl_options=()
+    case "$api_url" in
+        https://api.github.com/*) ;;
+        *)
+            echo "ОШИБКА: github_api_get отклонил URL вне api.github.com" >&2
+            $trace_was_enabled && set -x
+            return 1
+            ;;
+    esac
+
+    if [ -n "${GH_TOKEN:-}" ]; then
+        token="$GH_TOKEN"
+        auth_source="GH_TOKEN"
+    elif [ -n "${GITHUB_TOKEN:-}" ]; then
+        token="$GITHUB_TOKEN"
+        auth_source="GITHUB_TOKEN"
+    fi
+    if [ -n "$token" ]; then
+        if [ "${#token}" -gt 512 ]; then
+            echo "ОШИБКА: $auth_source содержит недопустимый GitHub token." >&2
+            $trace_was_enabled && set -x
+            return "$GITHUB_API_INVALID_TOKEN"
+        fi
+        case "$token" in
+            *[!A-Za-z0-9_]*)
+                echo "ОШИБКА: $auth_source содержит недопустимый GitHub token." >&2
+                $trace_was_enabled && set -x
+                return "$GITHUB_API_INVALID_TOKEN"
+                ;;
+        esac
+        # CURL_OPTS is intentionally flexible for anonymous downloads, but an
+        # authenticated request must never inherit tracing, config, headers or
+        # output flags that could persist the Authorization header. Parse a
+        # small transport-only allowlist without eval (Bash 3.2 compatible).
+        case "$-" in *f*) glob_was_disabled=true ;; *) set -f ;; esac
+        for curl_option in ${CURL_BASE_OPTS:-}; do
+            if [ -n "$expecting_numeric" ]; then
+                numeric_value="$curl_option"
+                case "$numeric_value" in
+                    *[!0-9.]*|*.*.*|"") unsafe_curl_options=true ;;
+                    *[0-9]*) authenticated_curl_options+=("$numeric_value") ;;
+                    *) unsafe_curl_options=true ;;
+                esac
+                expecting_numeric=""
+                $unsafe_curl_options && break
+                continue
+            fi
+            case "$curl_option" in
+                --insecure)
+                    authenticated_curl_options+=("$curl_option")
+                    ;;
+                --max-time|--connect-timeout|--retry|--retry-delay|--retry-max-time)
+                    authenticated_curl_options+=("$curl_option")
+                    expecting_numeric="$curl_option"
+                    ;;
+                --max-time=*|--connect-timeout=*|--retry=*|--retry-delay=*|--retry-max-time=*)
+                    numeric_value="${curl_option#*=}"
+                    case "$numeric_value" in
+                        *[!0-9.]*|*.*.*|"") unsafe_curl_options=true ;;
+                        *[0-9]*) authenticated_curl_options+=("$curl_option") ;;
+                        *) unsafe_curl_options=true ;;
+                    esac
+                    ;;
+                *)
+                    unsafe_curl_options=true
+                    ;;
+            esac
+            $unsafe_curl_options && break
+        done
+        [ -z "$expecting_numeric" ] || unsafe_curl_options=true
+        $glob_was_disabled || set +f
+        if $unsafe_curl_options; then
+            echo "ОШИБКА: authenticated GitHub API отклонил небезопасные CURL_OPTS; разрешены только transport timeout/retry и --insecure." >&2
+            token=""
+            $trace_was_enabled && set -x
+            return "$GITHUB_API_UNSAFE_CURL_OPTIONS"
+        fi
+        if [ -n "${_CURL_SSL_OPT:-}" ]; then
+            authenticated_curl_options+=("$_CURL_SSL_OPT")
+        fi
+        # Never put a credential in argv or xtrace. curl reads the one header
+        # from stdin as configuration; -q must be argv[1] so curl cannot load
+        # a user curlrc that enables tracing before it reads that header.
+        if [ -n "${authenticated_curl_options[*]-}" ]; then
+            printf 'header = "Authorization: Bearer %s"\n' "$token" | \
+                curl -q "${authenticated_curl_options[@]}" -sSfL -K - "$api_url"
+        else
+            # Bash 3.2 with `set -u` treats an explicitly declared empty array
+            # as unbound when expanded with "${array[@]}". Keep the zero-option
+            # path expansion-free while preserving curl -q as argv[1].
+            printf 'header = "Authorization: Bearer %s"\n' "$token" | \
+                curl -q -sSfL -K - "$api_url"
+        fi
+        result=${PIPESTATUS[1]}
+        if [ "$result" -ne 0 ]; then
+            echo "ОШИБКА: authenticated GitHub API request via $auth_source failed; fallback disabled." >&2
+            result="$GITHUB_API_AUTH_FAILURE"
+        fi
+        token=""
+        $trace_was_enabled && set -x
+        return "$result"
+    fi
+
+    if command -v gh >/dev/null 2>&1 && \
+       GH_DEBUG='' DEBUG='' GH_PROMPT_DISABLED=1 \
+           gh auth status --hostname github.com >/dev/null 2>&1; then
+        endpoint="/${api_url#https://api.github.com/}"
+        if ! GH_DEBUG='' DEBUG='' GH_PROMPT_DISABLED=1 \
+             gh api --hostname github.com --method GET "$endpoint"; then
+            echo "ОШИБКА: authenticated GitHub API request via gh failed; fallback disabled." >&2
+            result="$GITHUB_API_AUTH_FAILURE"
+        fi
+        $trace_was_enabled && set -x
+        return "$result"
+    fi
+
+    # No explicit credential and no authenticated gh session: preserve the
+    # public anonymous request path and its native curl status.
+    # shellcheck disable=SC2086
+    curl ${CURL_BASE_OPTS:-} ${_CURL_SSL_OPT:-} -sSfL "$api_url"
+    result=$?
+    $trace_was_enabled && set -x
+    return "$result"
+}
+
 resolve_delivery_ref() {
-    local resolved_ref release_tag
+    local resolved_ref release_tag release_json commit_json api_status
     if [ "$UPDATE_CHANNEL" = "release" ]; then
         # sed, not python: the tag must be resolvable even on installs where
         # py_available fails — a release tag is already an immutable-enough
         # pin, unlike the moving branch the no-python path degrades to below.
-        # shellcheck disable=SC2086
-        release_tag=$(curl $CURL_BASE_OPTS $_CURL_SSL_OPT -sSfL "$API_BASE/releases/latest" 2>/dev/null | \
-            sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        release_json=""
+        if release_json=$(github_api_get "$API_BASE/releases/latest"); then
+            release_tag=$(printf '%s\n' "$release_json" | \
+                sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        else
+            api_status=$?
+            release_tag=""
+        fi
         if [ -n "$release_tag" ]; then
-            if py_available && resolved_ref=$(curl $CURL_BASE_OPTS $_CURL_SSL_OPT -sSfL "$API_BASE/commits/$release_tag" 2>/dev/null | \
-                "$PY_BIN" -c '
+            if py_available; then
+                commit_json=""
+                if commit_json=$(github_api_get "$API_BASE/commits/$release_tag"); then
+                    api_status=0
+                else
+                    api_status=$?
+                fi
+            else
+                api_status=0
+                commit_json=""
+            fi
+            if [ "$api_status" -eq "$GITHUB_API_AUTH_FAILURE" ] || \
+               [ "$api_status" -eq "$GITHUB_API_INVALID_TOKEN" ] || \
+               [ "$api_status" -eq "$GITHUB_API_UNSAFE_CURL_OPTIONS" ]; then
+                echo "ОШИБКА: authenticated release commit lookup failed; refusing fallback to tag." >&2
+                exit "$EXIT_NETWORK"
+            fi
+            if py_available && [ -n "$commit_json" ] && \
+               resolved_ref=$(printf '%s\n' "$commit_json" | "$PY_BIN" -c '
 import json, re, sys
 sha = json.load(sys.stdin).get("sha", "")
 if not re.fullmatch(r"[0-9a-f]{40}", sha):
@@ -777,15 +1888,35 @@ print(sha)'); then
             fi
             return 0
         fi
-        echo "  ⚠ Не удалось определить последний релиз (нет релизов или API недоступен) — откат на ветку $BRANCH."
+        # #501 (fail-closed, матрица внешнего пользователя по v0.38.7): молчаливый
+        # откат на подвижную ветку превращал сбой резолва релиза в тихую доставку
+        # непроверенного main — ровно то, от чего release-канал защищает. Явный
+        # main-канал остаётся единственной дорогой к подвижной ветке.
+        echo "ОШИБКА: не удалось определить последний релиз (нет релизов или API недоступен)." >&2
+        echo "  Release-канал работает только от опубликованного релиза (fail-closed, #501)." >&2
+        echo "  Повторите позже, либо осознанно выберите подвижную ветку:" >&2
+        echo "    IWE_UPDATE_CHANNEL=main bash update.sh" >&2
+        exit "$EXIT_NETWORK"
     fi
     if ! py_available; then
         echo "  ⚠ Нет python3: поставка проверяется по подвижной ветке $BRANCH."
         return 0
     fi
     # shellcheck disable=SC2086  # CURL_BASE_OPTS intentionally contains multiple flags.
-    if resolved_ref=$(curl $CURL_BASE_OPTS $_CURL_SSL_OPT -sSfL "$API_BASE/commits/$BRANCH" 2>/dev/null | \
-        "$PY_BIN" -c '
+    commit_json=""
+    if commit_json=$(github_api_get "$API_BASE/commits/$BRANCH"); then
+        api_status=0
+    else
+        api_status=$?
+    fi
+    if [ "$api_status" -eq "$GITHUB_API_AUTH_FAILURE" ] || \
+       [ "$api_status" -eq "$GITHUB_API_INVALID_TOKEN" ] || \
+       [ "$api_status" -eq "$GITHUB_API_UNSAFE_CURL_OPTIONS" ]; then
+        echo "ОШИБКА: authenticated branch lookup failed; refusing anonymous or moving-branch fallback." >&2
+        exit "$EXIT_NETWORK"
+    fi
+    if [ -n "$commit_json" ] && \
+       resolved_ref=$(printf '%s\n' "$commit_json" | "$PY_BIN" -c '
 import json, re, sys
 sha = json.load(sys.stdin).get("sha", "")
 if not re.fullmatch(r"[0-9a-f]{40}", sha):
@@ -843,8 +1974,16 @@ if curl $CURL_BASE_OPTS $_CURL_SSL_OPT -sSfL "$RAW_BASE/update.sh" -o "$REMOTE_U
             echo "  ⚠ Новая версия update.sh доступна. Запустите без --check для обновления."
         else
             echo "  Найдена новая версия update.sh — обновляю..."
-            cp "$REMOTE_UPDATE" "$SCRIPT_DIR/update.sh"
-            chmod +x "$SCRIPT_DIR/update.sh"
+            # issue #505 class (residual, found in the same sweep): replace
+            # the RUNNING script via sibling tmp + mv — rename swaps the
+            # directory entry and this process keeps its old inode; a plain cp
+            # truncates the very file bash is executing. Historically survived
+            # only because the few remaining commands sat in bash's read
+            # buffer.
+            _boot_staged="$SCRIPT_DIR/.update.sh.staged.$$"
+            cp "$REMOTE_UPDATE" "$_boot_staged"
+            chmod +x "$_boot_staged"
+            mv -f "$_boot_staged" "$SCRIPT_DIR/update.sh"
             echo "  Перезапуск..."
             exec bash "$SCRIPT_DIR/update.sh" "$@"
         fi
@@ -1008,8 +2147,41 @@ fi
 # на актуальной версии от предыдущего запуска, а workspace остался stale) И
 # после обычной propagation (Step 6) — чтобы не дублировать работу NEW/UPDATED_FILES.
 # REPAIRED — глобальный счётчик, читается вызывающим кодом после возврата.
+sync_workspace_agents() {
+    [ -f "$SCRIPT_DIR/AGENTS.md" ] || return 0
+    local ws_agents_new="$TMPDIR_UPDATE/ws-agents-new-substituted.md"
+    local destination="$WORKSPACE_DIR/AGENTS.md"
+    local destination_temp=""
+    if [ -L "$destination" ]; then
+        echo "  ✗ $destination — symbolic link is forbidden" >&2
+        return 1
+    fi
+    if [ -e "$destination" ] && [ ! -f "$destination" ]; then
+        echo "  ✗ $destination — existing target is not a regular file" >&2
+        return 1
+    fi
+    substitute_claude_placeholders "$SCRIPT_DIR/AGENTS.md" "$ws_agents_new" || return 1
+    if [ ! -f "$destination" ] || ! cmp -s "$destination" "$ws_agents_new"; then
+        destination_temp=$(mktemp "$WORKSPACE_DIR/.AGENTS.md.update.XXXXXX") || {
+            echo "  ✗ $destination — не удалось создать временный файл" >&2
+            return 1
+        }
+        if ! cp "$ws_agents_new" "$destination_temp" || \
+           ! mv -f "$destination_temp" "$destination"; then
+            rm -f "$destination_temp"
+            echo "  ✗ $destination не синхронизирован" >&2
+            return 1
+        fi
+        echo "  ✓ $destination обновлён (generated, substituted)"
+    fi
+    return 0
+}
+
 repair_pass() {
     REPAIRED=0
+    # Generated workspace instructions are part of repair, not only delivery:
+    # both TOTAL_CHANGES=0 recovery branches must restore a missing/stale copy.
+    sync_workspace_agents || return 1
     # Bash 3.2 (macOS) parses the apostrophe in the comment below before it
     # recognizes the closing `)` of a process substitution.  Keep the manifest
     # reader in ordinary temporary files: its diagnostics stay visible and the
@@ -1705,6 +2877,9 @@ if [ "$TOTAL_CHANGES" -eq 0 ] && [ ${#SKIPPED_DOWNLOAD[@]} -gt 0 ]; then
         begin_update_transaction
         repair_pass
         run_build_runtime_or_die
+        if ! run_post_apply_backfills_or_die; then
+            exit "$EXIT_RUNTIME"
+        fi
         finish_update_transaction
         report_settings_merge_drift
     fi
@@ -1752,6 +2927,9 @@ if [ "$TOTAL_CHANGES" -eq 0 ]; then
         # without ever rebuilding .iwe-runtime/ — recovery ended with a removed
         # marker but stale substitutions. Same fail-closed contract as Step 6d.
         run_build_runtime_or_die
+        if ! run_post_apply_backfills_or_die; then
+            exit "$EXIT_RUNTIME"
+        fi
         # Cold review 2026-08-19 (Critical): finish must stay OUT of --check —
         # the preview used to clear a live .update-incomplete from a previous
         # failed run without repair or build-runtime, disarming the contract
@@ -1812,7 +2990,6 @@ echo "  ✓ .secrets/ (ключи)"
 echo "  ✓ .claude/settings.local.json (permissions)"
 echo "  ✓ sessions/00-index.md (журнал peer-сессий)"
 echo "  ✓ personal/ (ваши файлы)"
-echo "  ✓ ${IWE_GOVERNANCE_REPO:-DS-strategy}/ (ваше планирование)"
 echo ""
 
 print_extra_write_targets
@@ -2689,7 +3866,8 @@ echo "Проверка применённых изменений..."
 
 validate_no_install_values_in_applied_additions() {
     local env_file="$WORKSPACE_DIR/.exocortex.env"
-    local key value fpath applied_additions added_line historical_lines upstream_ref
+    local key value fpath applied_additions added_line target_file target_sha256
+    local applied_line_count target_line_count
     local i failed=0
     local -a install_keys=() install_values=()
 
@@ -2716,19 +3894,74 @@ validate_no_install_values_in_applied_additions() {
         install_values+=("$value")
     done
 
-    # issue #459: guard считал совпадение по подстроке уже утечкой, хотя
-    # substitute_claude_placeholders() никогда не пишет в $SCRIPT_DIR (только
-    # во временную workspace-копию CLAUDE.md) — совпадение здесь могло быть
-    # текстом, который апстрим и раньше приносил под другим значением, не
-    # реальной подстановкой личного пути. Полностью убирать guard нельзя (он
-    # защищает от любой утечки install-path, не только через подстановку —
-    # например, случайно скопированный фрагмент личного конфига в коммит
-    # шаблона); вместо этого сужаем срабатывание: install-значение блокирует
-    # только если добавленная строка ЦЕЛИКОМ (не подстрока) не встречалась
-    # раньше ни в одной прошлой upstream-версии этого же файла.
-    upstream_ref=$(git -C "$SCRIPT_DIR" rev-parse --verify --quiet '@{upstream}' 2>/dev/null || true)
+    # issue #524: provenance belongs to the exact target release, not the old
+    # installation fork's history. First accept a whole file whose bytes match
+    # its unique target-manifest hash. This also works in the deliberately
+    # tainted no-Python mode, which exits 4 after applying the update.
+    #
+    # A legitimate 3-way merge cannot match the whole-file hash. For that case,
+    # fall through to the already integrity-verified downloaded target payload:
+    # each install-valued line must exist in that exact same target file and may
+    # occur no more often than in the target. Cross-file matches, unverified
+    # payloads and locally duplicated canonical lines remain fail-closed.
+    #
+    # Детерминированно в обоих окружениях (peer-review Codex, 2026-08-24-07):
+    # python-путь и shell-фоллбек дают одинаковый результат на одном манифесте
+    # — P0 не остаётся воспроизводимым только в окружениях без python3/python.
+    manifest_sha256_for_path() {
+        local want="$1"
+        if py_available; then
+            "$PY_BIN" - "$MANIFEST" "$want" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+matches = [e.get('sha256') for e in data.get('files', []) if e.get('path') == sys.argv[2]]
+uniq = set(m for m in matches if m)
+if len(uniq) != 1:
+    sys.exit(1)
+print(uniq.pop())
+PYEOF
+            return $?
+        fi
+        # Shell-фоллбек (нет python3/python): не общий JSON-парсер — опирается
+        # на фиксированный layout нашего же generate-manifest.sh
+        # (json.dump(indent=2), "path" непосредственно перед "sha256" в одном
+        # объекте, один ключ на строку). Если формат манифеста когда-нибудь
+        # разъедется с этим предположением — E2E-тест на no-python окружение
+        # это поймает (WP-529 Ф16, В3 codex).
+        awk -v want="$want" '
+            /"path"[[:space:]]*:/ {
+                line = $0
+                sub(/^[^"]*"path"[[:space:]]*:[[:space:]]*"/, "", line)
+                sub(/".*$/, "", line)
+                cur_path = line
+                next
+            }
+            /"sha256"[[:space:]]*:/ && cur_path == want {
+                line = $0
+                sub(/^[^"]*"sha256"[[:space:]]*:[[:space:]]*"/, "", line)
+                sub(/".*$/, "", line)
+                if (found && line != found_val) { ambiguous = 1 }
+                found = 1
+                found_val = line
+            }
+            END {
+                if (found && !ambiguous) { print found_val; exit 0 }
+                exit 1
+            }
+        ' "$MANIFEST"
+    }
 
     for fpath in "${APPLIED_PATHS[@]}"; do
+        if [ -f "$SCRIPT_DIR/$fpath" ] && target_sha256=$(manifest_sha256_for_path "$fpath") \
+           && [ "$(hash_file "$SCRIPT_DIR/$fpath")" = "$target_sha256" ]; then
+            echo "  install-path guard: $fpath exempt (byte-identical to target manifest sha256)" >&2
+            continue
+        fi
+        echo "  install-path guard: $fpath -- no manifest hash match, falling back to verified target-line provenance" >&2
         # Полное текущее содержимое файла на диске, не git-diff working
         # tree против HEAD. Cold-context review нашёл живую дыру: если файл
         # уже ЗАКОММИЧЕН до этого прогона (второй прогон update.sh после
@@ -2746,27 +3979,28 @@ validate_no_install_values_in_applied_additions() {
         fi
         [ -n "$applied_additions" ] || continue
 
-        # Полные строки из всех прошлых версий именно этого файла в upstream.
-        # Нет upstream ref / нет истории — исключения нет, guard fail-closed.
-        historical_lines=""
-        if [ -n "$upstream_ref" ]; then
-            historical_lines=$(git -C "$SCRIPT_DIR" log --follow --format= \
-                --no-ext-diff --no-textconv -p "$upstream_ref" -- "$fpath" |
-                awk '
-                    /^diff --git / { in_hunk=0; next }
-                    /^@@ / { in_hunk=1; next }
-                    in_hunk && /^[+-]/ { print substr($0, 2) }
-                ')
-        fi
+        target_file="${TMPDIR_UPDATE:-}/files/$fpath"
 
         while IFS= read -r added_line || [ -n "$added_line" ]; do
             for i in "${!install_keys[@]}"; do
                 [[ "$added_line" == *"${install_values[$i]}"* ]] || continue
 
-                # Исключение только для идентичной полной строки, уже
-                # поставлявшейся upstream; совпадение одной подстроки не достаточно.
-                if ! grep -Fqx -- "$added_line" <<<"$historical_lines"; then
+                # The exception is scoped to the identical target file and to
+                # the target's exact multiplicity of this full line. A local
+                # duplicate of an otherwise canonical line has no provenance.
+                # Cross-file text and unverified payloads never establish it.
+                if [ "${INTEGRITY_TAINTED:-true}" != false ] || \
+                   [ ! -f "$target_file" ] || \
+                   ! grep -Fqx -- "$added_line" "$target_file"; then
                     echo "  ✗ install-value ${install_keys[$i]} найден в новой строке обновления:" >&2
+                    printf '    %s\n' "$fpath" >&2
+                    failed=1
+                    continue
+                fi
+                applied_line_count=$(grep -Fxc -- "$added_line" "$SCRIPT_DIR/$fpath" || true)
+                target_line_count=$(grep -Fxc -- "$added_line" "$target_file" || true)
+                if [ "$applied_line_count" -gt "$target_line_count" ]; then
+                    echo "  ✗ install-value ${install_keys[$i]} продублирован сверх проверенного target payload:" >&2
                     printf '    %s\n' "$fpath" >&2
                     failed=1
                 fi
@@ -2808,17 +4042,12 @@ if [ -f "$ENV_FILE" ]; then
     fi
 fi
 
-# === Step 7.6: Re-run install-iwe-paths.sh auto-enable (issue #317) ===
-# CHANGELOG 0.28.5 promised this ("update.sh может тоже его вызывать при
-# следующих апгрейдах"), but the call was never added — so a DS-strategy
-# repo that shipped with .githooks/ after this update had no way to get
-# core.hooksPath enabled without a fresh setup.sh run.
-if ! $CHECK_ONLY; then
-    bash "$SCRIPT_DIR/setup/install-iwe-paths.sh" \
-        --workspace "$WORKSPACE_DIR" --governance "${IWE_GOVERNANCE_REPO:-DS-strategy}" --quiet 2>&1 | sed 's/^/  /'
-    INSTALL_PATHS_STATUS="${PIPESTATUS[0]}"
-    [ "$INSTALL_PATHS_STATUS" -eq 0 ] || \
-        echo "  ⚠ install-iwe-paths.sh завершился с ошибкой (exit $INSTALL_PATHS_STATUS). Запустите вручную: bash $SCRIPT_DIR/setup/install-iwe-paths.sh --workspace $WORKSPACE_DIR --governance ${IWE_GOVERNANCE_REPO:-DS-strategy}"
+# === Step 7.6–7.9: post-apply governance backfills ===
+# The same helper also runs in TOTAL_CHANGES=0 recovery branches. Otherwise a
+# failed first backfill could leave .update-incomplete, while a zero-diff retry
+# skipped the failing action and incorrectly cleared the marker.
+if ! run_post_apply_backfills_or_die; then
+    exit "$EXIT_RUNTIME"
 fi
 
 # === Done ===

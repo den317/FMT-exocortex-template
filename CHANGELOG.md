@@ -143,6 +143,37 @@ Refs: WP-NNN
 
 
 
+
+## [Unreleased]
+
+## [0.38.11] — 2026-08-24
+
+### Security
+- [security] Профиль ошибок агента переведён на единый нейтральный CLI с ленивой приватной SQLite-БД, безопасной миграцией старых записей и доставкой в fresh/update и нестандартные workspace-пути (#533).
+- [security] Обновление шаблона использует `GH_TOKEN`, затем `GITHUB_TOKEN` или авторизованный `gh` для всех GitHub API-запросов; секреты не попадают в аргументы и трассировку, а ошибка авторизации не маскируется анонимным запросом (#538).
+
+### Fixed
+- [data-safety] Day Close сохраняет `day-rhythm-config.yaml` и `params.yaml` побайтово, удаляет только собственные неизменённые копии и восстанавливается после коллизий, гонок и прерванной транзакции без потери пользовательских данных (#536).
+
+## [0.38.10] — 2026-08-24
+
+### Security
+- [security] Состояние согласий вынесено из Git в закрытое локальное хранилище с атомарной миграцией, повторной проверкой старых писателей и защитой от ссылок; усилены границы hook-доставки, commit/owner/self-scan и DayPlan-гейтов (#502 #511 #521 #529 #530 #532).
+
+### Fixed
+- [behavior] Закрыт пакет пользовательских дефектов: ленивый State-Transition Gate, полный lifecycle АрхГейта, каталог extensions, опциональные Hindsight/Obsidian-пути, происхождение манифеста, role-prefix, scheduler и точный статус index-health (#481 #490 #508 #522 #523 #524 #525 #527 #528 #531).
+- [migration] Fresh-install и update/recovery теперь одинаково доставляют `AGENTS.md`, lazy-правило, Python-resolver и governance hooks, включая повторный запуск после частичного обновления (#481 #502 #508 #521).
+
+## [0.38.9] — 2026-08-24
+### Fixed
+- `6c4f52b` fix(template): batch of nine small user-reported defects (#515 #514 #513 #503 #499 #507 #512 #511 + flush) — WP-529 F14, peer session with Kimi (#520)
+
+## [0.38.8] — 2026-08-23
+### Fixed
+- `8364a30` fix(update,setup): fail-closed release channel (#501), Step 0 double negative control, resolver-baseline delivery, IWE_RUNTIME isolation (WP-529 F13, v0.38.7 matrix) (#519)
+- `c36bd90` fix(release,manifest): pin release tag to the validated SHA; fail-closed manifest verification (post-v0.38.7 peer review) (#518)
+- `fdd7a55` fix(update): Step 0 self-update replaces the running script via staged rename, not cp (issue #505 residual) (#517)
+
 ## [0.38.7] — 2026-08-22
 ### Added
 - `90fa53b` feat(day-open): ship a default day-open.checks.md — the Checks step must have something to run on a fresh install (WP-529 F7) (#509)

@@ -26,7 +26,7 @@ REPO="${1:-${PWD}}"
 HOOK_DIR="$REPO/.githooks"
 BACKUP_DIR="$REPO/.git/hook-backups"
 
-if [ ! -d "$REPO/.git" ]; then
+if [ -L "$REPO" ] || [ -L "$REPO/.git" ] || [ ! -d "$REPO/.git" ]; then
   echo "❌ Not a git repo: $REPO"
   exit 1
 fi
@@ -37,26 +37,69 @@ for candidate in \
   "${IWE_ROOT:-$HOME/IWE}/FMT-exocortex-template/seed/strategy/.githooks" \
   "$HOME/IWE/FMT-exocortex-template/seed/strategy/.githooks"
 do
-  if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+  if [ -n "$candidate" ] && [ ! -L "$candidate" ] && [ -d "$candidate" ]; then
     CANONICAL_HOOKS_DIR="$candidate"
     break
   fi
 done
 
+MISSING_SOURCE=""
+for hook in pre-commit pre-push; do
+  [ -n "$CANONICAL_HOOKS_DIR" ] \
+    && [ ! -L "$CANONICAL_HOOKS_DIR/$hook" ] \
+    && [ -f "$CANONICAL_HOOKS_DIR/$hook" ] \
+    || MISSING_SOURCE="$MISSING_SOURCE $hook"
+done
+if [ -n "$MISSING_SOURCE" ]; then
+  echo "⚠️  Канонический источник hooks не найден или неполон:$MISSING_SOURCE"
+  echo "   Искали в \$IWE_TEMPLATE, \$IWE_ROOT/FMT-exocortex-template, \$HOME/IWE/FMT-exocortex-template."
+  echo "   core.hooksPath не изменён."
+  exit 1
+fi
+
+if [ -L "$HOOK_DIR" ] || [ -L "$BACKUP_DIR" ]; then
+  echo "❌ Refusing symlink hook or backup directory in $REPO" >&2
+  echo "   core.hooksPath не изменён." >&2
+  exit 1
+fi
+for hook in pre-commit pre-push; do
+  if [ -L "$HOOK_DIR/$hook" ]; then
+    echo "❌ Refusing symlink hook target: $HOOK_DIR/$hook" >&2
+    echo "   Ни один hook и core.hooksPath не изменены." >&2
+    exit 1
+  fi
+done
 mkdir -p "$HOOK_DIR" "$BACKUP_DIR"
+
+copy_hook_atomically() {
+  local source_hook="$1" target="$2" temporary
+  temporary=$(mktemp "$HOOK_DIR/.iwe-hook-copy.XXXXXX")
+  if ! cp "$source_hook" "$temporary" \
+    || ! chmod +x "$temporary" \
+    || ! mv -f "$temporary" "$target"; then
+    rm -f "$temporary"
+    echo "❌ Hook copy failed atomically: $target" >&2
+    return 1
+  fi
+}
 
 for hook in pre-commit pre-push; do
   target="$HOOK_DIR/$hook"
   source_hook="$CANONICAL_HOOKS_DIR/$hook"
 
-  if [ -f "$target" ]; then
+  if [ -f "$target" ] && ! cmp -s "$source_hook" "$target"; then
     backup="$BACKUP_DIR/$hook.backup.$(date +%s)"
+    backup_index=0
+    while [ -e "$backup" ]; do
+      backup_index=$((backup_index + 1))
+      backup="$BACKUP_DIR/$hook.backup.$(date +%s).$backup_index"
+    done
     cp "$target" "$backup"
     echo "📝 Existing $hook backed up to: $backup"
   fi
 
-  if [ -n "$CANONICAL_HOOKS_DIR" ] && [ -f "$source_hook" ]; then
-    cp "$source_hook" "$target"
+  if [ ! -f "$target" ] || ! cmp -s "$source_hook" "$target"; then
+    copy_hook_atomically "$source_hook" "$target"
   fi
 
   [ -f "$target" ] && chmod +x "$target"
@@ -70,8 +113,7 @@ for hook in pre-commit pre-push; do
 done
 
 if [ -n "$MISSING" ]; then
-  echo "⚠️  core.hooksPath = .githooks, но отсутствуют:$MISSING"
-  echo "   Канонический источник не найден (искали в \$IWE_TEMPLATE, \$IWE_ROOT/FMT-exocortex-template, \$HOME/IWE/FMT-exocortex-template)."
+  echo "⚠️  core.hooksPath = .githooks, но отсутствуют или не исполняются:$MISSING"
   echo "   Хуки НЕ активны, пока эти файлы не появятся в $HOOK_DIR."
   exit 1
 fi
