@@ -148,30 +148,20 @@ def parse_registry(text: str) -> tuple[list[dict], list[str]]:
                 f"WP-{wp} (строка {lineno}): неизвестный статус {token!r} - строка учтена "
                 f"в реестре, но не попадает ни в открытые, ни в закрытые active-wp.md."
             )
+        project = cell("project").replace("~~", "").strip() or "—"
+        repo = cell("repo") or "—"
+        budget = cell("budget") or "—"
         rows.append({
             "wp": wp,
-            "project": cell("project").replace("~~", "").strip(),
+            "id_display": cols[0],
+            "project": project,
             "name": cell("name"),
             "status": status,
             "status_display": token,
-            "repo": cell("repo"),
-            "budget": cell("budget"),
-            "raw": line,
-            "_status_col": columns.get("status"),
+            "repo": repo,
+            "budget": budget,
         })
     return rows, problems
-
-
-def clean_status_in_row(raw: str, status: str, status_col: int) -> str:
-    """Заменяет содержимое колонки статуса на очищенный статус, не трогая
-    остальные колонки (issue #473: старая версия обрезала строку до 7
-    сегментов через parts[:7] - молча теряла всё после 6-й колонки на
-    реестрах с 7+ колонками, например "Бюджет" после добавленной "Ставка")."""
-    parts = raw.split("|")
-    cell_index = status_col + 1  # +1 - до первого "|" всегда пустой сегмент
-    if 0 <= cell_index < len(parts):
-        parts[cell_index] = f" {status} "
-    return "|".join(parts)
 
 
 def render(rows: list[dict]) -> str:
@@ -192,7 +182,10 @@ def render(rows: list[dict]) -> str:
         out = ["| # | P | Название | Ст | Репо | Бюджет |",
                "|---:|---|------------------|:--:|------------------|------:|"]
         for r in items:
-            out.append(clean_status_in_row(r["raw"], r["status_display"], r["_status_col"]))
+            out.append(
+                f"| {r['id_display']} | {r['project']} | {r['name']} | "
+                f"{r['status_display']} | {r['repo']} | {r['budget']} |"
+            )
         return "\n".join(out) + "\n"
 
     lines = [

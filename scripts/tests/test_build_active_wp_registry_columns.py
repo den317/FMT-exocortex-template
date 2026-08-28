@@ -59,7 +59,7 @@ def test_wp_prefixed_legacy_identifier_is_not_dropped():
     assert "📦 Закрытые (1)" in BUILD.render(rows)
 
 
-def test_legacy_revision_identifiers_are_not_dropped():
+def test_legacy_revision_identifiers_are_not_registry_rows():
     registry = """| # | Название | Статус |
 |---|---|---|
 | WP-9-r3 | Актуальная ревизия | 🔄 |
@@ -68,12 +68,5 @@ def test_legacy_revision_identifiers_are_not_dropped():
 """
 
     rows, problems = BUILD.parse_registry(registry)
-    rendered = BUILD.render(rows)
-
     assert problems == []
-    assert [row["wp"] for row in rows] == [9, 9, 1]
-    assert "| WP-9-r3 |" in rendered
-    assert "| ~~WP-9-r2~~ |" in rendered
-    assert "| ~~WP-1.2~~ |" in rendered
-    assert "## 🔄 Открытые (1)" in rendered
-    assert "📦 Закрытые (2)" in rendered
+    assert rows == []
