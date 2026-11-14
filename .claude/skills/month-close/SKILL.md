@@ -5,6 +5,7 @@ argument-hint: ""
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/month-close]
   phrases: []
@@ -48,6 +49,23 @@ Month Close = протокол. Исполнять ТОЛЬКО пошагово
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh month-close before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/month-close.before.md` И `extensions/month-close.before.<suffix>.md`.
 
+### 0а. Session-guard: привязка к РП-1 (S-68 — каждый коммит обязан нести реальный РП)
+Month Close сам по себе не рабочий продукт, но `session-open-gate.sh` (S-68) не делает для него исключения — коммит шага ниже (`git commit -m "month-close: close YYYY-MM"`) без привязки к `--wp` будет отклонён. Если сессия уже привязана к другому РП, вторая привязка не нужна:
+```bash
+HARNESS_ID="${CLAUDE_CODE_SESSION_ID:-}"
+SESSION_DIR="${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/sessions"
+AGENT="${IWE_AGENT:-claude-code}"
+ALREADY_BOUND=0
+if [ -n "$HARNESS_ID" ]; then
+  while IFS= read -r sem; do
+    [ -z "$sem" ] && continue
+    grep -qE '^wp: .+' "$sem" 2>/dev/null && { ALREADY_BOUND=1; break; }
+  done < <(grep -lxF "harness_session_id: $HARNESS_ID" "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null)
+fi
+[ "$ALREADY_BOUND" = 1 ] || bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping month-close --agent "$AGENT" 2>&1 || true
+```
+`session-open-gate.sh` принимает `housekeeping: month-close` как легитимную привязку — это закрытый список из 4 операционных протоколов, не произвольная причина (S-68 запрещает именно произвольные `--housekeeping`-обходы, не эти четыре). Отказ открытия (коллизия с параллельной сессией) не блокирует протокол.
+
 ### 1. Сбор данных (агент)
 
 **1a. Период.** Определить границы месяца: `YYYY-MM-01 .. YYYY-MM-{last}` (фактически — последний Week Close предыдущего месяца).
@@ -55,9 +73,9 @@ Month Close = протокол. Исполнять ТОЛЬКО пошагово
 **1b. Коммиты за месяц.**
 
 ```bash
-for repo in $(ls {{HOME_DIR}}/IWE/); do
-  if [ -d {{HOME_DIR}}/IWE/$repo/.git ]; then
-    count=$(git -C {{HOME_DIR}}/IWE/$repo log --since="$MONTH_START" --until="$MONTH_END" --oneline --no-merges 2>/dev/null | wc -l)
+for repo in $(ls ${IWE_WORKSPACE:-$HOME/IWE}/); do
+  if [ -d ${IWE_WORKSPACE:-$HOME/IWE}/$repo/.git ]; then
+    count=$(git -C ${IWE_WORKSPACE:-$HOME/IWE}/$repo log --since="$MONTH_START" --until="$MONTH_END" --oneline --no-merges 2>/dev/null | wc -l)
     [ "$count" -gt 0 ] && echo "$repo: $count"
   fi
 done
@@ -126,7 +144,7 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 
 Открыть `memory/t-checklist.md` → раздел «Month Close» → выполнить T23-T25:
 
-- **T23 Lesson Hygiene месячный.** НЕ ротация дневная/недельная (это уже сделано Day/Week Close). Месячный масштаб — **объединение тематических файлов, удаление пустых категорий, сверка что `lessons_*.md` не разрослись за лимит**. Пройти MEMORY.md секция «Уроки» и тематические `lessons_*.md`. Лимит MEMORY.md «Уроки» ≤8 строк.
+- **T23 Lesson Hygiene месячный.** НЕ HOT-лимит (это уже сделано Day Close §4, `memory-bleed.sh --hot-only`) и не дормантные кандидаты (это уже видел Week Close §7d). Месячный масштаб — **решить по кандидатам из bleed-отчёта Шага 1f**: для каждой строки таблицы (HOT→WARM/WARM→COLD/COLD→archive) — применить понижение `horizon` в frontmatter или оставить с явной причиной; объединить тематически дублирующие `type: lesson`/`feedback` файлы, удалить опустевшие. Issue #1314: прежний текст ссылался на несуществующую секцию «Уроки» в MEMORY.md — современная схема frontmatter (`memory/memory-lifecycle-spec.md`) такой секции не имеет.
 - **T24 Аудит протоколов на обходимые шаги.** Пройти `memory/protocol-*.md` и `.claude/skills/*/SKILL.md` — выявить шаги, которые агент регулярно пропускает (по `behaviour-report.sh`) или человек обходит молча. Решение: удалить / переформулировать / оставить как есть.
 - **T25 Decommission-триаж.** Применить решения из Шага 7 (add-on). Здесь T25 — pointer, не дубль. См. Шаг 7 ниже.
 
@@ -171,7 +189,7 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 ### 11. Коммит ${IWE_GOVERNANCE_REPO:-DS-strategy}
 
 ```bash
-cd ~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}
+(cd ${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}
 # НЕ `git add -A`: в общем клоне (multi-agent) сметает чужое pre-staged → mis-attribution
 # (см. sessions/2026-06/2026-06-20-39-*). Перечисли артефакты month-close ЯВНО:
 MONTH_FILES=(
@@ -182,6 +200,7 @@ MONTH_FILES=(
 )
 git add "${MONTH_FILES[@]}"
 git commit -m "month-close: close YYYY-MM" -- "${MONTH_FILES[@]}"
+)
 ```
 
 Push при явном триггере «заливай».

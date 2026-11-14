@@ -1,7 +1,7 @@
 name: Notify Security Changelog
 
-# WP-7 Ф62 п.4: срочная доставка новых [security]-строк CHANGELOG.
-# Отдельный workflow не смешивает push-маршрут с ежедневным дайджестом.
+# WP-7 Phase 62 item 4: urgent delivery of new [security] lines of CHANGELOG.
+# A separate workflow does not mix the push route with the daily digest.
 
 on:
   push:
@@ -14,14 +14,17 @@ jobs:
   notify-security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       - name: Extract newly added security lines
         id: extract
         run: |
-          NEW_LINES=$(bash scripts/changelog-diff-lines.sh "${{ github.event.before }}" --security-only)
+          if ! NEW_LINES=$(bash scripts/changelog-diff-lines.sh "${{ github.event.before }}" --security-only); then
+            echo "::error file=CHANGELOG.md::Не удалось извлечь security-строки; срочное уведомление не отправлено."
+            exit 1
+          fi
 
           if [ -z "$NEW_LINES" ]; then
             echo "has_security=false" >> "$GITHUB_OUTPUT"
@@ -44,7 +47,34 @@ jobs:
           TEMPLATE_WEBHOOK_SECRET: ${{ secrets.TEMPLATE_WEBHOOK_SECRET }}
           SECURITY_LINES: ${{ steps.extract.outputs.lines }}
         run: |
-          VERSION=$(grep -m1 '^## \[' CHANGELOG.md | sed 's/## //')
+          # issue #1222: length() does not exist in GitHub Actions expressions
+          # (only contains/startsWith/endsWith/format/join/toJSON/fromJSON/
+          # hashFiles and the status functions) -- an env: expression calling
+          # that nonexistent function made the whole workflow file invalid
+          # and GitHub rejected it outright (0 jobs, no log). Counted in
+          # shell instead.
+          # issue #1010 (F8): the number of commits of this push, not a
+          # constant 1 (GitHub caps event.commits at 20, enough for a notice).
+          PUSH_COMMIT_COUNT=$(jq '.commits | length' "$GITHUB_EVENT_PATH" 2>/dev/null || echo 1)
+
+          # issue #547: forks have no author secrets — every delivery with
+          # security lines went red there forever. Same principle as #454:
+          # gate on the CONFIGURED-CHANNEL fact, not on the repository name
+          # (a name check breaks the legitimate own-repo scenario). Skip is
+          # ONLY the precisely-empty state; exactly one secret set is a
+          # half-configured channel and must fail loudly, not skip.
+          if [ -z "${BOT_WEBHOOK_URL}" ] && [ -z "${TEMPLATE_WEBHOOK_SECRET}" ]; then
+            echo "Skip: канал уведомлений не настроен (BOT_WEBHOOK_URL и TEMPLATE_WEBHOOK_SECRET пусты — форк без секретов автора)."
+            exit 0
+          fi
+          if [ -z "${BOT_WEBHOOK_URL}" ] || [ -z "${TEMPLATE_WEBHOOK_SECRET}" ]; then
+            echo "ERROR: настроен только один из двух секретов канала (BOT_WEBHOOK_URL / TEMPLATE_WEBHOOK_SECRET) — это полунастроенное состояние, не skip." >&2
+            exit 1
+          fi
+          # The bot deduplicates a broadcast by (subscriber, version label). The top CHANGELOG header is "[Unreleased]"
+          # almost always, so the first urgent notice used that key up and every later one was skipped silently.
+          # A label per pushed commit keeps each notice deliverable; a re-run of the same push still deduplicates.
+          VERSION="security ${GITHUB_SHA::12}"
           MESSAGE="🔒 СРОЧНО — обнаружены security-изменения:
           $SECURITY_LINES"
 
@@ -54,8 +84,8 @@ jobs:
             -d "$(jq -n \
               --arg version "$VERSION" \
               --arg changelog "$MESSAGE" \
-              --arg commit_count "1" \
-              '{version: $version, changelog: $changelog, commit_count: ($commit_count | tonumber)}')")
+              --arg commit_count "${PUSH_COMMIT_COUNT:-1}" \
+              '{version: $version, changelog: $changelog, commit_count: (($commit_count | tonumber) | if . < 1 then 1 else . end)}')")
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | sed '$d')

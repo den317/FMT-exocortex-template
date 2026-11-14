@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # kimi-standalone-preflight.sh
-# Hard gate для Kimi standalone-сессий.
-# Проверяет, что сессия открыта через session-guard.sh и не устарела.
+# Hard gate for Kimi standalone sessions.
+# Checks that the session was opened via session-guard.sh and is not stale.
 #
 # Usage: bash scripts/kimi-standalone-preflight.sh
 
@@ -23,12 +23,13 @@ fi
 
 SEM_AGE=0
 if command -v stat >/dev/null 2>&1; then
-  if stat -f %m "$SEM_FILE" >/dev/null 2>&1; then
+  # GNU stat first: its `stat -f` is "file system status" and succeeds (#1010 F14).
+  if stat -c %Y "$SEM_FILE" >/dev/null 2>&1; then
+    # Linux / Git Bash
+    SEM_MTIME=$(stat -c %Y "$SEM_FILE")
+  else
     # macOS
     SEM_MTIME=$(stat -f %m "$SEM_FILE")
-  else
-    # Linux
-    SEM_MTIME=$(stat -c %Y "$SEM_FILE")
   fi
   SEM_AGE=$(($(date +%s) - SEM_MTIME))
 fi

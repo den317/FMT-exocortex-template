@@ -7,7 +7,7 @@
 #   T3: CLAUDE.md with pre-existing conflict markers blocks update (stacking guard)
 #   T4: role install failure surfaces a visible warning (not silently swallowed)
 #   T5: network-independent --check works with a cached manifest
-#   T6: memory file with owner: user survives a hash mismatch (issue #229)
+#   T6: the owner: marker is read correctly but no longer decides a memory update (issues #229/#965)
 #   T7: hot-budget sum over threshold is detectable (issue #228)
 #   T8: build-runtime.sh does not clobber an edited params.yaml (issue #327)
 #   T9: .mcp.json migration preserves a third-party server like ext-figma (issue #335)
@@ -22,9 +22,10 @@
 #   T18: decision-log consumers share one canonical path and define cold-start/migration behavior (issue #351)
 #   T19: orphan detection resolves the template independently of CWD and fails open (issue #353)
 #   T20: index-health skip suppresses size checks but keeps semantic checks (issue #357)
-#   T21: legacy owner:user protocols migrate once with backup; other user files stay protected (issue #354)
+#   T21: legacy owner:user protocols follow the memory policy: untouched ones migrate once with a
+#        backup, edited ones are kept (issues #354/#965/#967)
 #   T22: Quick Close requires a runner card only when the runner and graph exist (issue #356)
-#   T23: wp-sync-bundle prefers folder cards and reads structured open phase statuses
+#   T23: wp-sync-bundle handles canonical cards, phase statuses, relation shapes, titles, and linked worktrees
 #   T24-T27: update safety, bootstrap/path contracts, multiplier opt-out, #384/#387/#388
 #   T28: settings.json merge preview never touches inputs, honors merge rules (WP-7 F71)
 #   T29: author_mode skip classifier verdicts on synthetic template history (WP-7 F71)
@@ -35,6 +36,34 @@
 #   T34: Unicode context caps count characters, not bytes (issue #435)
 #   T35: /extend catalog matches every invoked extension point (issues #436/#508)
 #   T36: extension loader sorts suffixes and preserves no-op/error exit codes (issue #508)
+#   T40: Kimi peer heartbeat stays outside authoritative session admission (WP-484)
+#   T41: sync_workspace_claude_md() accepts a hand-resolved conflict instead of
+#        re-merging it against the stale base forever; a stale pending record
+#        (upstream moved on) is discarded, not silently accepted (issue #846)
+#   T42: memory/*.md stale-repair backs up the workspace copy before
+#        overwriting it, like .claude/rules/* already does (issue #847)
+#   T43: Step 6 (the main apply path) keeps a memory file the pilot edited, backs up and names
+#        a file it replaces because the pilot never changed it (issues #967/#965)
+#   T44: the author_mode "stale" hint runs on exactly the printed paths (a space, quotes,
+#        $(...), backticks and a backslash in them) and two runs keep two copies
+#   T45: the same for the memory policy's command for a kept copy; a refreshed copy on such
+#        paths gets its backup (cold review of #967)
+#   T46: one memory policy for every owner: untouched copies refreshed with a backup (proof by
+#        the version installed last time or by the clone's history), edited or unverifiable
+#        ones kept with a command; shallow clone, failed backup, repeated update, migration,
+#        odd paths, author_mode, the record of installed versions (issues #965/#967)
+#   T47: the record of installed memory versions (.memory-deployed.tsv): a broken-off run and a
+#        copy several releases behind, an unusable record, setup.sh's first record, author_mode
+#        in Step 6 and the repair pass (review of #965/#967)
+#   T48: the record before Step 5 (a run broken off before Step 6), atomic writes of the record and
+#        of memory copies, unreadable or linked record, every file left as it was in the summary
+#        (review-12 of #965/#967)
+#   T49: governance script policy (update-derived-snapshot.py, generate-executor-catalog.py) decides
+#        by content against the template clone's own history, not by the deployed copy's git status;
+#        a kept file never aborts the rest of update.sh (WP-485 Ф17)
+#   T50: copy_platform_file_preserving_user_space() on a .claude/skills/*/SKILL.md path keeps the
+#        pilot's <!-- USER-SPACE --> block through an update while the rest of the file still moves
+#        to the upstream version (issue #1010 F3 fixed the drop; no end-to-end test existed — РП-529 Ф96)
 #
 # Exit: 0 = all PASS, N = N tests failed
 #
@@ -47,6 +76,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE_DIR="$(dirname "$SCRIPT_DIR")"
 TEST_WS="${EDGE_CASE_WORKSPACE:-/tmp/iwe-edge-test-$$}"
+
+# Many cases swap HOME for a fake one. A `pip install --user` PyYAML lives
+# under the real HOME, so find-python3.sh stopped finding it (issue #1343).
+PYTHONUSERBASE="${PYTHONUSERBASE:-$(python3 -m site --user-base 2>/dev/null)}"
+export PYTHONUSERBASE
 
 cleanup() {
     local rc=$?
@@ -119,6 +153,17 @@ with open('$manifest_file', 'w') as f:
     json.dump(manifest, f)
 " 2>/dev/null
     echo "$manifest_file"
+}
+
+# update_sh_functions NAME... — the definitions of the named top-level functions of update.sh, in
+# the given order. A name update.sh does not define prints nothing: a run of the extracted code
+# then fails on its observable result, not on the extraction. One-line functions (py_available)
+# cannot be extracted this way; tests define their own stand-ins.
+update_sh_functions() {
+    local fn
+    for fn in "$@"; do
+        awk -v fn="$fn" '$0 ~ "^" fn "\\(\\) \\{" {copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh"
+    done
 }
 
 # ============================================================
@@ -277,9 +322,11 @@ fi
 rm -f "$CACHE_MANIFEST"
 
 # ============================================================================
-# T6: memory file with owner: user survives a hash mismatch (issue #229)
+# T6: the owner: marker is read correctly, and it no longer decides whether a memory copy is
+# refreshed (issue #229, then #965/#967: an edited owner: user copy survives because it is
+# edited — T46 runs that — and an untouched one is refreshed like any other)
 # ============================================================================
-echo "--- T6: owner:user memory file is not stale-repaired ---"
+echo "--- T6: owner: marker is read, but the memory policy decides (issues #229/#965) ---"
 
 source "$TEMPLATE_DIR/.claude/lib/frontmatter.sh"
 
@@ -302,29 +349,27 @@ horizon: hot
 Pilot's own edit — must never be overwritten by stale-repair.
 HEREDOC
 
-# Same conditional update.sh's repair_pass() / Step 6 propagation use: owner:user guard first.
 if [ "$(get_field "$T6_DEPLOYED" owner)" = "user" ]; then
-    T6_PROTECTED=true
+    pass "T6: get_field detects owner:user (single-quoted)"
 else
-    T6_PROTECTED=false
+    fail "T6: get_field failed to detect owner:user"
 fi
 
-if [ "$T6_PROTECTED" = "true" ]; then
-    pass "T6: get_field detects owner:user (single-quoted) — repair_pass would skip this file"
+# Wiring check: no owner: guard is left at either memory site — the marker used to keep an
+# untouched owner: user file behind forever (#965) and let an edited owner: platform file be
+# replaced (#967) — and both sites go through the one policy helper: Step 6 with the version
+# installed last time, the repair pass without it (nothing was replaced in its run).
+T6_OWNER_GUARDS=$(grep -cE 'get_field "\$[a-z_]*dst" owner' "$TEMPLATE_DIR/update.sh")
+# shellcheck disable=SC2016  # literal update.sh code, nothing is meant to expand
+T6_STEP6_WIRED=$(grep -cF 'elif apply_memory_policy "$f" "$dst" "$(memory_old_hash "$f")"; then' "$TEMPLATE_DIR/update.sh")
+# shellcheck disable=SC2016
+T6_REPAIR_WIRED=$(grep -cF 'elif apply_memory_policy "$fpath" "$mem_dst"; then' "$TEMPLATE_DIR/update.sh")
+# The decision itself never reads the marker; only author_mode's report does (is_user_owned_memory).
+T6_DECISION_READS=$(update_sh_functions apply_memory_policy memory_copy_verdict | grep -cE 'get_field|is_user_owned_memory' || true)
+if [ "$T6_OWNER_GUARDS" -eq 0 ] && [ "$T6_STEP6_WIRED" -eq 1 ] && [ "$T6_REPAIR_WIRED" -eq 1 ] && [ "$T6_DECISION_READS" -eq 0 ]; then
+    pass "T6: no owner: guard decides any more; Step 6 and repair_pass() both call apply_memory_policy"
 else
-    fail "T6: get_field failed to detect owner:user — file would be clobbered"
-fi
-
-# Wiring check: the helper working in isolation doesn't prove update.sh still
-# calls it in the right place. Grep for the actual guard at both call sites
-# (repair_pass() and the Step 6 memory-copy loop) so a future refactor that
-# drops or reorders the check fails this test even though get_field itself
-# is untouched.
-T6_WIRED_COUNT=$(grep -cE 'get_field "\$[a-z_]*dst" owner' "$TEMPLATE_DIR/update.sh")
-if [ "$T6_WIRED_COUNT" -eq 2 ]; then
-    pass "T6: owner:user guard is wired into both repair_pass() and Step 6 propagation"
-else
-    fail "T6: expected owner:user guard at 2 call sites in update.sh, found $T6_WIRED_COUNT"
+    fail "T6: expected no owner: guard and the policy at both memory sites, found guards=$T6_OWNER_GUARDS step6=$T6_STEP6_WIRED repair=$T6_REPAIR_WIRED decision-reads=$T6_DECISION_READS"
 fi
 
 # ============================================================================
@@ -520,10 +565,13 @@ t10_extract_step5_block() {
     ' "$TEMPLATE_DIR/update.sh"
 }
 t10_extract_step6_block() {
+    # issue #541 hvost 2: this block moved inside sync_workspace_claude_md()
+    # (called from both the early no-op path and Step 6), one indent level
+    # deeper (8 -> 12 spaces) than before the refactor.
     awk '
-        /^        WS_USER_SECTION=\$\(sed -n/{found=1}
+        /^            WS_USER_SECTION=\$\(sed -n/{found=1}
         found{print}
-        found && /^        fi$/{exit}
+        found && /^            fi$/{exit}
     ' "$TEMPLATE_DIR/update.sh"
 }
 
@@ -575,6 +623,15 @@ HEREDOC
     else
         fail "T10: Step 5 — expected CLAUDE_BASE_MISSING_FILES to have 1 entry, got ${#CLAUDE_BASE_MISSING_FILES[@]}"
     fi
+    # issue #541 hvost 1 (Evgenii Red Team v0.38.11): this branch used to write
+    # .claude.md.base = NEW_FILE here even though CURRENT_FILE was left stale —
+    # a false ancestry that made an immediate retry's 3-way merge treat the
+    # still-stale file as an intentional pilot edit and silently "succeed".
+    if [ ! -e "$T10_DIR/.claude.md.base" ]; then
+        pass "T10: Step 5 — no false-ancestry base file written while CURRENT_FILE stayed stale (issue #541)"
+    else
+        fail "T10: Step 5 — .claude.md.base was created despite CURRENT_FILE never being reconciled (issue #541 regression)"
+    fi
 
     # Case B (Step 6 shape): pilot's file DOES use USER-SPACE markers — must
     # still merge as before (issue #336's fix must not regress the one case
@@ -594,6 +651,10 @@ HEREDOC
 Upstream replaced this section entirely.
 HEREDOC
 
+    # #1004: the USER-SPACE branch backs the old file up first, through a helper that lives
+    # outside the extracted block.
+    eval "$(awk '$0 == "claude_backup_before_replace() {" {c=1} c {print} c && /^}$/ {exit}' "$TEMPLATE_DIR/update.sh")"
+    WORKSPACE_DIR="$T10_DIR"
     WS_CURRENT="$T10_CURRENT_B" WS_NEW="$T10_NEW_B" WS_BASE="$T10_DIR/ws-base.md" \
         CLAUDE_BASE_MISSING_FILES=()
     source "$T10_STEP6_FILE"
@@ -602,6 +663,36 @@ HEREDOC
         pass "T10: Step 6 — USER-SPACE case still merges upstream + preserves the marked section"
     else
         fail "T10: Step 6 — USER-SPACE merge path regressed (extracted from update.sh)"
+    fi
+
+    # Case C (Step 6, no markers — issue #541 hvost 2): same false-ancestry bug
+    # as Case A above, but for the $WORKSPACE_DIR copy. WS_BASE must not be
+    # created here, and WS_CURRENT must stay untouched, or an immediate retry
+    # would 3-way-merge against a base that already equals upstream and
+    # silently treat the still-stale WS_CURRENT as reconciled.
+    T10_CURRENT_C="$T10_DIR/current-c.md"
+    T10_NEW_C="$T10_DIR/new-c.md"
+    cat > "$T10_CURRENT_C" <<'HEREDOC'
+## 8. Staging
+Полный раздел про staging-канал, без маркеров
+HEREDOC
+    cat > "$T10_NEW_C" <<'HEREDOC'
+## 8. Staging
+Одна строка вместо полного раздела
+HEREDOC
+    WS_CURRENT="$T10_CURRENT_C" WS_NEW="$T10_NEW_C" WS_BASE="$T10_DIR/ws-base-c.md" \
+        CLAUDE_BASE_MISSING_FILES=()
+    source "$T10_STEP6_FILE"
+
+    if grep -q "без маркеров" "$T10_CURRENT_C"; then
+        pass "T10: Step 6 — no-markers case leaves WS_CURRENT untouched (issue #541)"
+    else
+        fail "T10: Step 6 — no-markers case overwrote WS_CURRENT despite no base for a safe merge"
+    fi
+    if [ ! -e "$T10_DIR/ws-base-c.md" ]; then
+        pass "T10: Step 6 — no false-ancestry WS_BASE written while WS_CURRENT stayed stale (issue #541)"
+    else
+        fail "T10: Step 6 — WS_BASE was created despite WS_CURRENT never being reconciled (issue #541 regression)"
     fi
 fi
 
@@ -617,22 +708,44 @@ HOOK_FILE="$TEMPLATE_DIR/.claude/hooks/protocol-artifact-validate.sh"
 # the real checks diverge. Requires DAYPLAN/WORKSPACE/ERRORS to be set by the
 # caller, exactly like the hook itself expects them from its own preamble.
 T11_CHECKS_BLOCK=$(awk '
-/^# --- Ф3 Check 3: формат мультипликатора ---$/{found=1}
-/^# --- Ф3 Check 5:/{found=0}
+/^# --- Phase 3 Check 3: multiplier format ---$/{found=1}
+/^# --- Phase 3 Check 5:/{found=0}
 found' "$HOOK_FILE")
+
+# Check 4 calls resolve_find_python3() (issue #764/#765 fix), defined earlier
+# in the hook outside the Check-3..5 slice above — extract it too, by function
+# boundary, and source it first so the sliced block can call it.
+T11_RESOLVER_BLOCK=$(awk '
+/^resolve_find_python3\(\) \{$/{found=1}
+found{print}
+found && /^}$/{exit}
+' "$HOOK_FILE")
 
 if [ -z "$T11_CHECKS_BLOCK" ]; then
     fail "T11: could not extract Check 3/4 block from protocol-artifact-validate.sh — marker comments moved?"
+elif [ -z "$T11_RESOLVER_BLOCK" ]; then
+    fail "T11: could not extract resolve_find_python3() from protocol-artifact-validate.sh — function moved/renamed?"
 else
+    T11_RESOLVER_FILE="$TEST_WS/t11-resolver.sh"
+    printf '%s\n' "$T11_RESOLVER_BLOCK" > "$T11_RESOLVER_FILE"
+    source "$T11_RESOLVER_FILE"
+
     T11_CHECKS_FILE="$TEST_WS/t11-checks.sh"
     printf '%s\n' "$T11_CHECKS_BLOCK" > "$T11_CHECKS_FILE"
+
+    # resolve_find_python3() is sourced from a temp file above, so its own
+    # self-relative fallback (dirname of its *defining* file) points into
+    # $TEST_WS, not the real template — IWE_SCRIPTS is what makes it resolve
+    # to a real find-python3.sh in these fixtures (issue #764: the fixture
+    # used to place find-python3.sh at $WORKSPACE/scripts/lib/, the exact
+    # path the fixed resolver no longer looks at).
+    export IWE_SCRIPTS="$TEMPLATE_DIR/scripts"
 
     # Case A: default installation (mandatory_daily_wps commented out in the
     # template default), DayPlan uses the real pilot phrasing from issue #328.
     T11_DIR="$TEST_WS/t11-dayplan"
-    mkdir -p "$T11_DIR/memory" "$T11_DIR/current" "$T11_DIR/scripts/lib"
+    mkdir -p "$T11_DIR/memory" "$T11_DIR/current"
     cp "$TEMPLATE_DIR/memory/day-rhythm-config.yaml" "$T11_DIR/memory/day-rhythm-config.yaml"
-    cp "$TEMPLATE_DIR/scripts/lib/find-python3.sh" "$T11_DIR/scripts/lib/find-python3.sh"
     cat > "$T11_DIR/current/DayPlan.md" <<'HEREDOC'
 ## Бюджет
 ~1.25 ч РП всего / 0 ч физической работы. Мультипликатор не считаю.
@@ -653,8 +766,7 @@ HEREDOC
     # section — must still fail. Proves Case A isn't passing because the
     # checks were silently disabled, not because the config was honored.
     T11_DIR_B="$TEST_WS/t11-dayplan-b"
-    mkdir -p "$T11_DIR_B/memory" "$T11_DIR_B/current" "$T11_DIR_B/scripts/lib"
-    cp "$TEMPLATE_DIR/scripts/lib/find-python3.sh" "$T11_DIR_B/scripts/lib/find-python3.sh"
+    mkdir -p "$T11_DIR_B/memory" "$T11_DIR_B/current"
     cat > "$T11_DIR_B/memory/day-rhythm-config.yaml" <<'HEREDOC'
 mandatory_daily_wps:
   - wp: 7
@@ -723,6 +835,10 @@ else
         GOVERNANCE_REPO="governance"
         IWE_MEMORY_SRC="$T12_SRC"
         IWE_DAY_CLOSE_LOG="$T12_ROOT/day-close.log"
+        # T12 checks the copy rules, which are the same code in both modes; the
+        # frozen default publishes them from an isolated worktree instead
+        # (issue #1279, scripts/tests/test_issue_1279_exo_publish.sh).
+        IWE_FROZEN_CANONICAL_PATH=""
     )
     T12_FIRST_RC=0
     env "${T12_ENV[@]}" bash "$T12_SCRIPT" --backup \
@@ -1290,91 +1406,60 @@ else
     fail "T21: $T21_OWNER_FAILURES shared memory file(s) still have the wrong owner"
 fi
 
-T21_WIRED_COUNT=$(grep -cE 'migrate_platform_memory "\$(fpath|f)" "\$(mem_dst|dst)"' "$TEMPLATE_DIR/update.sh")
-if [ "$T21_WIRED_COUNT" -eq 2 ]; then
-    pass "T21: migration is wired into repair-pass and normal propagation"
+# issues #965/#967: the one-time owner:user -> owner:platform migration is no second overwrite
+# path any more. The memory policy decides it like any other file: an untouched legacy copy is
+# replaced (its marker changes with the file), an edited one is kept — so navigation.md with the
+# installation's own addresses survives the update. author_mode keeps its branch (T46, world E).
+T21_SECOND_PATH=$(grep -cE '^(migrate_platform_memory|is_migrated_platform_memory_path)\(\)' "$TEMPLATE_DIR/update.sh")
+if [ "$T21_SECOND_PATH" -eq 0 ]; then
+    pass "T21: the migration has no overwrite path of its own"
 else
-    fail "T21: expected migration at both memory propagation sites, found $T21_WIRED_COUNT"
+    fail "T21: update.sh still defines a separate migration overwrite path ($T21_SECOND_PATH function(s))"
 fi
 
+# Every check ends with "|| exit 1": set -e has no effect inside a subshell that an `if` tests.
 if (
-    eval "$(awk '/^hash_file\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-    eval "$(awk '/^is_author_mode\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-    eval "$(awk '/^is_migrated_platform_memory_path\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-    eval "$(awk '/^migrate_platform_memory\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-
+    set +u
+    eval "$(update_sh_functions hash_file saving_cp_command backup_memory_file_before_overwrite apply_memory_policy \
+        memory_record_size_ok memory_record_put memory_record_get remember_memory_deployed memory_decided_once memory_reason_text \
+        memory_copy_verdict replace_memory_copy)"
     SCRIPT_DIR="$TEMPLATE_DIR"
     WORKSPACE_DIR="$TEST_WS/t21-workspace"
+    MEMORY_BACKUP_RUN=""
+    # shellcheck disable=SC2034  # read by the eval'd update.sh functions
+    MEMORY_DEPLOYED_RECORD="$WORKSPACE_DIR/.memory-deployed.tsv"
     mkdir -p "$WORKSPACE_DIR"
 
+    # The copy an old release installed (owner: user), untouched since: proven by its hash.
     target="$TEST_WS/t21-protocol-open.md"
-    cat > "$target" <<'HEREDOC'
----
-owner: user
----
-Pilot custom protocol content.
-HEREDOC
+    printf -- '---\nowner: user\n---\nLegacy protocol text as an old release shipped it.\n' > "$target"
+    installed_hash=$(hash_file "$target")
+    apply_memory_policy memory/protocol-open.md "$target" "$installed_hash" || exit 1
+    cmp -s "$target" "$TEMPLATE_DIR/memory/protocol-open.md" || exit 1
+    [ "$(get_field "$target" owner)" = "platform" ] || exit 1
+    backup=$(find "$WORKSPACE_DIR/.backups/memory-pre-update" -type f -name protocol-open.md -print -quit)
+    grep -q 'Legacy protocol text as an old release shipped it' "$backup" || exit 1
 
-    migrate_platform_memory memory/protocol-open.md "$target"
-    backup="$WORKSPACE_DIR/.backups/protocol-owner-migration/protocol-open.md"
-    grep -q 'Pilot custom protocol content' "$backup"
-    cmp -s "$target" "$TEMPLATE_DIR/memory/protocol-open.md"
-    backup_hash=$(hash_file "$backup")
-
-    # The deployed copy is now owner:platform, so a repeat must be a no-op and
-    # must not replace the saved user version.
-    if migrate_platform_memory memory/protocol-open.md "$target"; then
+    # The next update finds the copy current: nothing is replaced or backed up again.
+    # shellcheck disable=SC2034  # read by the eval'd update.sh function
+    MEMORY_POLICY_SEEN=""
+    if apply_memory_policy memory/protocol-open.md "$target" "$installed_hash"; then
         exit 1
     fi
-    [ "$backup_hash" = "$(hash_file "$backup")" ]
+    [ "$(find "$WORKSPACE_DIR/.backups" -type f | wc -l | tr -d ' ')" = "1" ] || exit 1
 
-    # A platform-owned source outside the exact migration allowlist must not
-    # weaken the general owner:user protection from issue #229.
-    unrelated="$TEST_WS/t21-unrelated.md"
-    cat > "$unrelated" <<'HEREDOC'
----
-owner: user
----
-Unrelated user content.
-HEREDOC
-    if migrate_platform_memory memory/protocol-dt-integration.md "$unrelated"; then
+    # An edited legacy copy is kept: the installation's addresses must survive.
+    edited="$TEST_WS/t21-navigation.md"
+    printf -- '---\nowner: user\n---\nRepository addresses of this installation.\n' > "$edited"
+    if apply_memory_policy memory/navigation.md "$edited" "$installed_hash"; then
         exit 1
     fi
-    grep -q 'Unrelated user content' "$unrelated"
-
-    # author_mode remains fail-closed even for an allowlisted legacy protocol.
-    printf 'author_mode: true\n' > "$WORKSPACE_DIR/params.yaml"
-    author_target="$TEST_WS/t21-author-protocol.md"
-    cat > "$author_target" <<'HEREDOC'
----
-owner: user
----
-Author unpublished content.
-HEREDOC
-    if migrate_platform_memory memory/protocol-work.md "$author_target"; then
-        exit 1
-    fi
-    grep -q 'Author unpublished content' "$author_target"
-
-    # #384 extends the exact migration to platform-maintained references without
-    # weakening user-owned FPF snapshots and author distinctions.
-    rm -f "$WORKSPACE_DIR/params.yaml"
-    reference_target="$TEST_WS/t21-agent-core.md"
-    cat > "$reference_target" <<'HEREDOC'
----
-owner: user
----
-Legacy platform reference with a pilot note.
-HEREDOC
-    migrate_platform_memory memory/reference/agent-core.md "$reference_target"
-    cmp -s "$reference_target" "$TEMPLATE_DIR/memory/reference/agent-core.md"
-    if migrate_platform_memory memory/fpf-reference.md "$unrelated"; then
-        exit 1
-    fi
-); then
-    pass "T21: migration preserves the user copy, is idempotent, allowlisted and author-safe"
+    grep -q 'Repository addresses of this installation' "$edited" || exit 1
+    [ "$(find "$WORKSPACE_DIR/.backups" -type f | wc -l | tr -d ' ')" = "1" ] || exit 1
+) > /dev/null 2>&1; then
+    pass "T21: an untouched legacy copy migrates with a backup, once; an edited one is kept"
 else
-    fail "T21: platform protocol migration contract failed"
+    fail "T21: legacy owner: user memory did not follow the memory policy"
 fi
 
 # ============================================================
@@ -1445,6 +1530,7 @@ echo "--- T23: wp-sync-bundle uses the canonical folder card and phase statuses 
 
 T23_ROOT="$TEST_WS/t23-root"
 T23_GOV="$T23_ROOT/governance"
+T23_BUNDLE="${WP_SYNC_BUNDLE_UNDER_TEST:-$TEMPLATE_DIR/.claude/scripts/wp-sync-bundle.sh}"
 mkdir -p "$T23_GOV/docs" "$T23_GOV/inbox/WP-777"
 printf '# registry\n' > "$T23_GOV/docs/WP-REGISTRY.md"
 
@@ -1473,7 +1559,7 @@ phases:
 HEREDOC
 
 T23_OUT=$(IWE_WORKSPACE="$T23_ROOT" IWE_GOVERNANCE_REPO=governance \
-    bash "$TEMPLATE_DIR/.claude/scripts/wp-sync-bundle.sh" WP-777 2>&1)
+    bash "$T23_BUNDLE" WP-777 2>&1)
 T23_RC=$?
 if [ "$T23_RC" -eq 0 ] && \
    [[ "$T23_OUT" == *'Файл: `inbox/WP-777/WP-777.md`'* ]] && \
@@ -1499,7 +1585,7 @@ status: in_progress
 HEREDOC
 
 T23_LEGACY_OUT=$(IWE_WORKSPACE="$T23_ROOT" IWE_GOVERNANCE_REPO=governance \
-    bash "$TEMPLATE_DIR/.claude/scripts/wp-sync-bundle.sh" WP-778 2>&1)
+    bash "$T23_BUNDLE" WP-778 2>&1)
 T23_LEGACY_RC=$?
 if [ "$T23_LEGACY_RC" -eq 0 ] && \
    [[ "$T23_LEGACY_OUT" == *'Открытых фаз: 2'* ]] && \
@@ -1519,12 +1605,219 @@ status: done
 HEREDOC
 
 T23_PREFIX_OUT=$(IWE_WORKSPACE="$T23_ROOT" IWE_GOVERNANCE_REPO=governance \
-    bash "$TEMPLATE_DIR/.claude/scripts/wp-sync-bundle.sh" WP-46 2>&1)
+    bash "$T23_BUNDLE" WP-46 2>&1)
 T23_PREFIX_RC=$?
 if [ "$T23_PREFIX_RC" -eq 1 ] && [[ "$T23_PREFIX_OUT" == *'WP-46: файл не найден'* ]]; then
     pass "T23: a shorter WP ID does not resolve a longer numeric prefix"
 else
     fail "T23: numeric-prefix archive lookup regressed (rc=$T23_PREFIX_RC): $T23_PREFIX_OUT"
+fi
+
+T23_GIT_SOURCE="$T23_ROOT/git-source"
+T23_LINKED_WORKSPACE="$T23_ROOT/linked-workspace"
+T23_LINKED_GOV="$T23_LINKED_WORKSPACE/governance"
+mkdir -p "$T23_GIT_SOURCE/docs" "$T23_GIT_SOURCE/inbox/WP-780" \
+    "$T23_GIT_SOURCE/inbox/WP-78" "$T23_GIT_SOURCE/inbox/WP-784" \
+    "$T23_GIT_SOURCE/inbox/WP-785" \
+    "$T23_GIT_SOURCE/inbox/WP-781" "$T23_GIT_SOURCE/inbox/WP-782" \
+    "$T23_GIT_SOURCE/inbox/WP-783" "$T23_LINKED_WORKSPACE"
+cat > "$T23_GIT_SOURCE/docs/WP-REGISTRY.md" <<'HEREDOC'
+| # | Название | Статус |
+|---|---|---|
+| 780 | Inline current | 🔄 in_progress |
+| 78 | Closed prefix | ✅ done |
+| 781 | Legacy related | ⏳ pending |
+| 782 | Titled related | ⏳ pending |
+| 783 | Block related | ⏳ pending |
+| 784 | Boundary current | 🔄 in_progress |
+| 785 | Inline blocker | 🔄 in_progress |
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-78/WP-78.md" <<'HEREDOC'
+---
+wp: 78
+title: Closed prefix relation
+status: done
+spawned: 2026-09-10
+phases: []
+---
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-780/WP-780.md" <<'HEREDOC'
+---
+wp: 780
+title: Inline current title
+status: in_progress
+spawned: 2026-09-10
+# Inline YAML accepts both canonical WP-N and the numeric legacy form used by
+# existing cards. A following top-level comment is not part of this value.
+related: [WP-781, 782, WP-781, WP-780] # WP-799 is not related.
+# WP-799 belongs to this comment, not to related.
+phases: []
+---
+
+No related references in the body.
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-781/WP-781.md" <<'HEREDOC'
+---
+wp: 781
+name: Legacy related name
+title: Ignored title because name has priority
+status: pending
+spawned: 2026-09-10
+phases: []
+---
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-782/WP-782.md" <<'HEREDOC'
+---
+wp: 782
+title: Titled related name
+status: pending
+spawned: 2026-09-10
+phases: []
+---
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-783/WP-783.md" <<'HEREDOC'
+---
+wp: 783
+title: Block related name
+status: in_progress
+spawned: 2026-09-10
+related: # WP-799 is not related; the indented mapping below is the value.
+  # WP-798 is not related either.
+  depends_on: [WP-781 (uses 5 views)]
+  references: [782]
+phases: []
+---
+
+See WP-5 in the body only.
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-784/WP-784.md" <<'HEREDOC'
+---
+wp: 784
+title: Exact relation boundary
+status: in_progress
+spawned: 2026-09-10
+related: [WP-78]
+---
+
+- [ ] Continue WP-780 only.
+HEREDOC
+cat > "$T23_GIT_SOURCE/inbox/WP-785/WP-785.md" <<'HEREDOC'
+---
+wp: 785
+title: Inline blocker current
+status: in_progress
+spawned: 2026-09-10
+blockers: [WP-781]
+phases: []
+---
+
+No related references in the body.
+HEREDOC
+git -C "$T23_GIT_SOURCE" init -q -b main
+git -C "$T23_GIT_SOURCE" config user.email "test@test"
+git -C "$T23_GIT_SOURCE" config user.name "test"
+git -C "$T23_GIT_SOURCE" add docs/WP-REGISTRY.md \
+    inbox/WP-78/WP-78.md inbox/WP-784/WP-784.md inbox/WP-785/WP-785.md \
+    inbox/WP-780/WP-780.md inbox/WP-781/WP-781.md \
+    inbox/WP-782/WP-782.md inbox/WP-783/WP-783.md
+git -C "$T23_GIT_SOURCE" commit -qm "fixture baseline commit"
+git -C "$T23_GIT_SOURCE" worktree add -q -b t23-linked "$T23_LINKED_GOV" main
+
+T23_INLINE_OUT=$(IWE_WORKSPACE="$T23_LINKED_WORKSPACE" IWE_GOVERNANCE_REPO=governance \
+    WP_SYNC_GIT_DAYS=3650 bash "$T23_BUNDLE" WP-780 2>&1)
+T23_INLINE_RC=$?
+T23_INLINE_781=$(printf '%s\n' "$T23_INLINE_OUT" | grep -c '^### WP-781 (related)$' || true)
+T23_INLINE_782=$(printf '%s\n' "$T23_INLINE_OUT" | grep -c '^### WP-782 (related)$' || true)
+T23_INLINE_799=$(printf '%s\n' "$T23_INLINE_OUT" | grep -c '^### WP-799 ' || true)
+if [ "$T23_INLINE_RC" -eq 0 ] && [ -f "$T23_LINKED_GOV/.git" ] && \
+   [ ! -d "$T23_LINKED_GOV/.git" ] && \
+   [ "$T23_INLINE_781" -eq 1 ] && [ "$T23_INLINE_782" -eq 1 ] && \
+   [ "$T23_INLINE_799" -eq 0 ] && \
+   [[ "$T23_INLINE_OUT" == *'- Название: Inline current title'* ]] && \
+   [[ "$T23_INLINE_OUT" == *'- Название: Legacy related name'* ]] && \
+   [[ "$T23_INLINE_OUT" == *'- Название: Titled related name'* ]] && \
+   [[ "$T23_INLINE_OUT" == *'fixture baseline commit'* ]] && \
+   [[ "$T23_INLINE_OUT" != *'_git недоступен_'* ]]; then
+    pass "T23: inline related, title fallback, dedup/self-filter, and linked-worktree history work together"
+else
+    fail "T23: inline related/title/linked-worktree contract regressed (rc=$T23_INLINE_RC): $T23_INLINE_OUT"
+fi
+
+T23_BLOCK_OUT=$(IWE_WORKSPACE="$T23_LINKED_WORKSPACE" IWE_GOVERNANCE_REPO=governance \
+    WP_SYNC_GIT_DAYS=3650 bash "$T23_BUNDLE" WP-783 2>&1)
+T23_BLOCK_RC=$?
+if [ "$T23_BLOCK_RC" -eq 0 ] && \
+   [[ "$T23_BLOCK_OUT" == *'### WP-781 (depends_on)'* ]] && \
+   [[ "$T23_BLOCK_OUT" == *'### WP-782 (references)'* ]] && \
+   [[ "$T23_BLOCK_OUT" == *'### WP-5 (body_ref)'* ]] && \
+   [[ "$T23_BLOCK_OUT" != *'### WP-798 '* ]] && \
+   [[ "$T23_BLOCK_OUT" != *'### WP-799 '* ]]; then
+    pass "T23: block related keeps typed relations"
+else
+    fail "T23: block related relation types regressed (rc=$T23_BLOCK_RC): $T23_BLOCK_OUT"
+fi
+
+T23_BOUNDARY_OUT=$(IWE_WORKSPACE="$T23_LINKED_WORKSPACE" IWE_GOVERNANCE_REPO=governance \
+    bash "$T23_BUNDLE" WP-784 2>&1)
+T23_BOUNDARY_RC=$?
+if [ "$T23_BOUNDARY_RC" -eq 0 ] && \
+   [[ "$T23_BOUNDARY_OUT" == *'### WP-78 (related)'* ]] && \
+   [[ "$T23_BOUNDARY_OUT" == *'- Кол-во: 0'* ]]; then
+    pass "T23: a WP-780 phase reference does not create drift for closed WP-78"
+else
+    fail "T23: relation ID boundary regressed (rc=$T23_BOUNDARY_RC): $T23_BOUNDARY_OUT"
+fi
+
+if grep -q '^extract_blocker_wps()' "$T23_BUNDLE"; then
+    T23_BLOCKER_OUT=$(IWE_WORKSPACE="$T23_LINKED_WORKSPACE" IWE_GOVERNANCE_REPO=governance \
+        bash "$T23_BUNDLE" WP-785 2>&1)
+    T23_BLOCKER_RC=$?
+    if [ "$T23_BLOCKER_RC" -eq 0 ] && \
+       [[ "$T23_BLOCKER_OUT" == *'### WP-781 (body_ref)'* ]]; then
+        pass "T23: runtime variant reads inline blockers"
+    else
+        fail "T23: inline blocker extraction regressed (rc=$T23_BLOCKER_RC): $T23_BLOCKER_OUT"
+    fi
+fi
+git -C "$T23_GIT_SOURCE" worktree remove "$T23_LINKED_GOV" --force >/dev/null 2>&1
+
+T23_NESTED_WORKSPACE="$T23_GIT_SOURCE/nested-workspace"
+T23_NESTED_GOV="$T23_NESTED_WORKSPACE/governance"
+mkdir -p "$T23_NESTED_GOV/docs" "$T23_NESTED_GOV/inbox/WP-790" \
+    "$T23_NESTED_GOV/inbox/WP-791"
+cat > "$T23_NESTED_GOV/docs/WP-REGISTRY.md" <<'HEREDOC'
+| # | Название | Статус |
+|---|---|---|
+| 790 | Nested current | 🔄 in_progress |
+| 791 | Nested related | ⏳ pending |
+HEREDOC
+cat > "$T23_NESTED_GOV/inbox/WP-790/WP-790.md" <<'HEREDOC'
+---
+wp: 790
+title: Nested current
+status: in_progress
+spawned: 2026-09-10
+related: [WP-791]
+phases: []
+---
+HEREDOC
+cat > "$T23_NESTED_GOV/inbox/WP-791/WP-791.md" <<'HEREDOC'
+---
+wp: 791
+title: Nested related
+status: pending
+spawned: 2026-09-10
+phases: []
+---
+HEREDOC
+T23_NESTED_OUT=$(IWE_WORKSPACE="$T23_NESTED_WORKSPACE" IWE_GOVERNANCE_REPO=governance \
+    bash "$T23_BUNDLE" WP-790 2>&1)
+T23_NESTED_RC=$?
+if [ "$T23_NESTED_RC" -eq 0 ] && \
+   [[ "$T23_NESTED_OUT" == *'_git недоступен_'* ]]; then
+    pass "T23: a plain directory nested in another repository is not treated as its Git root"
+else
+    fail "T23: nested non-root Git directory was accepted (rc=$T23_NESTED_RC): $T23_NESTED_OUT"
 fi
 
 # ============================================================
@@ -1566,6 +1859,7 @@ RULES_SAFE_TO_UPDATE="|.claude/rules/example.md|"
 eval "$(awk '/^hash_file\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 eval "$(awk '/^rule_was_safe_to_update\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 eval "$(awk '/^backup_rule_before_overwrite\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
+eval "$(awk '/^reinject_user_section\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 eval "$(awk '/^copy_platform_file_preserving_user_space\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
 cat > "$T24_ROOT/rule-upstream.md" <<'EOF'
 # Platform rule v2
@@ -1634,8 +1928,8 @@ EOF
 HOME="$T25_HOME" bash "$TEMPLATE_DIR/setup/install-iwe-paths.sh" --workspace "$T25_WS" --governance GOV --quiet
 if grep -qF "_IWE_ROOT=\"$T25_WS\"" "$T25_HOME/.zshenv" && \
    ! grep -qF '[ -f "$HOME/.iwe-paths" ]' "$T25_HOME/.zshenv" && \
-   [ "$(grep -c '^export IWE_' "$T25_WS/.iwe-paths")" -eq 6 ]; then
-    pass "T25: legacy HOME source is replaced by the six-variable workspace SoT"
+   [ "$(grep -c '^export IWE_' "$T25_WS/.iwe-paths")" -eq 8 ]; then
+    pass "T25: legacy HOME source is replaced by the eight-variable workspace SoT"
 else
     fail "T25: install-iwe-paths left the legacy source or incomplete workspace env"
 fi
@@ -1654,7 +1948,9 @@ fi
 mkdir -p "$T25_STAND/custom-memory" "$T25_STAND/workspace"
 ln -s "$T25_STAND/custom-memory" "$T25_STAND/workspace/memory"
 eval "$(awk '/^resolve_workspace_memory_dir\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")"
-HOME="$T25_HOME" T25_MEMORY=$(resolve_workspace_memory_dir "$T25_STAND/workspace")
+# Two assignments, not a command prefix: HOME stayed swapped for the rest of
+# the run (issue #1343). Swap it only inside the substitution.
+T25_MEMORY=$(HOME="$T25_HOME"; resolve_workspace_memory_dir "$T25_STAND/workspace")
 T25_CUSTOM_PHYSICAL=$(cd "$T25_STAND/custom-memory" && pwd -P)
 if [ "$T25_MEMORY" = "$T25_CUSTOM_PHYSICAL" ]; then
     pass "T25: physical workspace/memory target wins over a guessed Claude slug"
@@ -1908,10 +2204,13 @@ T31_EXTERNAL="$TEST_WS/t31-external"
 T31_PREFIX_COLLISION="$TEST_WS/t31-ws-other"
 mkdir -p "$T31_WS/.claude/hooks" "$T31_WS/.claude/skills/my-skill" \
          "$T31_WS/.claude/skills/day-open" "$T31_WS/memory" \
+         "$T31_WS/FMT-exocortex-template" \
          "$T31_EXTERNAL/.claude/skills/my-skill" \
          "$T31_PREFIX_COLLISION/.claude/skills/day-open"
 cp "$TEMPLATE_DIR/.claude/hooks/extensions-gate.sh" "$T31_WS/.claude/hooks/"
-printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/update-manifest.json"
+# issue #564: the gate reads the manifest from the template CLONE, never from
+# the workspace root (nothing ever delivered a root copy on real installs).
+printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/FMT-exocortex-template/update-manifest.json"
 touch "$T31_WS/.claude/skills/my-skill/SKILL.md" "$T31_WS/.claude/skills/day-open/SKILL.md" \
       "$T31_WS/memory/protocol-open.md" \
       "$T31_EXTERNAL/.claude/skills/my-skill/SKILL.md" \
@@ -1922,7 +2221,10 @@ ln -s "$T31_WS/.claude/skills/day-open/SKILL.md" "$T31_WS/.claude/skills/my-skil
 ln -s "$T31_EXTERNAL/external-target.md" "$T31_WS/.claude/skills/my-skill/external-link.md"
 ln -s "$T31_WS/.claude/skills/day-open/SKILL.md" "$T31_EXTERNAL/.claude/skills/platform-link.md"
 t31_gate() {
-    printf '{"tool_input": {"file_path": "%s"}}' "$1" | bash "$T31_WS/.claude/hooks/extensions-gate.sh"
+    # env -u: the author's real IWE_TEMPLATE/IWE_SCRIPTS would otherwise let
+    # the resolver chain (#564) find the REAL manifest and pollute fixtures.
+    printf '{"tool_input": {"file_path": "%s"}}' "$1" \
+        | env -u IWE_TEMPLATE -u IWE_SCRIPTS bash "$T31_WS/.claude/hooks/extensions-gate.sh"
 }
 t31_blocked() {
     local out
@@ -1966,13 +2268,13 @@ t31_blocked "$T31_WS/update-manifest.json"                            "manifest 
 t31_blocked "$T31_WS/.claude/skills/my-skill/link.md"                 "symlink into a platform skill is blocked by real path"
 t31_allowed "$T31_WS/.claude/skills/my-skill/external-link.md"        "symlink to external user territory is allowed"
 t31_blocked "$T31_EXTERNAL/.claude/skills/platform-link.md"           "external symlink into platform skill is blocked by real path"
-rm -f "$T31_WS/update-manifest.json"
-t31_blocked_reason "$T31_WS/.claude/skills/my-skill/SKILL.md"         "missing manifest names the real failure" "update-manifest.json отсутствует"
-printf '%s\n' '{broken' > "$T31_WS/update-manifest.json"
+rm -f "$T31_WS/FMT-exocortex-template/update-manifest.json"
+t31_blocked_reason "$T31_WS/.claude/skills/my-skill/SKILL.md"         "missing manifest names the real failure" "не найден ни в одном известном месте шаблона"
+printf '%s\n' '{broken' > "$T31_WS/FMT-exocortex-template/update-manifest.json"
 t31_blocked "$T31_WS/.claude/skills/my-skill/SKILL.md"                "broken manifest fails closed (no allow on tool failure)"
-printf '%s\n' '{"files": []}' > "$T31_WS/update-manifest.json"
+printf '%s\n' '{"files": []}' > "$T31_WS/FMT-exocortex-template/update-manifest.json"
 t31_blocked "$T31_WS/.claude/skills/my-skill/SKILL.md"                "empty manifest .files fails closed"
-printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/update-manifest.json"
+printf '%s\n' '{"files": [{"path": ".claude/skills/day-open/SKILL.md"}]}' > "$T31_WS/FMT-exocortex-template/update-manifest.json"
 t31_allowed "$T31_WS/.claude/skills/my-skill/SKILL.md"                "restoring the manifest restores the allow"
 if grep -Fq '"defaultMode": "default"' "$TEMPLATE_DIR/.claude/settings.json"; then
     pass "T31: template settings.json ships defaultMode=default (not acceptEdits)"
@@ -2408,13 +2710,15 @@ IWE_GOVERNANCE_REPO=""
 print_extra_write_targets
 EOF
 T37_OUT=$(bash "$T37_RUNNER" 2>&1)
-if printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/scripts/install-hooks.sh" && \
-   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/.githooks/pre-commit" && \
-   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/scripts/update-derived-snapshot.py" && \
-   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/legacy-governance/scripts/executor-catalog.yaml" && \
-   printf '%s\n' "$T37_OUT" | grep -Fq "$T37_WS/.iwe-paths" && \
-   printf '%s\n' "$T37_OUT" | grep -Fq '/.zshenv' && \
-   printf '%s\n' "$T37_OUT" | grep -Fq 'local core.hooksPath'; then
+# Here-strings, not `printf | grep -q`: with pipefail, grep -q leaving after an early match makes
+# printf die of SIGPIPE once the preview outgrows the pipe buffer, and the check fails at random.
+if grep -Fq -- "$T37_WS/legacy-governance/scripts/install-hooks.sh" <<<"$T37_OUT" && \
+   grep -Fq -- "$T37_WS/legacy-governance/.githooks/pre-commit" <<<"$T37_OUT" && \
+   grep -Fq -- "$T37_WS/legacy-governance/scripts/update-derived-snapshot.py" <<<"$T37_OUT" && \
+   grep -Fq -- "$T37_WS/legacy-governance/scripts/executor-catalog.yaml" <<<"$T37_OUT" && \
+   grep -Fq -- "$T37_WS/.iwe-paths" <<<"$T37_OUT" && \
+   grep -Fq -- '/.zshenv' <<<"$T37_OUT" && \
+   grep -Fq -- 'local core.hooksPath' <<<"$T37_OUT"; then
     pass "T37: preview resolves legacy config and lists every governance backfill target"
 else
     fail "T37: preview omits or mis-resolves governance backfill targets: $T37_OUT"
@@ -2752,6 +3056,2807 @@ if TEMPLATE_DIR="$T38_SYNC_ROOT/template" WORKSPACE_DIR="$T38_SYNC_ROOT/workspac
     pass "T38g: setup safely substitutes &, | and backslash and preserves merge-base parity"
 else
     fail "T38g: setup corrupted a special-character replacement or its merge base"
+fi
+
+# ============================================================================
+# T39: hash_file() fails loudly with neither shasum nor sha256sum (issue #755)
+# ============================================================================
+echo "--- T39: hash_file() on a system with no hasher at all (issue #755) ---"
+
+# Extracts the real preflight check + hash_file() from update.sh (same
+# awk-by-function-name technique as T24's rule helpers) -- not a re-typed
+# copy, so this breaks the moment the two diverge.
+T39_PREFLIGHT=$(awk '
+/^if ! command -v shasum/{copy=1}
+copy{print}
+copy && /^fi$/{exit}
+' "$TEMPLATE_DIR/update.sh")
+T39_HASH_FILE=$(awk '/^hash_file\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")
+
+if [ -z "$T39_PREFLIGHT" ] || [ -z "$T39_HASH_FILE" ]; then
+    fail "T39: could not extract the hasher preflight or hash_file() from update.sh — code moved?"
+else
+    T39_DIR="$TEST_WS/t39-no-hasher"
+    T39_BIN="$T39_DIR/bin"
+    mkdir -p "$T39_BIN"
+    # A PATH containing only what bash itself needs to run this snippet --
+    # no shasum, no sha256sum, no perl (real /bin already lacks GNU coreutils
+    # sha256sum on macOS; symlinking just the handful of builtins this test
+    # needs keeps the fixture from silently finding a real hasher elsewhere).
+    for tool in bash cut env command printf; do
+        p=$(command -v "$tool" 2>/dev/null) || continue
+        ln -sf "$p" "$T39_BIN/$(basename "$p")"
+    done
+    T39_TARGET="$T39_DIR/some-file.txt"
+    echo "content" > "$T39_TARGET"
+
+    T39_SNIPPET="$T39_DIR/snippet.sh"
+    {
+        echo 'EXIT_RUNTIME=3'
+        printf '%s\n' "$T39_PREFLIGHT"
+        printf '%s\n' "$T39_HASH_FILE"
+        echo 'hash_file "$1"'
+    } > "$T39_SNIPPET"
+
+    T39_STATUS=0
+    T39_OUT=$(env -i PATH="$T39_BIN" HOME="$HOME" bash "$T39_SNIPPET" "$T39_TARGET" 2>&1) || T39_STATUS=$?
+
+    if [ "$T39_STATUS" -eq 3 ] && [ -z "$T39_OUT" ]; then
+        # exit 3 with nothing on stdout is wrong in the OTHER direction: it
+        # would mean the preflight fired but printed nothing to explain why.
+        fail "T39: preflight exited EXIT_RUNTIME but printed no diagnostic"
+    elif [ "$T39_STATUS" -eq 3 ] && printf '%s' "$T39_OUT" | grep -qi "shasum\|sha256sum"; then
+        pass "T39: no hasher on PATH -> loud EXIT_RUNTIME(3) naming the missing tools, not a silent empty hash"
+    else
+        fail "T39: expected EXIT_RUNTIME(3) with a shasum/sha256sum diagnostic, got status=$T39_STATUS: $T39_OUT"
+    fi
+fi
+
+# ============================================================
+# T40: Kimi peer heartbeat is observational, never a session semaphore (WP-484)
+# ============================================================
+echo "--- T40: Kimi peer heartbeat namespace and watchdog consumer (WP-484) ---"
+# T40 asserts the v4 (st_dev + inode) OAuth fence/lineage records. On macOS the
+# adapter writes v5 records (volume UUID + birthtime) instead, so T40 failed
+# only there (issue #1343); pin the adapter's own test switch to the v4 path.
+export IWE_PEER_TEST_FORCE_NOT_MACOS=1
+
+T40_ROOT="$TEST_WS/t40-kimi-peer-heartbeat"
+T40_IWE="$T40_ROOT/iwe"
+T40_HOME="$T40_ROOT/home"
+T40_ADD_DIR="$T40_ROOT/2026-09-12-01-wp484-peer-beacon"
+T40_LOCK_DIR="$T40_ROOT/locks"
+T40_BIN="$T40_ROOT/fake-kimi"
+T40_READY="$T40_ROOT/ready"
+T40_RELEASE="$T40_ROOT/release"
+T40_OAUTH_DIR="$T40_LOCK_DIR/kimi-oauth-refresh.lockdir"
+T40_OAUTH_LINEAGE="$T40_LOCK_DIR/kimi-oauth-refresh.lineage-v4"
+mkdir -p "$T40_HOME" "$T40_ADD_DIR"
+
+cat > "$T40_BIN" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = "--help" ]; then
+    echo "--agent-file Load an agent definition from a Markdown file"
+    exit 0
+fi
+printf '%s\n' "$$" >> "$T40_READY"
+while [ ! -f "$T40_RELEASE" ]; do sleep 0.05; done
+printf '%s\n' '{"role":"assistant","content":"CONSENSUS: beacon probe complete"}'
+EOF
+chmod +x "$T40_BIN"
+export T40_READY T40_RELEASE
+
+if HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+    IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/cutover-unasserted.out" 2>"$T40_ROOT/cutover-unasserted.err"; then
+    T40_CUTOVER_UNASSERTED_RC=0
+else
+    T40_CUTOVER_UNASSERTED_RC=$?
+fi
+HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+    IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" \
+    IWE_OAUTH_CUTOVER_QUIESCED=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/cutover.out" 2>"$T40_ROOT/cutover.err"
+T40_CUTOVER_RC=$?
+T40_FENCE_TARGET=$(readlink "$T40_OAUTH_DIR" 2>/dev/null || true)
+T40_FENCE_PID=$(cat "$T40_OAUTH_DIR/pid" 2>/dev/null || true)
+T40_FENCE_OWNER=$(cat "$T40_OAUTH_DIR/owner" 2>/dev/null || true)
+T40_FENCE_LEASE_ID=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_dev} {s.st_ino}")' "$T40_LOCK_DIR/kimi-oauth-refresh.lease" 2>/dev/null || true)
+HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+    IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" \
+    IWE_OAUTH_CUTOVER_QUIESCED=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/cutover-again.out" 2>"$T40_ROOT/cutover-again.err"
+T40_CUTOVER_AGAIN_RC=$?
+
+HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+    IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" \
+    IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" IWE_PEER_HEARTBEAT_SECONDS=1 \
+    IWE_PEER_TIMEOUT_SECONDS=10 \
+    KIMI_BIN="$T40_BIN" \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_ADD_DIR" \
+    </dev/null >"$T40_ROOT/adapter.out" 2>"$T40_ROOT/adapter.err" &
+T40_ADAPTER_PID=$!
+for _t40_wait in $(seq 1 200); do
+    [ -f "$T40_READY" ] && break
+    sleep 0.05
+done
+
+T40_BEACON="$T40_IWE/.iwe-runtime/peer-heartbeats/kimi-peer-2026-09-12-01-wp484-peer-beacon.heartbeat"
+mkdir -p "$T40_IWE/.iwe-runtime/sessions"
+T40_OPEN_COUNT=$(find "$T40_IWE/.iwe-runtime/sessions" -name '*.open' 2>/dev/null | wc -l | tr -d ' ')
+if [ -f "$T40_READY" ] && [ -f "$T40_BEACON" ] && [ ! -L "$T40_BEACON" ] && \
+   [ "$T40_OPEN_COUNT" = 0 ] && grep -q '^agent: kimi-peer$' "$T40_BEACON" && \
+   grep -q '^wp: WP-484$' "$T40_BEACON"; then
+    pass "T40a: peer adapter writes visibility beacon outside sessions/*.open"
+else
+    fail "T40a: peer beacon entered admission namespace or was not created: $(find "$T40_IWE/.iwe-runtime" -type f 2>/dev/null | tr '\n' ' ')"
+fi
+
+T40_OAUTH_HOLDER=$(cat "$T40_OAUTH_LINEAGE/pid" 2>/dev/null || true)
+T40_OAUTH_OWNER=$(cat "$T40_OAUTH_LINEAGE/owner" 2>/dev/null || true)
+T40_SESSION_OWNER=$(cat "$T40_LOCK_DIR/2026-09-12-01-wp484-peer-beacon.lock/owner.pid" 2>/dev/null || true)
+T40_SESSION_NONCE=${T40_SESSION_OWNER#* }
+T40_OAUTH_LEASE_ID=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_dev} {s.st_ino}")' "$T40_LOCK_DIR/kimi-oauth-refresh.lease" 2>/dev/null || true)
+T40_EXPECTED_OWNER="iwe-oauth-lineage-v4 $T40_OAUTH_LEASE_ID $T40_SESSION_NONCE"
+T40_OAUTH_TARGET=$(readlink "$T40_OAUTH_LINEAGE" 2>/dev/null || true)
+if [ "$T40_CUTOVER_UNASSERTED_RC" -eq 1 ] && \
+   [ "$T40_CUTOVER_RC" -eq 0 ] && [ "$T40_CUTOVER_AGAIN_RC" -eq 0 ] && \
+   [[ "$T40_FENCE_TARGET" =~ ^kimi-oauth-refresh\.fence-v4\.[0-9a-f]{32}$ ]] && \
+   [ "$T40_FENCE_PID" = -1 ] && \
+   [ "$T40_FENCE_OWNER" = "iwe-oauth-fence-v4 $T40_FENCE_LEASE_ID ${T40_FENCE_TARGET##*.}" ] && \
+   [[ "$T40_OAUTH_HOLDER" =~ ^-[0-9]+$ ]] && \
+   kill -0 "$T40_OAUTH_HOLDER" 2>/dev/null && \
+   [ -L "$T40_OAUTH_DIR" ] && \
+   [ -L "$T40_OAUTH_LINEAGE" ] && \
+   [ "$T40_OAUTH_TARGET" = "kimi-oauth-refresh.lineage-v4.$T40_SESSION_NONCE" ] && \
+   [ "${T40_SESSION_OWNER%% *}" = "$T40_ADAPTER_PID" ] && \
+   [[ "$T40_SESSION_NONCE" =~ ^[0-9a-f]{32}$ ]] && \
+   [ "$T40_OAUTH_OWNER" = "$T40_EXPECTED_OWNER" ]; then
+    pass "T40b: explicit idempotent cutover keeps immutable fence while v4 lineage publishes vendor PGID"
+else
+    fail "T40b: v4 cutover/fence/lineage is not exact (cutover=$T40_CUTOVER_UNASSERTED_RC/$T40_CUTOVER_RC/$T40_CUTOVER_AGAIN_RC fence=$T40_FENCE_TARGET/$T40_FENCE_PID/$T40_FENCE_OWNER adapter=$T40_ADAPTER_PID holder=$T40_OAUTH_HOLDER target=$T40_OAUTH_TARGET owner=$T40_OAUTH_OWNER expected=$T40_EXPECTED_OWNER)"
+fi
+
+T40_ID_BEFORE=$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$T40_BEACON" 2>/dev/null)
+T40_SUM_BEFORE=$(head -6 "$T40_BEACON" | cksum 2>/dev/null)
+if HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+   IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" \
+   IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" IWE_PEER_HEARTBEAT_SECONDS=1 \
+   IWE_PEER_TIMEOUT_SECONDS=2 \
+   KIMI_BIN="$T40_BIN" \
+   bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_ADD_DIR" \
+   </dev/null >"$T40_ROOT/duplicate.out" 2>"$T40_ROOT/duplicate.err"; then
+    T40_DUPLICATE_RC=0
+else
+    T40_DUPLICATE_RC=$?
+fi
+T40_ID_AFTER=$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$T40_BEACON" 2>/dev/null)
+T40_SUM_AFTER=$(head -6 "$T40_BEACON" | cksum 2>/dev/null)
+if [ "$T40_DUPLICATE_RC" -eq 5 ] && [ -n "$T40_ID_BEFORE" ] && \
+   [ "$T40_ID_AFTER" = "$T40_ID_BEFORE" ] && [ "$T40_SUM_AFTER" = "$T40_SUM_BEFORE" ]; then
+    pass "T40c: rejected duplicate cannot replace the live owner's beacon"
+else
+    fail "T40c: duplicate mutated the beacon (rc=$T40_DUPLICATE_RC before=$T40_ID_BEFORE/$T40_SUM_BEFORE after=$T40_ID_AFTER/$T40_SUM_AFTER)"
+fi
+
+touch "$T40_RELEASE"
+if wait "$T40_ADAPTER_PID"; then
+    T40_ADAPTER_RC=0
+else
+    T40_ADAPTER_RC=$?
+fi
+if [ "$T40_ADAPTER_RC" -eq 0 ] && [ ! -e "$T40_BEACON" ] && \
+   ! kill -0 "$T40_OAUTH_HOLDER" 2>/dev/null && \
+   [ -L "$T40_OAUTH_DIR" ] && [ "$(readlink "$T40_OAUTH_DIR")" = "$T40_FENCE_TARGET" ] && \
+   [ ! -e "$T40_OAUTH_LINEAGE" ] && [ ! -L "$T40_OAUTH_LINEAGE" ] && \
+   [ ! -e "$T40_IWE/.iwe-runtime/sessions/kimi-peer-2026-09-12-01-wp484-peer-beacon.open" ]; then
+    pass "T40d: normal peer exit reaps runtime lineage, preserves permanent fence, and removes its beacon"
+else
+    fail "T40d: normal peer cleanup leaked vendor group/beacon (rc=$T40_ADAPTER_RC holder=$T40_OAUTH_HOLDER)"
+fi
+
+T40_JOURNAL="$T40_HOME/.iwe/agent-sessions.jsonl"
+for _t40_wait in $(seq 1 100); do
+    [ -s "$T40_JOURNAL" ] && break
+    sleep 0.05
+done
+if python3 - "$T40_JOURNAL" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+record = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert record["agent"] == "kimi"
+assert record["session_id"] == "2026-09-12-01-wp484-peer-beacon"
+datetime.datetime.fromisoformat(record["start_time"].replace("Z", "+00:00"))
+datetime.datetime.fromisoformat(record["end_time"].replace("Z", "+00:00"))
+PY
+then
+    pass "T40e: successful peer call records a timestamped session journal entry"
+else
+    fail "T40e: successful peer call lost its session journal entry"
+fi
+
+# Start eight adapters on one id without a pre-established winner. Exactly one
+# may enter the fake CLI; the kernel lock must reject the other seven.
+T40_RACE_ADD="$T40_ROOT/peer-race-session"
+T40_RACE_READY="$T40_ROOT/race-ready"
+T40_RACE_RELEASE="$T40_ROOT/race-release"
+mkdir -p "$T40_RACE_ADD" "$T40_ROOT/race-results"
+t40_racer() {
+    local index="$1" rc
+    if HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+       IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" \
+       IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" IWE_PEER_HEARTBEAT_SECONDS=1 \
+       IWE_PEER_TIMEOUT_SECONDS=10 T40_READY="$T40_RACE_READY" \
+       T40_RELEASE="$T40_RACE_RELEASE" KIMI_BIN="$T40_BIN" \
+       bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_RACE_ADD" \
+       </dev/null >"$T40_ROOT/race-results/$index.out" 2>"$T40_ROOT/race-results/$index.err"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    printf '%s\n' "$rc" > "$T40_ROOT/race-results/$index.rc"
+}
+T40_RACE_PIDS=""
+for _t40_index in $(seq 1 8); do
+    t40_racer "$_t40_index" &
+    T40_RACE_PIDS="$T40_RACE_PIDS $!"
+done
+for _t40_wait in $(seq 1 100); do
+    T40_RACE_DONE=$(find "$T40_ROOT/race-results" -name '*.rc' | wc -l | tr -d ' ')
+    [ "$T40_RACE_DONE" -ge 7 ] && break
+    sleep 0.05
+done
+touch "$T40_RACE_RELEASE"
+for _t40_pid in $T40_RACE_PIDS; do
+    wait "$_t40_pid" || true
+done
+if [ -f "$T40_RACE_READY" ]; then
+    T40_RACE_ENTERED=$(wc -l < "$T40_RACE_READY" | tr -d ' ')
+else
+    T40_RACE_ENTERED=0
+fi
+T40_RACE_OK=$(grep -l '^0$' "$T40_ROOT"/race-results/*.rc 2>/dev/null | wc -l | tr -d ' ')
+T40_RACE_BUSY=$(grep -l '^5$' "$T40_ROOT"/race-results/*.rc 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T40_RACE_ENTERED" -eq 1 ] && [ "$T40_RACE_OK" -eq 1 ] && \
+   [ "$T40_RACE_BUSY" -eq 7 ]; then
+    pass "T40f: concurrent same-id adapters elect exactly one owner"
+else
+    fail "T40f: peer lock split ownership (entered=$T40_RACE_ENTERED ok=$T40_RACE_OK busy=$T40_RACE_BUSY)"
+fi
+
+# Exercise the adapter with isolated paths while preserving the exact env used
+# by the installed template. These helpers keep every race case below concise.
+T40_ADAPTER_ENV=(
+    env
+    HOME="$T40_HOME"
+    CODEX_SANDBOX=''
+    CODEX_SANDBOX_NETWORK_DISABLED=''
+    IWE_PEER_PLAIN=1
+    IWE_ROOT="$T40_IWE"
+    IWE_PEER_LOCK_DIR="$T40_LOCK_DIR"
+    IWE_PEER_HEARTBEAT_SECONDS=1
+)
+t40_run_peer() {
+    local add_dir="$1" kimi_bin="$2" stdout_file="$3" stderr_file="$4"
+    shift 4
+    "${T40_ADAPTER_ENV[@]}" "$@" KIMI_BIN="$kimi_bin" \
+        bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$add_dir" \
+        </dev/null >"$stdout_file" 2>"$stderr_file"
+}
+t40_launch_peer() {
+    local add_dir="$1" kimi_bin="$2" stdout_file="$3" stderr_file="$4"
+    shift 4
+    exec "${T40_ADAPTER_ENV[@]}" "$@" KIMI_BIN="$kimi_bin" \
+        bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$add_dir" \
+        </dev/null >"$stdout_file" 2>"$stderr_file"
+}
+t40_process_is_non_zombie() {
+    local process_pid="$1" process_state
+    process_state=$(ps -o stat= -p "$process_pid" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$process_state" ]; then
+        [[ "$process_state" != Z* ]]
+    else
+        kill -0 "$process_pid" 2>/dev/null
+    fi
+}
+t40_wait_for_process_exit() {
+    local process_pid="$1" _wait
+    for _wait in $(seq 1 120); do
+        t40_process_is_non_zombie "$process_pid" || return 0
+        sleep 0.05
+    done
+    return 1
+}
+t40_run_recovery() {
+    local add_dir="$1" kimi_bin="$2" stdout_file="$3" stderr_file="$4" _wait
+    shift 4
+    T40_RECOVERY_RC=5
+    for _wait in $(seq 1 80); do
+        if t40_run_peer "$add_dir" "$kimi_bin" "$stdout_file" "$stderr_file" "$@"; then
+            T40_RECOVERY_RC=0
+        else
+            T40_RECOVERY_RC=$?
+        fi
+        [ "$T40_RECOVERY_RC" -eq 5 ] || break
+        sleep 0.05
+    done
+}
+
+# Removing mutable owner metadata must stop the vendor fail-closed while the
+# stable lease remains locked. A duplicate must never enter during that drain.
+T40_UNLINK_ADD="$T40_ROOT/peer-without-wp-label"
+T40_UNLINK_READY="$T40_ROOT/unlink-ready"
+T40_UNLINK_CHILD_PID_FILE="$T40_ROOT/unlink-child.pid"
+T40_UNLINK_BIN="$T40_ROOT/fake-kimi-unlink"
+mkdir -p "$T40_UNLINK_ADD"
+cat > "$T40_UNLINK_BIN" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = "--help" ]; then
+    echo "--agent-file Load an agent definition from a Markdown file"
+    exit 0
+fi
+trap '' TERM
+echo "$$" > "$T40_UNLINK_CHILD_PID_FILE"
+: > "$T40_UNLINK_READY"
+while :; do sleep 0.05; done
+EOF
+chmod +x "$T40_UNLINK_BIN"
+export T40_UNLINK_READY T40_UNLINK_CHILD_PID_FILE
+t40_launch_peer "$T40_UNLINK_ADD" "$T40_UNLINK_BIN" \
+    "$T40_ROOT/unlink.out" "$T40_ROOT/unlink.err" IWE_PEER_TIMEOUT_SECONDS=20 &
+T40_UNLINK_ADAPTER_PID=$!
+for _t40_wait in $(seq 1 200); do
+    [ -s "$T40_UNLINK_CHILD_PID_FILE" ] && break
+    sleep 0.05
+done
+T40_UNLINK_OWNER="$T40_LOCK_DIR/peer-without-wp-label.lock/owner.pid"
+rm -f "$T40_UNLINK_OWNER"
+if t40_run_peer "$T40_UNLINK_ADD" "$T40_UNLINK_BIN" \
+    "$T40_ROOT/unlink-duplicate.out" "$T40_ROOT/unlink-duplicate.err" \
+    IWE_PEER_TIMEOUT_SECONDS=20; then
+    T40_UNLINK_DUPLICATE_RC=0
+else
+    T40_UNLINK_DUPLICATE_RC=$?
+fi
+if wait "$T40_UNLINK_ADAPTER_PID"; then
+    T40_UNLINK_RC=0
+else
+    T40_UNLINK_RC=$?
+fi
+T40_UNLINK_CHILD_PID=$(cat "$T40_UNLINK_CHILD_PID_FILE" 2>/dev/null || true)
+T40_UNLINK_CHILD_LIVE=false
+t40_wait_for_process_exit "$T40_UNLINK_CHILD_PID" || T40_UNLINK_CHILD_LIVE=true
+if [ "$T40_UNLINK_DUPLICATE_RC" -eq 5 ] && [ "$T40_UNLINK_RC" -eq 1 ] && \
+   [ "$T40_UNLINK_CHILD_LIVE" = false ] && \
+   [ -f "$T40_LOCK_DIR/peer-without-wp-label.lock/lease" ] && \
+   grep -q 'exact peer-session lock lost (lock-owner-metadata-missing)' "$T40_ROOT/unlink.err"; then
+    pass "T40g: owner metadata loss keeps stable admission closed and kills vendor fail-closed"
+else
+    fail "T40g: unlink race escaped stable lease (duplicate=$T40_UNLINK_DUPLICATE_RC rc=$T40_UNLINK_RC child_live=$T40_UNLINK_CHILD_LIVE)"
+fi
+
+# SIGKILL of the top adapter must not orphan a TERM-resistant vendor/grandchild.
+# A same-id duplicate is rejected, while a different id waits on global OAuth;
+# sampled live vendor count may never exceed one.
+T40_CRASH_ADD="$T40_ROOT/peer-crash-session"
+T40_CROSS_ADD="$T40_ROOT/peer-crash-cross-session"
+T40_CRASH_READY="$T40_ROOT/crash-ready"
+T40_CROSS_READY="$T40_ROOT/cross-ready"
+T40_CRASH_ENTRIES="$T40_ROOT/crash-entries"
+T40_CRASH_VENDOR_PID_FILE="$T40_ROOT/crash-vendor.pid"
+T40_CRASH_GRANDCHILD_PID_FILE="$T40_ROOT/crash-grandchild.pid"
+T40_CRASH_BIN="$T40_ROOT/fake-kimi-crash"
+mkdir -p "$T40_CRASH_ADD" "$T40_CROSS_ADD"
+cat > "$T40_CRASH_BIN" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = "--help" ]; then
+    echo "--agent-file Load an agent definition from a Markdown file"
+    exit 0
+fi
+if [ "${T40_CROSS_SESSION:-0}" = "1" ]; then
+    printf '%s\n' "$$" >> "$T40_CRASH_ENTRIES"
+    : > "$T40_CROSS_READY"
+    sleep 0.5
+    printf '%s\n' '{"role":"assistant","content":"cross-session complete"}'
+    exit 0
+fi
+if [ "${T40_RECOVERY:-0}" = "1" ]; then
+    printf '%s\n' '{"role":"assistant","content":"SIGKILL recovery complete"}'
+    exit 0
+fi
+trap '' HUP INT TERM
+printf '%s\n' "$$" >> "$T40_CRASH_ENTRIES"
+echo "$$" > "$T40_CRASH_VENDOR_PID_FILE"
+(
+    trap '' HUP INT TERM
+    while :; do sleep 0.05; done
+) &
+grandchild=$!
+echo "$grandchild" > "$T40_CRASH_GRANDCHILD_PID_FILE"
+: > "$T40_CRASH_READY"
+wait "$grandchild"
+EOF
+chmod +x "$T40_CRASH_BIN"
+export T40_CRASH_READY T40_CROSS_READY T40_CRASH_ENTRIES
+export T40_CRASH_VENDOR_PID_FILE T40_CRASH_GRANDCHILD_PID_FILE
+t40_launch_peer "$T40_CRASH_ADD" "$T40_CRASH_BIN" \
+    "$T40_ROOT/crash.out" "$T40_ROOT/crash.err" IWE_PEER_TIMEOUT_SECONDS=30 &
+T40_CRASH_PID=$!
+for _t40_wait in $(seq 1 200); do
+    [ -e "$T40_CRASH_READY" ] && [ -s "$T40_CRASH_GRANDCHILD_PID_FILE" ] && break
+    sleep 0.025
+done
+T40_CRASH_VENDOR_PID=$(cat "$T40_CRASH_VENDOR_PID_FILE" 2>/dev/null || true)
+T40_CRASH_GRANDCHILD_PID=$(cat "$T40_CRASH_GRANDCHILD_PID_FILE" 2>/dev/null || true)
+kill -9 "$T40_CRASH_PID" 2>/dev/null || true
+t40_launch_peer "$T40_CROSS_ADD" "$T40_CRASH_BIN" \
+    "$T40_ROOT/cross.out" "$T40_ROOT/cross.err" \
+    IWE_PEER_TIMEOUT_SECONDS=30 T40_CROSS_SESSION=1 &
+T40_CROSS_PID=$!
+t40_launch_peer "$T40_CRASH_ADD" "$T40_CRASH_BIN" \
+    "$T40_ROOT/crash-duplicate.out" "$T40_ROOT/crash-duplicate.err" \
+    IWE_PEER_TIMEOUT_SECONDS=30 &
+T40_CRASH_DUPLICATE_PID=$!
+T40_CRASH_MAX_LIVE=0
+for _t40_sample in $(seq 1 900); do
+    T40_CRASH_LIVE=0
+    while IFS= read -r _t40_entry_pid; do
+        if [ -n "$_t40_entry_pid" ] && t40_process_is_non_zombie "$_t40_entry_pid"; then
+            T40_CRASH_LIVE=$((T40_CRASH_LIVE + 1))
+        fi
+    done < "$T40_CRASH_ENTRIES"
+    [ "$T40_CRASH_LIVE" -le "$T40_CRASH_MAX_LIVE" ] || T40_CRASH_MAX_LIVE="$T40_CRASH_LIVE"
+    t40_process_is_non_zombie "$T40_CROSS_PID" || break
+    sleep 0.01
+done
+if wait "$T40_CRASH_DUPLICATE_PID"; then
+    T40_CRASH_DUPLICATE_RC=0
+else
+    T40_CRASH_DUPLICATE_RC=$?
+fi
+if wait "$T40_CROSS_PID"; then
+    T40_CROSS_RC=0
+else
+    T40_CROSS_RC=$?
+fi
+wait "$T40_CRASH_PID" 2>/dev/null || true
+T40_CRASH_VENDOR_LIVE=false
+T40_CRASH_GRANDCHILD_LIVE=false
+t40_wait_for_process_exit "$T40_CRASH_VENDOR_PID" || T40_CRASH_VENDOR_LIVE=true
+t40_wait_for_process_exit "$T40_CRASH_GRANDCHILD_PID" || T40_CRASH_GRANDCHILD_LIVE=true
+t40_run_recovery "$T40_CRASH_ADD" "$T40_CRASH_BIN" \
+    "$T40_ROOT/crash-recovery.out" "$T40_ROOT/crash-recovery.err" T40_RECOVERY=1
+T40_CRASH_RECOVERY_RC="$T40_RECOVERY_RC"
+if [ "$T40_CRASH_DUPLICATE_RC" -eq 5 ] && [ "$T40_CROSS_RC" -eq 0 ] && \
+   [ "$(wc -l < "$T40_CRASH_ENTRIES" | tr -d ' ')" -eq 2 ] && \
+   [ "$T40_CRASH_MAX_LIVE" -le 1 ] && [ "$T40_CRASH_VENDOR_LIVE" = false ] && \
+   [ "$T40_CRASH_GRANDCHILD_LIVE" = false ] && [ "$T40_CRASH_RECOVERY_RC" -eq 0 ]; then
+    pass "T40h: top SIGKILL preserves same/cross-id exclusion until resistant lineage is dead"
+else
+    fail "T40h: SIGKILL overlap (same=$T40_CRASH_DUPLICATE_RC cross=$T40_CROSS_RC max_live=$T40_CRASH_MAX_LIVE vendor=$T40_CRASH_VENDOR_LIVE grandchild=$T40_CRASH_GRANDCHILD_LIVE recovery=$T40_CRASH_RECOVERY_RC)"
+fi
+
+# The helper and sentinel deliberately share the same open-file authorities.
+# Killing either one while a resistant vendor+grandchild is live must leave the
+# survivor in charge of same-id and cross-id exclusion through complete drain.
+t40_exercise_authority_sigkill() {
+    local role="$1" label="$2" sequence="$3" cross_sequence="$4"
+    local prefix="${role}-sigkill"
+    local add_dir="$T40_ROOT/peer-${sequence}-${prefix}"
+    local cross_dir="$T40_ROOT/peer-${cross_sequence}-${prefix}-cross"
+    local barrier="$T40_ROOT/${prefix}-pre-owner"
+    local sentinel_barrier="$T40_ROOT/${prefix}-pre-sentinel"
+    local adapter_pid helper_pid sentinel_pid target_pid expected_reason
+    local vendor_pid grandchild_pid session_id session_owner session_nonce
+    local oauth_owner lease_id expected_owner duplicate_pid cross_pid
+    local duplicate_rc cross_rc adapter_rc max_live=0 live entry_pid
+    local vendor_live=false grandchild_live=false recovery_rc
+
+    mkdir -p "$add_dir" "$cross_dir"
+    rm -f "$T40_CRASH_READY" "$T40_CROSS_READY" \
+        "$T40_CRASH_VENDOR_PID_FILE" "$T40_CRASH_GRANDCHILD_PID_FILE"
+    : > "$T40_CRASH_ENTRIES"
+    : > "$sentinel_barrier.release"
+    t40_launch_peer "$add_dir" "$T40_CRASH_BIN" \
+        "$T40_ROOT/${prefix}.out" "$T40_ROOT/${prefix}.err" \
+        IWE_PEER_TIMEOUT_SECONDS=30 \
+        IWE_PEER_TEST_OAUTH_PRE_OWNER_BARRIER="$barrier" \
+        IWE_PEER_TEST_OAUTH_PRE_SENTINEL_BARRIER="$sentinel_barrier" &
+    adapter_pid=$!
+    for _t40_authority_owner_wait in $(seq 1 200); do
+        [ -s "$barrier.ready" ] && break
+        sleep 0.025
+    done
+    helper_pid=$(cat "$barrier.ready" 2>/dev/null || true)
+    touch "$barrier.release"
+    for _t40_authority_ready_wait in $(seq 1 200); do
+        [ -e "$T40_CRASH_READY" ] && [ -s "$T40_CRASH_GRANDCHILD_PID_FILE" ] && break
+        sleep 0.025
+    done
+    vendor_pid=$(cat "$T40_CRASH_VENDOR_PID_FILE" 2>/dev/null || true)
+    grandchild_pid=$(cat "$T40_CRASH_GRANDCHILD_PID_FILE" 2>/dev/null || true)
+    sentinel_pid=$(cat "$sentinel_barrier.sentinel" 2>/dev/null || true)
+    session_id=$(basename "$add_dir")
+    session_owner=$(cat "$T40_LOCK_DIR/$session_id.lock/owner.pid" 2>/dev/null || true)
+    session_nonce=${session_owner#* }
+    oauth_owner=$(cat "$T40_OAUTH_LINEAGE/owner" 2>/dev/null || true)
+    lease_id=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_dev} {s.st_ino}")' "$T40_LOCK_DIR/kimi-oauth-refresh.lease" 2>/dev/null || true)
+    expected_owner="iwe-oauth-lineage-v4 $lease_id $session_nonce"
+    if [ "$role" = helper ]; then
+        target_pid="$helper_pid"
+        expected_reason=lock-helper-process-gone
+    else
+        target_pid="$sentinel_pid"
+        expected_reason=lock-sentinel-process-gone
+    fi
+    kill -9 "$target_pid" 2>/dev/null || true
+
+    t40_launch_peer "$cross_dir" "$T40_CRASH_BIN" \
+        "$T40_ROOT/${prefix}-cross.out" "$T40_ROOT/${prefix}-cross.err" \
+        IWE_PEER_TIMEOUT_SECONDS=30 T40_CROSS_SESSION=1 &
+    cross_pid=$!
+    t40_launch_peer "$add_dir" "$T40_CRASH_BIN" \
+        "$T40_ROOT/${prefix}-duplicate.out" "$T40_ROOT/${prefix}-duplicate.err" \
+        IWE_PEER_TIMEOUT_SECONDS=30 &
+    duplicate_pid=$!
+    for _t40_authority_sample in $(seq 1 900); do
+        live=0
+        while IFS= read -r entry_pid; do
+            if [ -n "$entry_pid" ] && t40_process_is_non_zombie "$entry_pid"; then
+                live=$((live + 1))
+            fi
+        done < "$T40_CRASH_ENTRIES"
+        [ "$live" -le "$max_live" ] || max_live="$live"
+        t40_process_is_non_zombie "$cross_pid" || break
+        sleep 0.01
+    done
+    if wait "$duplicate_pid"; then duplicate_rc=0; else duplicate_rc=$?; fi
+    if wait "$cross_pid"; then cross_rc=0; else cross_rc=$?; fi
+    if wait "$adapter_pid"; then adapter_rc=0; else adapter_rc=$?; fi
+    t40_wait_for_process_exit "$vendor_pid" || vendor_live=true
+    t40_wait_for_process_exit "$grandchild_pid" || grandchild_live=true
+    t40_run_recovery "$add_dir" "$T40_CRASH_BIN" \
+        "$T40_ROOT/${prefix}-recovery.out" "$T40_ROOT/${prefix}-recovery.err" \
+        T40_RECOVERY=1
+    recovery_rc="$T40_RECOVERY_RC"
+
+    if [[ "$sentinel_pid" =~ ^[0-9]+$ ]] && [[ "$helper_pid" =~ ^[0-9]+$ ]] && \
+       [ "${session_owner%% *}" = "$adapter_pid" ] && \
+       [[ "$session_nonce" =~ ^[0-9a-f]{32}$ ]] && \
+       [ "$oauth_owner" = "$expected_owner" ] && \
+       [ "$duplicate_rc" -eq 5 ] && [ "$cross_rc" -eq 0 ] && \
+       [ "$adapter_rc" -eq 1 ] && [ "$max_live" -le 1 ] && \
+       [ "$vendor_live" = false ] && [ "$grandchild_live" = false ] && \
+       [ "$recovery_rc" -eq 0 ] && \
+       ! t40_process_is_non_zombie "$helper_pid" && \
+       ! t40_process_is_non_zombie "$sentinel_pid" && \
+       grep -q "$expected_reason" "$T40_ROOT/${prefix}.err" && \
+       grep -q '^cross-session complete$' "$T40_ROOT/${prefix}-cross.out" && \
+       grep -q '^SIGKILL recovery complete$' "$T40_ROOT/${prefix}-recovery.out"; then
+        pass "T40${label}: SIGKILL $role leaves its survivor authoritative through same/cross drain and reaps both"
+    else
+        fail "T40${label}: $role SIGKILL opened or leaked authority (helper=$helper_pid sentinel=$sentinel_pid duplicate=$duplicate_rc cross=$cross_rc adapter=$adapter_rc max_live=$max_live vendor=$vendor_live grandchild=$grandchild_live recovery=$recovery_rc)"
+    fi
+}
+
+t40_exercise_authority_sigkill helper i 10 11
+t40_exercise_authority_sigkill sentinel j 12 13
+
+# The exec gate transfers legacy liveness from the controller group to the
+# vendor group. Losing both Python owners after admission must still block a
+# cross-id contender until the last resistant vendor descendant is gone.
+T40_DOUBLE_ADD="$T40_ROOT/peer-16-double-controller-fault"
+T40_DOUBLE_CROSS="${T40_DOUBLE_ADD}-cross"
+T40_DOUBLE_OWNER_BARRIER="$T40_ROOT/double-pre-owner"
+T40_DOUBLE_SENTINEL_BARRIER="$T40_ROOT/double-pre-sentinel"
+mkdir -p "$T40_DOUBLE_ADD" "$T40_DOUBLE_CROSS"
+rm -f "$T40_CRASH_READY" "$T40_CROSS_READY" \
+    "$T40_CRASH_VENDOR_PID_FILE" "$T40_CRASH_GRANDCHILD_PID_FILE"
+: > "$T40_CRASH_ENTRIES"
+: > "$T40_DOUBLE_SENTINEL_BARRIER.release"
+t40_launch_peer "$T40_DOUBLE_ADD" "$T40_CRASH_BIN" \
+    "$T40_ROOT/double.out" "$T40_ROOT/double.err" \
+    IWE_PEER_TIMEOUT_SECONDS=30 \
+    IWE_PEER_TEST_OAUTH_PRE_OWNER_BARRIER="$T40_DOUBLE_OWNER_BARRIER" \
+    IWE_PEER_TEST_OAUTH_PRE_SENTINEL_BARRIER="$T40_DOUBLE_SENTINEL_BARRIER" &
+T40_DOUBLE_ADAPTER_PID=$!
+for _t40_double_owner_wait in $(seq 1 200); do
+    [ -s "$T40_DOUBLE_OWNER_BARRIER.ready" ] && break
+    sleep 0.025
+done
+T40_DOUBLE_HELPER_PID=$(cat "$T40_DOUBLE_OWNER_BARRIER.ready" 2>/dev/null || true)
+touch "$T40_DOUBLE_OWNER_BARRIER.release"
+for _t40_double_vendor_wait in $(seq 1 240); do
+    [ -s "$T40_DOUBLE_SENTINEL_BARRIER.sentinel" ] && \
+        [ -s "$T40_CRASH_VENDOR_PID_FILE" ] && \
+        [ -s "$T40_CRASH_GRANDCHILD_PID_FILE" ] && break
+    sleep 0.025
+done
+T40_DOUBLE_SENTINEL_PID=$(cat "$T40_DOUBLE_SENTINEL_BARRIER.sentinel" 2>/dev/null || true)
+T40_DOUBLE_VENDOR_PID=$(cat "$T40_CRASH_VENDOR_PID_FILE" 2>/dev/null || true)
+T40_DOUBLE_GRANDCHILD_PID=$(cat "$T40_CRASH_GRANDCHILD_PID_FILE" 2>/dev/null || true)
+T40_DOUBLE_HOLDER=$(cat "$T40_OAUTH_LINEAGE/pid" 2>/dev/null || true)
+T40_DOUBLE_HOLDER_LIVE=false
+kill -0 "$T40_DOUBLE_HOLDER" 2>/dev/null && T40_DOUBLE_HOLDER_LIVE=true
+kill -9 "$T40_DOUBLE_HELPER_PID" "$T40_DOUBLE_SENTINEL_PID" 2>/dev/null || true
+if t40_run_peer "$T40_DOUBLE_CROSS" "$T40_CRASH_BIN" \
+    "$T40_ROOT/double-blocked.out" "$T40_ROOT/double-blocked.err" \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=1 T40_CROSS_SESSION=1; then
+    T40_DOUBLE_BLOCKED_RC=0
+else
+    T40_DOUBLE_BLOCKED_RC=$?
+fi
+T40_DOUBLE_ENTRIES_LIVE=$(wc -l < "$T40_CRASH_ENTRIES" | tr -d ' ')
+kill -9 "$T40_DOUBLE_HOLDER" 2>/dev/null || true
+wait "$T40_DOUBLE_ADAPTER_PID" 2>/dev/null || true
+t40_wait_for_process_exit "$T40_DOUBLE_VENDOR_PID" || true
+t40_wait_for_process_exit "$T40_DOUBLE_GRANDCHILD_PID" || true
+t40_run_recovery "$T40_DOUBLE_CROSS" "$T40_CRASH_BIN" \
+    "$T40_ROOT/double-recovery.out" "$T40_ROOT/double-recovery.err" \
+    T40_RECOVERY=1 T40_CROSS_SESSION=1
+T40_DOUBLE_RECOVERY_RC="$T40_RECOVERY_RC"
+if [[ "$T40_DOUBLE_HELPER_PID" =~ ^[0-9]+$ ]] && \
+   [[ "$T40_DOUBLE_SENTINEL_PID" =~ ^[0-9]+$ ]] && \
+   [[ "$T40_DOUBLE_HOLDER" =~ ^-[0-9]+$ ]] && \
+   [ "$T40_DOUBLE_HOLDER_LIVE" = true ] && \
+   [ "$T40_DOUBLE_BLOCKED_RC" -eq 1 ] && \
+   [ "$T40_DOUBLE_ENTRIES_LIVE" -eq 1 ] && \
+   [ "$T40_DOUBLE_RECOVERY_RC" -eq 0 ] && \
+   ! t40_process_is_non_zombie "$T40_DOUBLE_VENDOR_PID" && \
+   ! t40_process_is_non_zombie "$T40_DOUBLE_GRANDCHILD_PID"; then
+    pass "T40v: double controller fault remains closed by vendor PGID until group death"
+else
+    fail "T40v: exec gate lost vendor-group visibility (helper=$T40_DOUBLE_HELPER_PID sentinel=$T40_DOUBLE_SENTINEL_PID holder=$T40_DOUBLE_HOLDER blocked=$T40_DOUBLE_BLOCKED_RC entries=$T40_DOUBLE_ENTRIES_LIVE recovery=$T40_DOUBLE_RECOVERY_RC)"
+fi
+
+# A hung capability probe runs before PGID publication. It must not inherit fd9
+# and turn top SIGKILL into a permanent per-session blocker.
+T40_HELP_ADD="$T40_ROOT/peer-hung-help-session"
+T40_HELP_READY="$T40_ROOT/help-ready"
+T40_HELP_PID_FILE="$T40_ROOT/help.pid"
+T40_HELP_BIN="$T40_ROOT/fake-kimi-hung-help"
+mkdir -p "$T40_HELP_ADD"
+cat > "$T40_HELP_BIN" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = "--help" ]; then
+    if [ "${T40_HELP_RECOVERY:-0}" = "1" ]; then
+        echo "--agent-file Load an agent definition from a Markdown file"
+        exit 0
+    fi
+    echo "$$" > "$T40_HELP_PID_FILE"
+    : > "$T40_HELP_READY"
+    trap '' HUP INT TERM
+    while :; do sleep 0.05; done
+fi
+printf '%s\n' '{"role":"assistant","content":"hung-help recovery complete"}'
+EOF
+chmod +x "$T40_HELP_BIN"
+export T40_HELP_READY T40_HELP_PID_FILE
+t40_launch_peer "$T40_HELP_ADD" "$T40_HELP_BIN" \
+    "$T40_ROOT/help.out" "$T40_ROOT/help.err" IWE_PEER_TIMEOUT_SECONDS=30 &
+T40_HELP_ADAPTER_PID=$!
+for _t40_wait in $(seq 1 200); do
+    [ -s "$T40_HELP_PID_FILE" ] && [ -e "$T40_HELP_READY" ] && break
+    sleep 0.025
+done
+T40_HELP_PID=$(cat "$T40_HELP_PID_FILE" 2>/dev/null || true)
+kill -9 "$T40_HELP_ADAPTER_PID" 2>/dev/null || true
+wait "$T40_HELP_ADAPTER_PID" 2>/dev/null || true
+t40_run_recovery "$T40_HELP_ADD" "$T40_HELP_BIN" \
+    "$T40_ROOT/help-recovery.out" "$T40_ROOT/help-recovery.err" T40_HELP_RECOVERY=1
+T40_HELP_RECOVERY_RC="$T40_RECOVERY_RC"
+T40_HELP_ORPHAN_LIVE=false
+t40_process_is_non_zombie "$T40_HELP_PID" && T40_HELP_ORPHAN_LIVE=true
+kill -9 "$T40_HELP_PID" 2>/dev/null || true
+t40_wait_for_process_exit "$T40_HELP_PID" || true
+if [ "$T40_HELP_ORPHAN_LIVE" = true ] && [ "$T40_HELP_RECOVERY_RC" -eq 0 ] && \
+   grep -q '^hung-help recovery complete$' "$T40_ROOT/help-recovery.out"; then
+    pass "T40k: hung --help cannot pin the lifetime FIFO after top SIGKILL"
+else
+    fail "T40k: capability probe pinned admission (probe=$T40_HELP_PID live=$T40_HELP_ORPHAN_LIVE recovery=$T40_HELP_RECOVERY_RC)"
+fi
+
+# Exact helper death in mkdir→pid and pid→owner can leave only an inert private
+# runtime staging directory; the immutable legacy fence remains unchanged.
+t40_unpublished_bridge_sigkill() {
+    local label="$1" sequence="$2" seam="$3" expected_mode="$4"
+    local add_dir="$T40_ROOT/peer-${sequence}-oauth-${label}"
+    local recovery_dir="${add_dir}-cross"
+    local barrier="$T40_ROOT/oauth-${label}"
+    local adapter_pid helper_pid bridge_dir staged_pid owner_absent=true
+    local adapter_rc recovery_rc pid_ok=false
+
+    mkdir -p "$add_dir" "$recovery_dir"
+    rm -f "$T40_CRASH_READY" "$T40_CROSS_READY" \
+        "$T40_CRASH_VENDOR_PID_FILE" "$T40_CRASH_GRANDCHILD_PID_FILE"
+    : > "$T40_CRASH_ENTRIES"
+    t40_launch_peer "$add_dir" "$T40_CRASH_BIN" \
+        "$T40_ROOT/oauth-${label}.out" "$T40_ROOT/oauth-${label}.err" \
+        IWE_PEER_TIMEOUT_SECONDS=30 T40_RECOVERY=1 "$seam=$barrier" &
+    adapter_pid=$!
+    for _t40_oauth_boundary_wait in $(seq 1 200); do
+        [ -s "$barrier.ready" ] && break
+        sleep 0.025
+    done
+    helper_pid=$(cat "$barrier.ready" 2>/dev/null || true)
+    bridge_dir=$(find "$T40_LOCK_DIR" -maxdepth 1 -type d \
+        -name 'kimi-oauth-refresh.lineage-v4.*' -print -quit)
+    staged_pid=$(cat "$bridge_dir/pid" 2>/dev/null || true)
+    [ -e "$bridge_dir/owner" ] && owner_absent=false
+    if { [ "$expected_mode" = absent ] && [ -z "$staged_pid" ]; } || \
+       { [ "$expected_mode" = controller-group ] && \
+         [ "$staged_pid" = "-$helper_pid" ]; }; then
+        pid_ok=true
+    fi
+    kill -9 "$helper_pid" 2>/dev/null || true
+    if wait "$adapter_pid" 2>/dev/null; then adapter_rc=0; else adapter_rc=$?; fi
+    t40_run_recovery "$recovery_dir" "$T40_CRASH_BIN" \
+        "$T40_ROOT/oauth-${label}-recovery.out" \
+        "$T40_ROOT/oauth-${label}-recovery.err" \
+        T40_RECOVERY=1 T40_CROSS_SESSION=1
+    recovery_rc="$T40_RECOVERY_RC"
+
+    if [[ "$helper_pid" =~ ^[0-9]+$ ]] && [ -n "$bridge_dir" ] && \
+       [ -L "$T40_OAUTH_DIR" ] && \
+       [ "$(readlink "$T40_OAUTH_DIR")" = "$T40_FENCE_TARGET" ] && \
+       [ ! -e "$T40_OAUTH_LINEAGE" ] && [ ! -L "$T40_OAUTH_LINEAGE" ] && \
+       [ "$pid_ok" = true ] && [ "$owner_absent" = true ] && \
+       [ "$adapter_rc" -eq 1 ] && [ "$recovery_rc" -eq 0 ] && \
+       [ "$(wc -l < "$T40_CRASH_ENTRIES" | tr -d ' ')" -eq 1 ]; then
+        [ -z "$bridge_dir" ] || rm -rf -- "$bridge_dir"
+        return 0
+    fi
+    T40_UNPUBLISHED_ERROR="label=$label helper=$helper_pid bridge=$bridge_dir pid=$staged_pid expected=$expected_mode owner_absent=$owner_absent adapter=$adapter_rc recovery=$recovery_rc"
+    [ -z "$bridge_dir" ] || rm -rf -- "$bridge_dir"
+    return 1
+}
+
+T40_UNPUBLISHED_ERROR=""
+if t40_unpublished_bridge_sigkill post-mkdir 08 \
+       IWE_PEER_TEST_OAUTH_POST_MKDIR_BARRIER absent && \
+   t40_unpublished_bridge_sigkill pre-owner 14 \
+       IWE_PEER_TEST_OAUTH_PRE_OWNER_BARRIER controller-group; then
+    pass "T40l: helper SIGKILL in both staging windows preserves fence and leaves runtime free"
+else
+    fail "T40l: unpublished v4 staging blocked recovery ($T40_UNPUBLISHED_ERROR)"
+fi
+
+# A pre-v4 contender may pause after its stale-PID decision. Ordinary
+# admission and asserted cutover preserve that real directory. After external
+# quiescence and drain, explicit cutover installs an immutable -1 fence that a
+# rollback implementation observes as permanently live.
+T40_ABA_LOCK_DIR="$T40_ROOT/oauth-aba-locks"
+T40_ABA_CANONICAL="$T40_ABA_LOCK_DIR/kimi-oauth-refresh.lockdir"
+T40_ABA_ADD="$T40_ROOT/peer-15-legacy-aba"
+T40_ABA_CHECKED="$T40_ROOT/legacy-aba.checked"
+T40_ABA_RELEASE="$T40_ROOT/legacy-aba.release"
+T40_ABA_ENTERED="$T40_ROOT/legacy-aba.entered"
+T40_ABA_DONE="$T40_ROOT/legacy-aba.done"
+mkdir -p "$T40_ABA_LOCK_DIR" "$T40_ABA_CANONICAL" "$T40_ABA_ADD"
+printf '%s\n' 99999999 > "$T40_ABA_CANONICAL/pid"
+python3 - "$T40_ABA_CANONICAL" "$T40_ABA_CHECKED" "$T40_ABA_RELEASE" \
+    "$T40_ABA_ENTERED" "$T40_ABA_DONE" <<'PY' &
+import os
+import shutil
+import sys
+import time
+
+canonical, checked, release, entered, done = sys.argv[1:]
+holder = open(os.path.join(canonical, "pid"), encoding="ascii").read().strip()
+try:
+    os.kill(int(holder), 0)
+    raise SystemExit("fixture holder unexpectedly alive")
+except ProcessLookupError:
+    pass
+open(checked, "w", encoding="ascii").close()
+while not os.path.exists(release):
+    time.sleep(0.02)
+shutil.rmtree(canonical)
+os.mkdir(canonical, 0o700)
+with open(os.path.join(canonical, "pid"), "w", encoding="ascii") as stream:
+    stream.write(f"{os.getpid()}\n")
+open(entered, "w", encoding="ascii").close()
+while not os.path.exists(done):
+    time.sleep(0.02)
+shutil.rmtree(canonical)
+PY
+T40_ABA_LEGACY_PID=$!
+for _t40_aba_wait in $(seq 1 200); do
+    [ -e "$T40_ABA_CHECKED" ] && break
+    sleep 0.025
+done
+T40_ABA_INODE=$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$T40_ABA_CANONICAL")
+rm -f "$T40_CRASH_READY"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_ABA_LOCK_DIR" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_ABA_ADD" \
+    </dev/null >"$T40_ROOT/legacy-aba-peer.out" 2>"$T40_ROOT/legacy-aba-peer.err"; then
+    T40_ABA_PEER_RC=0
+else
+    T40_ABA_PEER_RC=$?
+fi
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_ABA_LOCK_DIR" \
+    IWE_OAUTH_CUTOVER_QUIESCED=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/legacy-aba-cutover-blocked.out" \
+    2>"$T40_ROOT/legacy-aba-cutover-blocked.err"; then
+    T40_ABA_CUTOVER_BLOCKED_RC=0
+else
+    T40_ABA_CUTOVER_BLOCKED_RC=$?
+fi
+T40_ABA_INODE_AFTER=$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$T40_ABA_CANONICAL" 2>/dev/null || true)
+touch "$T40_ABA_RELEASE"
+for _t40_aba_enter_wait in $(seq 1 200); do
+    [ -e "$T40_ABA_ENTERED" ] && break
+    sleep 0.025
+done
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_ABA_LOCK_DIR" \
+    IWE_OAUTH_CUTOVER_QUIESCED=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/legacy-aba-live-cutover.out" \
+    2>"$T40_ROOT/legacy-aba-live-cutover.err"; then
+    T40_ABA_LIVE_CUTOVER_RC=0
+else
+    T40_ABA_LIVE_CUTOVER_RC=$?
+fi
+touch "$T40_ABA_DONE"
+wait "$T40_ABA_LEGACY_PID" 2>/dev/null || true
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_ABA_LOCK_DIR" \
+    IWE_OAUTH_CUTOVER_QUIESCED=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/legacy-aba-cutover.out" 2>"$T40_ROOT/legacy-aba-cutover.err"; then
+    T40_ABA_CUTOVER_RC=0
+else
+    T40_ABA_CUTOVER_RC=$?
+fi
+T40_ABA_FENCE_INODE=$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$T40_ABA_CANONICAL" 2>/dev/null || true)
+T40_ABA_ROLLBACK_BLOCKED=false
+if ! mkdir "$T40_ABA_CANONICAL" 2>/dev/null; then
+    T40_ABA_ROLLBACK_HOLDER=$(cat "$T40_ABA_CANONICAL/pid" 2>/dev/null || true)
+    if [ "$T40_ABA_ROLLBACK_HOLDER" = -1 ] && \
+       kill -0 "$T40_ABA_ROLLBACK_HOLDER" 2>/dev/null; then
+        T40_ABA_ROLLBACK_BLOCKED=true
+    fi
+fi
+T40_ABA_FENCE_INODE_AFTER=$(python3 -c 'import os,sys; s=os.lstat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}")' "$T40_ABA_CANONICAL" 2>/dev/null || true)
+if [ "$T40_ABA_PEER_RC" -eq 1 ] && \
+   [ "$T40_ABA_CUTOVER_BLOCKED_RC" -eq 1 ] && \
+   [ "$T40_ABA_INODE_AFTER" = "$T40_ABA_INODE" ] && \
+   [ -e "$T40_ABA_ENTERED" ] && [ "$T40_ABA_LIVE_CUTOVER_RC" -eq 1 ] && \
+   [ "$T40_ABA_CUTOVER_RC" -eq 0 ] && \
+   [ "$T40_ABA_ROLLBACK_BLOCKED" = true ] && \
+   [ "$T40_ABA_FENCE_INODE_AFTER" = "$T40_ABA_FENCE_INODE" ] && \
+   [ ! -e "$T40_CRASH_READY" ]; then
+    pass "T40w: paused legacy ABA blocks admission/cutover; drained cutover fence blocks rollback"
+else
+    fail "T40w: v4 quiescence/fence boundary failed (peer=$T40_ABA_PEER_RC cutover_paused=$T40_ABA_CUTOVER_BLOCKED_RC inode=$T40_ABA_INODE/$T40_ABA_INODE_AFTER live_cutover=$T40_ABA_LIVE_CUTOVER_RC cutover=$T40_ABA_CUTOVER_RC rollback=$T40_ABA_ROLLBACK_BLOCKED fence=$T40_ABA_FENCE_INODE/$T40_ABA_FENCE_INODE_AFTER)"
+fi
+
+# Ordinary calls must never infer quiescence or create the fence themselves.
+T40_NO_FENCE_ROOT="$T40_ROOT/oauth-no-fence-locks"
+T40_NO_FENCE_ADD="$T40_ROOT/peer-17-no-fence"
+mkdir -p "$T40_NO_FENCE_ROOT" "$T40_NO_FENCE_ADD"
+rm -f "$T40_CRASH_READY"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_NO_FENCE_ROOT" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_NO_FENCE_ADD" \
+    </dev/null >"$T40_ROOT/no-fence.out" 2>"$T40_ROOT/no-fence.err"; then
+    T40_NO_FENCE_RC=0
+else
+    T40_NO_FENCE_RC=$?
+fi
+if [ "$T40_NO_FENCE_RC" -eq 1 ] && \
+   [ ! -e "$T40_NO_FENCE_ROOT/kimi-oauth-refresh.lockdir" ] && \
+   [ ! -L "$T40_NO_FENCE_ROOT/kimi-oauth-refresh.lockdir" ] && \
+   [ ! -e "$T40_NO_FENCE_ROOT/kimi-oauth-refresh.lineage-v4" ] && \
+   [ ! -e "$T40_CRASH_READY" ] && \
+   grep -q 'OAuth lineage v4 cutover is required' "$T40_ROOT/no-fence.err"; then
+    pass "T40x: no-fence ordinary call fails closed without auto-cutover or vendor entry"
+else
+    fail "T40x: no-fence state was auto-upgraded/admitted (rc=$T40_NO_FENCE_RC)"
+fi
+
+# Exact OAuth metadata is byte-exact. Invalid bytes must fault rather than be
+# dropped during decoding and turn a tampered payload back into a valid one.
+T40_NONASCII_ROOT="$T40_ROOT/oauth-nonascii-locks"
+T40_NONASCII_ADD="$T40_ROOT/peer-18-oauth-nonascii"
+T40_NONASCII_FENCE="$T40_NONASCII_ROOT/kimi-oauth-refresh.lockdir"
+mkdir -p "$T40_NONASCII_ROOT" "$T40_NONASCII_ADD"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_NONASCII_ROOT" \
+    IWE_OAUTH_CUTOVER_QUIESCED=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" \
+    --cutover-oauth-lineage-v4 \
+    >"$T40_ROOT/nonascii-cutover.out" 2>"$T40_ROOT/nonascii-cutover.err"; then
+    T40_NONASCII_CUTOVER_RC=0
+else
+    T40_NONASCII_CUTOVER_RC=$?
+fi
+T40_NONASCII_OWNER=$(cat "$T40_NONASCII_FENCE/owner" 2>/dev/null || true)
+printf '%s\377\n' "$T40_NONASCII_OWNER" > "$T40_NONASCII_FENCE/owner"
+rm -f "$T40_CRASH_READY"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_NONASCII_ROOT" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_NONASCII_ADD" \
+    </dev/null >"$T40_ROOT/nonascii.out" 2>"$T40_ROOT/nonascii.err"; then
+    T40_NONASCII_RC=0
+else
+    T40_NONASCII_RC=$?
+fi
+if [ "$T40_NONASCII_CUTOVER_RC" -eq 0 ] && \
+   [ "$T40_NONASCII_RC" -eq 1 ] && \
+   [ -L "$T40_NONASCII_FENCE" ] && \
+   [ ! -e "$T40_NONASCII_ROOT/kimi-oauth-refresh.lineage-v4" ] && \
+   [ ! -L "$T40_NONASCII_ROOT/kimi-oauth-refresh.lineage-v4" ] && \
+   [ ! -e "$T40_CRASH_READY" ]; then
+    pass "T40z: non-ASCII OAuth metadata faults closed without vendor entry"
+else
+    fail "T40z: metadata validation accepted invalid ASCII (cutover=$T40_NONASCII_CUTOVER_RC rc=$T40_NONASCII_RC)"
+fi
+
+# Rollout boundary: every historical real directory is untrusted. Live,
+# dead ownerless, raw-nonce and fully staged v2 variants all remain untouched.
+T40_LEGACY_ROOT="$T40_ROOT/oauth-legacy-locks"
+T40_LEGACY_DIR="$T40_LEGACY_ROOT/kimi-oauth-refresh.lockdir"
+T40_LEGACY_ADD="$T40_ROOT/peer-oauth-legacy-session"
+mkdir -p "$T40_LEGACY_ROOT" "$T40_LEGACY_DIR" "$T40_LEGACY_ADD"
+( sleep 5 ) &
+T40_LEGACY_HOLDER_PID=$!
+printf '%s\n' "$T40_LEGACY_HOLDER_PID" > "$T40_LEGACY_DIR/pid"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_LEGACY_ROOT" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_LEGACY_ADD" \
+    </dev/null >"$T40_ROOT/legacy-live.out" 2>"$T40_ROOT/legacy-live.err"; then
+    T40_LEGACY_LIVE_RC=0
+else
+    T40_LEGACY_LIVE_RC=$?
+fi
+T40_LEGACY_PID_AFTER=$(cat "$T40_LEGACY_DIR/pid" 2>/dev/null || true)
+if [ "$T40_LEGACY_LIVE_RC" -eq 1 ] && \
+   [ "$T40_LEGACY_PID_AFTER" = "$T40_LEGACY_HOLDER_PID" ]; then
+    pass "T40m: live pid-only scheduler remains untouched before explicit cutover"
+else
+    fail "T40m: live legacy OAuth holder was altered (rc=$T40_LEGACY_LIVE_RC expected=$T40_LEGACY_HOLDER_PID actual=$T40_LEGACY_PID_AFTER)"
+fi
+kill "$T40_LEGACY_HOLDER_PID" 2>/dev/null || true
+wait "$T40_LEGACY_HOLDER_PID" 2>/dev/null || true
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_LEGACY_ROOT" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_LEGACY_ADD" \
+    </dev/null >"$T40_ROOT/legacy-dead.out" 2>"$T40_ROOT/legacy-dead.err"; then
+    T40_LEGACY_DEAD_RC=0
+else
+    T40_LEGACY_DEAD_RC=$?
+fi
+T40_RAW_NONCE=0123456789abcdef0123456789abcdef
+printf '%s\n' "$T40_RAW_NONCE" > "$T40_LEGACY_DIR/owner"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_LEGACY_ROOT" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_LEGACY_ADD" \
+    </dev/null >"$T40_ROOT/raw-dead.out" 2>"$T40_ROOT/raw-dead.err"; then
+    T40_RAW_DEAD_RC=0
+else
+    T40_RAW_DEAD_RC=$?
+fi
+if [ "$T40_LEGACY_DEAD_RC" -eq 1 ] && [ "$T40_RAW_DEAD_RC" -eq 1 ] && \
+   [ -d "$T40_LEGACY_DIR" ] && \
+   [ "$(cat "$T40_LEGACY_DIR/pid" 2>/dev/null || true)" = "$T40_LEGACY_HOLDER_PID" ] && \
+   [ "$(cat "$T40_LEGACY_DIR/owner" 2>/dev/null || true)" = "$T40_RAW_NONCE" ]; then
+    pass "T40n: dead ownerless/raw legacy directories remain fail-closed"
+else
+    fail "T40n: dead legacy/raw directory was altered (legacy=$T40_LEGACY_DEAD_RC raw=$T40_RAW_DEAD_RC)"
+fi
+
+rm -rf "$T40_LEGACY_DIR"
+mkdir -p "$T40_LEGACY_DIR"
+T40_SHARED_LEASE_ID=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_dev} {s.st_ino}")' "$T40_LEGACY_ROOT/kimi-oauth-refresh.lease")
+T40_VERSIONED_NONCE=fedcba9876543210fedcba9876543210
+printf '%s\n' 99999999 > "$T40_LEGACY_DIR/pid"
+printf 'iwe-oauth-sentinel-v2 %s %s\n' "$T40_SHARED_LEASE_ID" "$T40_VERSIONED_NONCE" > "$T40_LEGACY_DIR/owner"
+if "${T40_ADAPTER_ENV[@]}" IWE_PEER_LOCK_DIR="$T40_LEGACY_ROOT" \
+    KIMI_BIN="$T40_CRASH_BIN" T40_RECOVERY=1 \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=1 \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_LEGACY_ADD" \
+    </dev/null >"$T40_ROOT/versioned-recovery.out" 2>"$T40_ROOT/versioned-recovery.err"; then
+    T40_VERSIONED_RECOVERY_RC=0
+else
+    T40_VERSIONED_RECOVERY_RC=$?
+fi
+if [ "$T40_VERSIONED_RECOVERY_RC" -eq 1 ] && \
+   [ -d "$T40_LEGACY_DIR" ] && [ ! -L "$T40_LEGACY_DIR" ] && \
+   [ "$(cat "$T40_LEGACY_DIR/pid")" = 99999999 ] && \
+   [ "$(cat "$T40_LEGACY_DIR/owner")" = "iwe-oauth-sentinel-v2 $T40_SHARED_LEASE_ID $T40_VERSIONED_NONCE" ]; then
+    pass "T40o: valid v2 real directory stays fail-closed at the cutover boundary"
+else
+    fail "T40o: v2 real directory was removed (rc=$T40_VERSIONED_RECOVERY_RC)"
+fi
+
+# Only the separate new-only runtime namespace supports automatic recovery.
+T40_V4_MISSING_NONCE=0123456789abcdefabcdef0123456789
+T40_V4_MISSING_TARGET="kimi-oauth-refresh.lineage-v4.$T40_V4_MISSING_NONCE"
+ln -s "$T40_V4_MISSING_TARGET" "$T40_OAUTH_LINEAGE"
+if t40_run_peer "$T40_LEGACY_ADD" "$T40_CRASH_BIN" \
+    "$T40_ROOT/v4-missing-recovery.out" "$T40_ROOT/v4-missing-recovery.err" \
+    IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS=2 T40_RECOVERY=1; then
+    T40_V4_MISSING_RC=0
+else
+    T40_V4_MISSING_RC=$?
+fi
+if [ "$T40_V4_MISSING_RC" -eq 0 ] && \
+   [ ! -e "$T40_OAUTH_LINEAGE" ] && [ ! -L "$T40_OAUTH_LINEAGE" ] && \
+   [ -L "$T40_OAUTH_DIR" ] && \
+   [ "$(readlink "$T40_OAUTH_DIR")" = "$T40_FENCE_TARGET" ] && \
+   grep -q '^SIGKILL recovery complete$' "$T40_ROOT/v4-missing-recovery.out"; then
+    pass "T40y: missing-target v4 runtime recovers without changing permanent fence"
+else
+    fail "T40y: v4 runtime recovery failed (rc=$T40_V4_MISSING_RC runtime=$(test -L "$T40_OAUTH_LINEAGE" -o -e "$T40_OAUTH_LINEAGE" && echo present || echo absent) fence=$(readlink "$T40_OAUTH_DIR" 2>/dev/null || true))"
+fi
+
+# TERM must terminate the adapter after cleanup; the old multi-signal cleanup
+# handler returned to normal execution and could print a response after giving
+# up its lock. Release the fake CLI only to let Bash deliver its deferred trap.
+T40_TERM_ADD="$T40_ROOT/peer-term-session"
+T40_TERM_READY="$T40_ROOT/term-ready"
+T40_TERM_RELEASE="$T40_ROOT/term-release"
+T40_TERM_BEACON="$T40_IWE/.iwe-runtime/peer-heartbeats/kimi-peer-peer-term-session.heartbeat"
+mkdir -p "$T40_TERM_ADD"
+HOME="$T40_HOME" CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' \
+    IWE_PEER_PLAIN=1 IWE_ROOT="$T40_IWE" \
+    IWE_PEER_LOCK_DIR="$T40_LOCK_DIR" IWE_PEER_HEARTBEAT_SECONDS=1 \
+    IWE_PEER_TIMEOUT_SECONDS=10 T40_READY="$T40_TERM_READY" \
+    T40_RELEASE="$T40_TERM_RELEASE" KIMI_BIN="$T40_BIN" \
+    bash "$TEMPLATE_DIR/scripts/kimi-peer-adapter.sh" --add-dir "$T40_TERM_ADD" \
+    </dev/null >"$T40_ROOT/term.out" 2>"$T40_ROOT/term.err" &
+T40_TERM_PID=$!
+for _t40_wait in $(seq 1 200); do
+    [ -s "$T40_TERM_READY" ] && [ -f "$T40_TERM_BEACON" ] && break
+    sleep 0.05
+done
+kill -TERM "$T40_TERM_PID" 2>/dev/null || true
+touch "$T40_TERM_RELEASE"
+if wait "$T40_TERM_PID"; then
+    T40_TERM_RC=0
+else
+    T40_TERM_RC=$?
+fi
+if [ "$T40_TERM_RC" -eq 143 ] && [ ! -s "$T40_ROOT/term.out" ] && \
+   [ ! -e "$T40_TERM_BEACON" ]; then
+    pass "T40p: TERM exits after exact cleanup and cannot continue the peer call"
+else
+    fail "T40p: TERM did not stop the adapter (rc=$T40_TERM_RC output=$(wc -c < "$T40_ROOT/term.out" | tr -d ' '))"
+fi
+
+mkdir -p "$T40_IWE/.iwe-runtime/peer-heartbeats"
+cat > "$T40_BEACON" <<'EOF'
+opened_at: 2020-01-01T00:00:00Z
+wp: WP-7
+task: bounded consumer probe
+agent: kimi-peer
+heartbeat_at: 2020-01-01T00:00:00Z
+EOF
+T40_WATCHDOG_OUT=$(IWE_ROOT="$T40_IWE" SILENCE_THRESHOLD_S=1 \
+    bash -c 'source "$1"; notify_pilot(){ printf "%s|%s\n" "$1" "$2"; }; scan_once' \
+    t40 "$TEMPLATE_DIR/scripts/kimi-session-watchdog.sh" 2>&1)
+T40_WATCHDOG_RC=$?
+if [ "$T40_WATCHDOG_RC" -eq 0 ] && [[ "$T40_WATCHDOG_OUT" == *"$T40_BEACON|"* ]]; then
+    pass "T40q: watchdog consumes the separate peer-heartbeats namespace"
+else
+    fail "T40q: watchdog ignored the peer heartbeat (rc=$T40_WATCHDOG_RC out=$T40_WATCHDOG_OUT)"
+fi
+
+T40_FRESH_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+cat > "$T40_BEACON" <<EOF
+opened_at: $T40_FRESH_NOW
+wp: WP-7
+task: fresh consumer probe
+agent: kimi-peer
+heartbeat_at: $T40_FRESH_NOW
+EOF
+T40_FRESH_OUT=$(IWE_ROOT="$T40_IWE" SILENCE_THRESHOLD_S=300 \
+    bash -c 'source "$1"; notify_pilot(){ printf "%s|%s\n" "$1" "$2"; }; scan_once' \
+    t40 "$TEMPLATE_DIR/scripts/kimi-session-watchdog.sh" 2>&1)
+if [ -z "$T40_FRESH_OUT" ]; then
+    pass "T40r: watchdog does not alert on a fresh peer heartbeat"
+else
+    fail "T40r: watchdog falsely reported a fresh heartbeat: $T40_FRESH_OUT"
+fi
+
+if IWE_ROOT="$T40_IWE" CHECK_INTERVAL_S=0 \
+   bash -c 'source "$1"' t40 "$TEMPLATE_DIR/scripts/kimi-session-watchdog.sh" \
+   >"$T40_ROOT/invalid-interval.out" 2>&1; then
+    T40_BAD_INTERVAL_RC=0
+else
+    T40_BAD_INTERVAL_RC=$?
+fi
+if IWE_ROOT="$T40_IWE" SILENCE_THRESHOLD_S=not-a-number \
+   bash -c 'source "$1"' t40 "$TEMPLATE_DIR/scripts/kimi-session-watchdog.sh" \
+   >"$T40_ROOT/invalid-threshold.out" 2>&1; then
+    T40_BAD_THRESHOLD_RC=0
+else
+    T40_BAD_THRESHOLD_RC=$?
+fi
+if [ "$T40_BAD_INTERVAL_RC" -ne 0 ] && [ "$T40_BAD_THRESHOLD_RC" -ne 0 ] && \
+   grep -q 'positive integer' "$T40_ROOT/invalid-interval.out" && \
+   grep -q 'positive integer' "$T40_ROOT/invalid-threshold.out"; then
+    pass "T40s: watchdog rejects zero and non-numeric timing controls"
+else
+    fail "T40s: watchdog accepted an unsafe timing value (interval=$T40_BAD_INTERVAL_RC threshold=$T40_BAD_THRESHOLD_RC)"
+fi
+
+T40_OSA_DIR="$T40_ROOT/fake-osa-bin"
+T40_OSA_CAPTURE="$T40_ROOT/osascript-args.json"
+mkdir -p "$T40_OSA_DIR"
+cat > "$T40_OSA_DIR/osascript" <<'EOF'
+#!/bin/bash
+python3 - "$T40_OSA_CAPTURE" "$@" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]), encoding="utf-8")
+PY
+EOF
+chmod +x "$T40_OSA_DIR/osascript"
+export T40_OSA_CAPTURE
+if ! PATH="$T40_OSA_DIR:$PATH" command -v osascript >/dev/null 2>&1; then
+    fail "T40t: fake osascript is not discoverable"
+fi
+cat > "$T40_BEACON" <<'EOF'
+opened_at: 2020-01-01T00:00:00Z
+wp: WP-7
+task: probe"; display dialog "PWN
+agent: kimi-peer
+heartbeat_at: 2020-01-01T00:00:00Z
+EOF
+PATH="$T40_OSA_DIR:$PATH" IWE_ROOT="$T40_IWE" SILENCE_THRESHOLD_S=1 \
+    bash -c 'source "$1"; notify_pilot "$2" 999' \
+    t40 "$TEMPLATE_DIR/scripts/kimi-session-watchdog.sh" "$T40_BEACON"
+if python3 - "$T40_OSA_CAPTURE" <<'PY'
+import json
+import pathlib
+import sys
+
+args = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert len(args) == 2 and args[0] == "-e"
+program = args[1]
+assert 'subtitle "probe\\"; display dialog \\"PWN"' in program
+assert 'subtitle "probe"; display dialog "PWN"' not in program
+PY
+then
+    pass "T40t: watchdog escapes peer labels before AppleScript interpolation"
+else
+    fail "T40t: watchdog exposed an unescaped peer label to AppleScript"
+fi
+
+T40_PYTHON3=$("$TEMPLATE_DIR/scripts/lib/find-python3.sh" 2>/dev/null || true)
+if [ -n "$T40_PYTHON3" ]; then
+    T40_LANG_RESULT=$(printf '%s\n' 'This complete response is deliberately written only in English prose.' | \
+        "$T40_PYTHON3" "$TEMPLATE_DIR/scripts/lib/language-check.py" 2>/dev/null || true)
+else
+    T40_LANG_RESULT=""
+fi
+if [ -n "$T40_PYTHON3" ] && "$T40_PYTHON3" - "$T40_LANG_RESULT" <<'PY'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+assert result["alert"] is True
+PY
+then
+    pass "T40u: template delivers the peer language-check dependency"
+else
+    fail "T40u: peer language-check dependency is missing or inactive"
+fi
+unset IWE_PEER_TEST_FORCE_NOT_MACOS
+
+# ============================================================================
+# T41: sync_workspace_claude_md() accepts a hand-resolved conflict instead of
+# re-merging it against the stale base forever; a stale pending record
+# (upstream moved on since) is discarded, not silently accepted (issue #846)
+# ============================================================================
+echo "--- T41: workspace CLAUDE.md conflict-pending sidecar (issue #846) ---"
+
+T41_FN_BLOCK=$(awk '/^sync_workspace_claude_md\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+if [ -z "$T41_FN_BLOCK" ]; then
+    fail "T41: could not extract sync_workspace_claude_md() from update.sh — signature moved?"
+else
+    T41_DIR="$TEST_WS/t41-claude-conflict"
+    mkdir -p "$T41_DIR"
+    T41_FN_FILE="$T41_DIR/fn.sh"
+    printf '%s\n' "$T41_FN_BLOCK" > "$T41_FN_FILE"
+
+    # Stubs for the function's two dependencies — this test targets the
+    # merge/conflict/pending logic, not placeholder substitution or the
+    # (unrelated) silent-loss heuristic.
+    substitute_claude_placeholders() { cp "$1" "$2"; }
+    detect_claude_silent_loss() { echo 0; }
+    # shellcheck source=/dev/null
+    source "$T41_FN_FILE"
+
+    T41_SCRIPT_DIR="$T41_DIR/script"
+    T41_WORKSPACE_DIR="$T41_DIR/workspace"
+    mkdir -p "$T41_SCRIPT_DIR" "$T41_WORKSPACE_DIR" "$T41_DIR/tmp"
+
+    # base + pilot's copy + upstream's next edit disagree on the same line —
+    # a real, unavoidable 3-way conflict.
+    printf 'line one\nORIGINAL\nline three\n' > "$T41_WORKSPACE_DIR/.claude.md.base"
+    printf 'line one\nPILOT-EDIT\nline three\n' > "$T41_WORKSPACE_DIR/CLAUDE.md"
+    printf 'line one\nUPSTREAM-EDIT\nline three\n' > "$T41_SCRIPT_DIR/CLAUDE.md"
+
+    SCRIPT_DIR="$T41_SCRIPT_DIR" WORKSPACE_DIR="$T41_WORKSPACE_DIR" TMPDIR_UPDATE="$T41_DIR/tmp"
+    CLAUDE_CONFLICT_DETECTED=false; CLAUDE_CONFLICT_FILES=(); CLAUDE_SILENT_LOSS_FILES=(); CLAUDE_CONFLICTS=0
+    sync_workspace_claude_md
+
+    if grep -q '^<<<<<<<' "$T41_WORKSPACE_DIR/CLAUDE.md" \
+        && [ -f "$T41_WORKSPACE_DIR/.claude.md.conflict-pending" ] \
+        && grep -q 'UPSTREAM-EDIT' "$T41_WORKSPACE_DIR/.claude.md.conflict-pending"; then
+        pass "T41: first run — real conflict surfaced and recorded as pending"
+    else
+        fail "T41: first run did not produce the expected conflict/pending state"
+    fi
+
+    # The pilot resolves it by hand: keeps their own edit, removes markers.
+    # Upstream CLAUDE.md is unchanged since the conflict.
+    printf 'line one\nPILOT-EDIT\nline three\n' > "$T41_WORKSPACE_DIR/CLAUDE.md"
+    sync_workspace_claude_md
+
+    if ! grep -q '^<<<<<<<' "$T41_WORKSPACE_DIR/CLAUDE.md" \
+        && grep -q 'PILOT-EDIT' "$T41_WORKSPACE_DIR/CLAUDE.md" \
+        && grep -q 'UPSTREAM-EDIT' "$T41_WORKSPACE_DIR/.claude.md.base" \
+        && [ ! -f "$T41_WORKSPACE_DIR/.claude.md.conflict-pending" ]; then
+        pass "T41: hand-resolved file accepted — base advanced without re-merging, file untouched"
+    else
+        fail "T41: hand-resolved file was re-merged instead of accepted"
+    fi
+
+    if compgen -G "$T41_WORKSPACE_DIR/.claude.md.base.bak-*" > /dev/null; then
+        pass "T41: old base backed up before being advanced"
+    else
+        fail "T41: old base was overwritten with no backup"
+    fi
+
+    # --- Scenario 2: upstream moves on again before the pilot resolves. The
+    # stale pending record (recorded against the now-superseded upstream
+    # edit) must not be blindly trusted — a fresh merge decides instead. ---
+    T41_SCRIPT_DIR2="$T41_DIR/script2"
+    T41_WORKSPACE_DIR2="$T41_DIR/workspace2"
+    mkdir -p "$T41_SCRIPT_DIR2" "$T41_WORKSPACE_DIR2" "$T41_DIR/tmp2"
+    printf 'line one\nORIGINAL\nline three\n' > "$T41_WORKSPACE_DIR2/.claude.md.base"
+    printf 'line one\nPILOT-EDIT\nline three\n' > "$T41_WORKSPACE_DIR2/CLAUDE.md"
+    printf 'line one\nUPSTREAM-EDIT\nline three\n' > "$T41_SCRIPT_DIR2/CLAUDE.md"
+
+    SCRIPT_DIR="$T41_SCRIPT_DIR2" WORKSPACE_DIR="$T41_WORKSPACE_DIR2" TMPDIR_UPDATE="$T41_DIR/tmp2"
+    CLAUDE_CONFLICT_DETECTED=false; CLAUDE_CONFLICT_FILES=(); CLAUDE_SILENT_LOSS_FILES=(); CLAUDE_CONFLICTS=0
+    sync_workspace_claude_md   # first conflict — records pending = UPSTREAM-EDIT
+
+    printf 'line one\nPILOT-EDIT\nline three\n' > "$T41_WORKSPACE_DIR2/CLAUDE.md"   # pilot resolves by hand
+    printf 'line one\nUPSTREAM-EDIT-V2\nline three\n' > "$T41_SCRIPT_DIR2/CLAUDE.md"  # but upstream moved on
+
+    T41_OUT2=$(SCRIPT_DIR="$T41_SCRIPT_DIR2" WORKSPACE_DIR="$T41_WORKSPACE_DIR2" TMPDIR_UPDATE="$T41_DIR/tmp2" \
+        sync_workspace_claude_md)
+
+    if ! printf '%s' "$T41_OUT2" | grep -q "принят как разрешённый вручную" \
+        && grep -q '^<<<<<<<' "$T41_WORKSPACE_DIR2/CLAUDE.md"; then
+        pass "T41: stale pending (upstream moved on) is discarded — fresh merge runs instead of blind accept"
+    else
+        fail "T41: stale pending record was blindly accepted despite upstream moving on"
+    fi
+fi
+
+# ============================================================================
+# T42: memory/*.md stale-repair backs up the workspace copy before
+# overwriting it, like .claude/rules/* already does (issue #847)
+# ============================================================================
+echo "--- T42: memory/* stale-repair backup (issue #847) ---"
+
+T42_FN_BLOCK=$(awk '/^backup_memory_file_before_overwrite\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+if [ -z "$T42_FN_BLOCK" ]; then
+    fail "T42: could not extract backup_memory_file_before_overwrite() from update.sh — signature moved?"
+else
+    T42_DIR="$TEST_WS/t42-memory-backup"
+    T42_WORKSPACE_DIR="$T42_DIR/workspace"
+    mkdir -p "$T42_WORKSPACE_DIR/memory"
+    printf '%s\n' "$T42_FN_BLOCK" > "$T42_DIR/fn.sh"
+    # shellcheck source=/dev/null
+    source "$T42_DIR/fn.sh"
+
+    WORKSPACE_DIR="$T42_WORKSPACE_DIR"
+    MEMORY_BACKUP_RUN=""
+    printf 'owner: platform\npilot-local edits here\n' > "$T42_WORKSPACE_DIR/memory/navigation.md"
+    backup_memory_file_before_overwrite "memory/navigation.md" "$T42_WORKSPACE_DIR/memory/navigation.md"
+
+    T42_BACKUP=$(find "$T42_WORKSPACE_DIR/.backups/memory-pre-update" -type f -name navigation.md -print -quit 2>/dev/null || true)
+    if [ -n "$T42_BACKUP" ] && grep -q 'pilot-local edits here' "$T42_BACKUP"; then
+        pass "T42: memory/navigation.md backed up before stale-repair overwrite"
+    else
+        fail "T42: no backup found for memory/navigation.md before overwrite"
+    fi
+
+    # A path outside memory/*.md|.yaml|.yml is a no-op (same guard shape as
+    # backup_rule_before_overwrite() for .claude/rules/*).
+    MEMORY_BACKUP_RUN=""
+    printf 'unrelated' > "$T42_WORKSPACE_DIR/README.md"
+    backup_memory_file_before_overwrite "README.md" "$T42_WORKSPACE_DIR/README.md"
+    if [ -z "$MEMORY_BACKUP_RUN" ]; then
+        pass "T42: non-memory path is a no-op, matching the .claude/rules/*-only scope of the sibling function"
+    else
+        fail "T42: backup_memory_file_before_overwrite acted on a path outside memory/*"
+    fi
+
+    T42_WIRED=$(grep -c 'backup_memory_file_before_overwrite "\$fpath" "\$mem_dst"' "$TEMPLATE_DIR/update.sh")
+    if [ "$T42_WIRED" -ge 1 ]; then
+        pass "T42: repair_pass() actually calls the backup before the stale-repair cp"
+    else
+        fail "T42: backup_memory_file_before_overwrite() exists but repair_pass() never calls it"
+    fi
+fi
+
+# ============================================================================
+# T43: Step 6 (the main apply path) keeps a memory file the pilot edited, and backs up and
+# names a file it replaces because the pilot never changed it (issues #967/#965)
+# ============================================================================
+echo "--- T43: Step 6 keeps the edited memory file, backs up and reports the replaced one (issues #967/#965) ---"
+
+# T42 covers the backup itself. Step 6 replaced a changed memory/*.md with a bare `cp`: a
+# pilot's edit to a platform-owned file (memory/navigation.md holds per-installation notes)
+# vanished with every release that touched the file (#967). Now Step 6 refreshes only a copy
+# that equals the version installed last time (recorded in Step 2), after a backup, and keeps an
+# edited one with a ready command to accept the release version.
+# The Step 6 loop is inline code, not a function: it is extracted by the comment above
+# it and the closing `fi` of its outer `if`, and run for real on a fixture.
+T43_BLOCK=$(awk '
+    /^# Copy memory files to Claude projects directory$/ { armed=1; next }
+    armed && /^if \[ -d "\$CLAUDE_MEMORY_DIR" \]; then$/ { found=1 }
+    found { print }
+    found && /^fi$/ { exit }
+' "$TEMPLATE_DIR/update.sh")
+T43_FUNCS=""
+T43_MISSING=""
+for t43_fn in hash_file is_author_mode is_personal_config saving_cp_command backup_memory_file_before_overwrite \
+    apply_memory_policy record_memory_old_hash memory_old_hash report_memory_policy_summary prune_memory_backups \
+    memory_record_size_ok memory_record_put memory_record_get remember_memory_deployed memory_decided_once memory_reason_text memory_copy_verdict replace_memory_copy; do
+    t43_src=$(awk -v fn="$t43_fn" '$0 ~ "^" fn "\\(\\) \\{" {copy=1} copy{print} copy && /^}/{exit}' "$TEMPLATE_DIR/update.sh")
+    if [ -z "$t43_src" ]; then
+        T43_MISSING="$T43_MISSING $t43_fn"
+    fi
+    T43_FUNCS="$T43_FUNCS
+$t43_src"
+done
+if [ -z "$T43_BLOCK" ] || [ -n "$T43_MISSING" ]; then
+    fail "T43: could not extract the Step 6 memory loop or helpers from update.sh (block empty: $([ -z "$T43_BLOCK" ] && echo yes || echo no), missing functions:${T43_MISSING:- none})"
+else
+    T43_DIR="$TEST_WS/t43-step6-memory"
+    T43_TEMPLATE="$T43_DIR/template"
+    T43_PREVIOUS="$T43_DIR/previous"
+    T43_WORKSPACE="$T43_DIR/workspace"
+    T43_MEMORY="$T43_DIR/claude-memory"
+    mkdir -p "$T43_TEMPLATE/memory" "$T43_PREVIOUS/memory" "$T43_WORKSPACE" "$T43_MEMORY"
+
+    # The release: a changed navigation.md, a changed file the pilot never touched, a file that
+    # is new here, one that is identical to the pilot's copy, and one the pilot rewrote.
+    printf -- '---\nowner: platform\n---\nTemplate v2 navigation\n' > "$T43_TEMPLATE/memory/navigation.md"
+    printf -- '---\nowner: platform\n---\nTemplate v2 untouched\n' > "$T43_TEMPLATE/memory/untouched.md"
+    printf -- '---\nowner: platform\n---\nBrand new platform file\n' > "$T43_TEMPLATE/memory/brand-new.md"
+    printf -- '---\nowner: platform\n---\nSame text on both sides\n' > "$T43_TEMPLATE/memory/same.md"
+    printf -- '---\nowner: platform\n---\nTemplate text for a pilot-owned file\n' > "$T43_TEMPLATE/memory/user-owned.md"
+    # The versions the previous update installed (what Step 2 records before Step 5 replaces them).
+    printf -- '---\nowner: platform\n---\nTemplate v1 navigation\n' > "$T43_PREVIOUS/memory/navigation.md"
+    printf -- '---\nowner: platform\n---\nTemplate v1 untouched\n' > "$T43_PREVIOUS/memory/untouched.md"
+    printf -- '---\nowner: user\n---\nTemplate v1 text for a pilot-owned file\n' > "$T43_PREVIOUS/memory/user-owned.md"
+    # The pilot's deployed copies.
+    printf -- '---\nowner: platform\n---\nTemplate v1 navigation\nPilot notes about this installation\n' > "$T43_MEMORY/navigation.md"
+    cp "$T43_PREVIOUS/memory/untouched.md" "$T43_MEMORY/untouched.md"
+    cp "$T43_TEMPLATE/memory/same.md" "$T43_MEMORY/same.md"
+    printf -- '---\nowner: user\n---\nPilot-owned text\n' > "$T43_MEMORY/user-owned.md"
+
+    # t43_run_step6 "NEW FILES" "UPDATED FILES" — the extracted loop, in a subshell (it is
+    # update.sh code and runs without -u), after the Step 2 record of the previous versions and
+    # followed by the memory summary that closes the pass; prints what they printed.
+    t43_run_step6() {
+        local new_list="$1" updated_list="$2"
+        (
+            set +u
+            # shellcheck source=/dev/null
+            source "$TEMPLATE_DIR/.claude/lib/frontmatter.sh"
+            eval "$T43_FUNCS"
+            SCRIPT_DIR="$T43_TEMPLATE"
+            WORKSPACE_DIR="$T43_WORKSPACE"
+            # shellcheck disable=SC2034  # read by the eval'd update.sh code
+            CLAUDE_MEMORY_DIR="$T43_MEMORY"
+            MEMORY_BACKUP_RUN=""
+            MEMORY_OLD_HASHES="$T43_DIR/old-hashes.tsv"
+            : > "$MEMORY_OLD_HASHES"
+            # shellcheck disable=SC2034  # read by the eval'd update.sh code
+            MEMORY_DEPLOYED_RECORD="$T43_WORKSPACE/.memory-deployed.tsv"
+            # shellcheck disable=SC2034,SC2206  # word splitting of a list of plain paths is intended
+            NEW_FILES=($new_list)
+            # shellcheck disable=SC2034,SC2206
+            UPDATED_FILES=($updated_list)
+            for t43_f in "${UPDATED_FILES[@]}"; do
+                if [ -f "$T43_PREVIOUS/$t43_f" ]; then
+                    record_memory_old_hash "$t43_f" "$(hash_file "$T43_PREVIOUS/$t43_f")"
+                fi
+            done
+            eval "$T43_BLOCK"
+            report_memory_policy_summary
+        ) 2>&1
+    }
+    T43_OUT=$(t43_run_step6 "memory/brand-new.md" "memory/navigation.md memory/untouched.md memory/same.md memory/user-owned.md")
+
+    T43_NAV_LINE=$(grep -F -- 'memory/navigation.md — НЕ обновлён: ' <<<"$T43_OUT" || true)
+    if grep -q 'Pilot notes about this installation' "$T43_MEMORY/navigation.md" \
+        && grep -qF -- 'Если ваших правок там нет, примите версию шаблона (прежняя копия останется рядом): ' <<<"$T43_NAV_LINE"; then
+        pass "T43: the pilot's edited navigation.md is kept, with one line and a ready command"
+    else
+        fail "T43: the edited navigation.md was replaced or reported without a command: '${T43_NAV_LINE:-<no line>}'"
+    fi
+    T43_BACKUP=$(find "$T43_WORKSPACE/.backups/memory-pre-update" -type f -name untouched.md -print -quit 2>/dev/null || true)
+    if cmp -s "$T43_MEMORY/untouched.md" "$T43_TEMPLATE/memory/untouched.md" \
+        && [ -n "$T43_BACKUP" ] && grep -q 'Template v1 untouched' "$T43_BACKUP"; then
+        pass "T43: a file the pilot never changed is replaced with the release version, after a backup"
+    else
+        fail "T43: the untouched file was not replaced after a backup (backup: ${T43_BACKUP:-none})"
+    fi
+    T43_SUMMARY=$(printf '%s\n' "$T43_OUT" | grep -F 'Заменено файлов памяти' || true)
+    if grep -qF -- 'Заменено файлов памяти: 1' <<<"$T43_SUMMARY" \
+        && grep -qF -- 'memory/untouched.md' <<<"$T43_SUMMARY" \
+        && grep -qF -- "$T43_WORKSPACE/.backups/memory-pre-update" <<<"$T43_SUMMARY"; then
+        pass "T43: the summary names the replaced file, their number and the backup directory"
+    else
+        fail "T43: replaced-files summary is missing or wrong: '${T43_SUMMARY:-<none>}'"
+    fi
+    if grep -qE -- 'navigation|brand-new|same\.md|user-owned' <<<"$T43_SUMMARY"; then
+        fail "T43: the summary lists a file that was not replaced: $T43_SUMMARY"
+    else
+        pass "T43: kept, new and identical files are not in the replaced-files summary"
+    fi
+    if [ -f "$T43_MEMORY/brand-new.md" ] \
+        && [ -z "$(find "$T43_WORKSPACE/.backups/memory-pre-update" -type f \( -name brand-new.md -o -name same.md -o -name user-owned.md -o -name navigation.md \) -print 2>/dev/null)" ]; then
+        pass "T43: a new file is copied, and nothing is backed up for new, identical or kept files"
+    else
+        fail "T43: new file missing, or an unnecessary backup exists for a new/identical/kept file"
+    fi
+    if grep -q 'Pilot-owned text' "$T43_MEMORY/user-owned.md"; then
+        pass "T43: a pilot-owned (owner: user) file the pilot rewrote is still left alone"
+    else
+        fail "T43: the pilot's rewrite of user-owned.md was replaced"
+    fi
+
+    # A second pass finds nothing to replace: no replaced-files summary.
+    T43_OUT2=$(t43_run_step6 "" "memory/navigation.md memory/same.md memory/untouched.md")
+    if grep -qF -- 'Заменено файлов памяти' <<<"$T43_OUT2"; then
+        fail "T43: a pass that replaces nothing still prints the replaced-files summary"
+    else
+        pass "T43: no replaced-files summary when no file is replaced"
+    fi
+fi
+
+# ============================================================================
+# T44/T45: the cp command that update.sh offers (the author_mode stale hint; the memory policy's
+# command for a kept copy) runs on exactly the printed paths and keeps every earlier copy (cold
+# review of #967)
+# ============================================================================
+# A bare cp loses the copy when the verdict misleads (an edit committed into the clone looks like
+# an older version too). The printed command is run by the user's shell, so a path with a double
+# quote breaks it, and a literal $(...) in a path would be executed; and a saved copy with a fixed
+# (or per-second) name is overwritten by a second run of the same command, leaving only the
+# already refreshed copy. The real functions and the real classifier run on a throwaway template
+# clone; the printed command runs twice in a shell.
+
+# A `date` that always prints the same value: the runs of a printed command must not depend on the
+# clock or on a shell's random numbers for the name of the copy they save.
+T44_FIXED_DATE_DIR="$TEST_WS/fixed-date"
+mkdir -p "$T44_FIXED_DATE_DIR"
+printf '#!/bin/bash\necho 20260101000000\n' > "$T44_FIXED_DATE_DIR/date"
+chmod +x "$T44_FIXED_DATE_DIR/date"
+
+# check_saving_hint LABEL HINT COPY ORIGINAL TEMPLATE_TEXT EXPANDED_DIR — HINT is a command line
+# update.sh printed for the user to run. It runs twice, back to back, under IDENTICAL conditions:
+# the same RANDOM seed and a date that never changes (the same second, the same random number).
+# The copy must end up as TEMPLATE_TEXT at exactly COPY; two saved copies must sit next to it, one
+# holding ORIGINAL; and the shell must have interpreted nothing in the paths: EXPANDED_DIR, the
+# directory a shell would have used after running the $(printf EXPANDED) of the path, must not exist.
+check_saving_hint() {
+    local label="$1" hint="$2" copy="$3" original="$4" template_text="$5" expanded_dir="$6"
+    local saved count=0 original_kept=0
+    PATH="$T44_FIXED_DATE_DIR:$PATH" bash -c "RANDOM=11; $hint" > /dev/null 2>&1 || true
+    PATH="$T44_FIXED_DATE_DIR:$PATH" bash -c "RANDOM=11; $hint" > /dev/null 2>&1 || true
+    for saved in "$copy".before-update-*; do
+        [ -f "$saved" ] || continue
+        count=$((count + 1))
+        if [ "$(cat "$saved")" = "$original" ]; then
+            original_kept=1
+        fi
+    done
+    if [ "$count" -eq 2 ] && [ "$original_kept" -eq 1 ] && [ "$(cat "$copy" 2>/dev/null)" = "$template_text" ] \
+        && [ ! -e "$expanded_dir" ]; then
+        pass "$label: the printed command refreshes exactly the printed path, interprets nothing in it, and two identical runs keep two copies"
+    else
+        fail "$label: the printed command ('$hint') left $count saved copies (original kept: $original_kept), the copy now holds '$(cat "$copy" 2>/dev/null)', an expanded directory exists: $([ -e "$expanded_dir" ] && echo yes || echo no)"
+    fi
+}
+
+echo "--- T44: author_mode stale hint: odd paths, two runs keep two copies ---"
+T44_FN=$(awk '/^report_author_skip\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+# The command builder is a helper of the report; it is extracted when update.sh has it (the report
+# fails by itself if it calls a helper that is gone).
+T44_HELPER=$(awk '/^saving_cp_command\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+if [ -z "$T44_FN" ]; then
+    fail "T44: could not extract report_author_skip() from update.sh — signature moved?"
+else
+    T44_DIR="$TEST_WS/t44-author-hint"
+    # One path with a space, double quotes, a $(...) substitution, backticks and a backslash.
+    # shellcheck disable=SC2016  # literal characters, nothing is meant to expand
+    T44_ODD='odd "q" $(printf EXPANDED) `b` back\slash'
+    T44_TEMPLATE="$T44_DIR/template $T44_ODD"
+    T44_COPY="$T44_DIR/copy $T44_ODD/workspace copy.md"
+    T44_EXPANDED="$T44_DIR/copy odd \"q\" EXPANDED \`b\` back\\slash"
+    mkdir -p "$T44_TEMPLATE/memory" "$T44_TEMPLATE/.claude/scripts" "$(dirname "$T44_COPY")"
+    cp "$TEMPLATE_DIR/.claude/scripts/classify-workspace-copy.sh" "$T44_TEMPLATE/.claude/scripts/classify-workspace-copy.sh"
+    chmod +x "$T44_TEMPLATE/.claude/scripts/classify-workspace-copy.sh"
+    git -C "$T44_TEMPLATE" init -q
+    git -C "$T44_TEMPLATE" config user.email "test@test"
+    git -C "$T44_TEMPLATE" config user.name "test"
+    printf 'template v1\n' > "$T44_TEMPLATE/memory/x.md"
+    git -C "$T44_TEMPLATE" add memory/x.md
+    git -C "$T44_TEMPLATE" commit -q -m "v1"
+    printf 'template v2\n' > "$T44_TEMPLATE/memory/x.md"
+    git -C "$T44_TEMPLATE" add memory/x.md
+    git -C "$T44_TEMPLATE" commit -q -m "v2"
+    printf 'template v1\n' > "$T44_COPY"   # equals the committed v1: verdict "stale"
+
+    T44_OUT=$(
+        set +u
+        eval "$T44_HELPER"
+        eval "$T44_FN"
+        SCRIPT_DIR="$T44_TEMPLATE"
+        # Exported: the eval'd update.sh function reads and counts them.
+        export CLASSIFIER_DEGRADED_WARNED=false AUTHOR_SKIP_AUTHORED=0 AUTHOR_SKIP_STALE=0 AUTHOR_SKIP_UNKNOWN=0
+        # shellcheck disable=SC2034
+        AUTHOR_STALE_PAIRS=()
+        report_author_skip memory/x.md "$T44_COPY"
+    )
+    if grep -qF -- 'Обновить: ' <<<"$T44_OUT"; then
+        T44_HINT="${T44_OUT#*Обновить: }"
+        check_saving_hint "T44" "$T44_HINT" "$T44_COPY" "template v1" "template v2" "$T44_EXPANDED"
+    else
+        fail "T44: report_author_skip() printed no 'Обновить:' hint for a stale copy: '${T44_OUT:-<empty>}'"
+    fi
+fi
+
+echo "--- T45: kept memory copy: odd paths, the hint's two runs keep two copies (issues #965/#967) ---"
+# The memory policy (apply_memory_policy) keeps a copy that matches no committed version and prints
+# the saving command for it; a copy that equals a committed older version it refreshes itself,
+# after a backup. Both on paths with a space, double quotes, a $(...), backticks and a backslash.
+T45_FUNCS=$(update_sh_functions hash_file saving_cp_command backup_memory_file_before_overwrite apply_memory_policy \
+    memory_record_size_ok memory_record_put memory_record_get remember_memory_deployed memory_decided_once memory_reason_text memory_copy_verdict replace_memory_copy)
+if ! grep -q '^apply_memory_policy() {' <<<"$T45_FUNCS"; then
+    fail "T45: could not extract apply_memory_policy() from update.sh"
+else
+    T45_DIR="$TEST_WS/t45-owner-hint"
+    # shellcheck disable=SC2016
+    T45_ODD='odd "q" $(printf EXPANDED) `b` back\slash'
+    T45_TEMPLATE="$T45_DIR/template $T45_ODD"
+    T45_MEMORY="$T45_DIR/memory $T45_ODD"
+    T45_WORKSPACE="$T45_DIR/workspace $T45_ODD"
+    T45_EXPANDED="$T45_DIR/memory odd \"q\" EXPANDED \`b\` back\\slash"
+    # The memory files' own names have the odd characters too (no backslash: git reads one in a pathspec as an escape).
+    # shellcheck disable=SC2016
+    T45_NAME='odd "q" $(printf EXPANDED) `b`.md'
+    # shellcheck disable=SC2016
+    T45_STALE_NAME='stale "q" $(printf EXPANDED) `b`.md'
+    T45_FPATH="memory/$T45_NAME"
+    T45_STALE_FPATH="memory/$T45_STALE_NAME"
+    mkdir -p "$T45_TEMPLATE/memory" "$T45_TEMPLATE/.claude/scripts" "$T45_MEMORY"
+    cp "$TEMPLATE_DIR/.claude/scripts/classify-workspace-copy.sh" "$T45_TEMPLATE/.claude/scripts/classify-workspace-copy.sh"
+    git -C "$T45_TEMPLATE" init -q
+    git -C "$T45_TEMPLATE" config user.email "test@test"
+    git -C "$T45_TEMPLATE" config user.name "test"
+    for t45_v in v1 v2; do
+        printf -- '---\nowner: user\n---\ntemplate %s\n' "$t45_v" > "$T45_TEMPLATE/$T45_FPATH"
+        printf -- '---\nowner: user\n---\nstale template %s\n' "$t45_v" > "$T45_TEMPLATE/$T45_STALE_FPATH"
+        git -C "$T45_TEMPLATE" add -- "$T45_FPATH" "$T45_STALE_FPATH"
+        git -C "$T45_TEMPLATE" commit -q -m "$t45_v"
+    done
+    printf -- '---\nowner: user\n---\nThe pilot edited this copy\n' > "$T45_MEMORY/$T45_NAME"   # no committed version: kept
+    printf -- '---\nowner: user\n---\nstale template v1\n' > "$T45_MEMORY/$T45_STALE_NAME"     # the committed v1: refreshed
+
+    T45_OUT=$(
+        exec 2>&1
+        set +u
+        eval "$T45_FUNCS"
+        SCRIPT_DIR="$T45_TEMPLATE"
+        # shellcheck disable=SC2034  # read by the eval'd update.sh functions
+        WORKSPACE_DIR="$T45_WORKSPACE"
+        # shellcheck disable=SC2034
+        MEMORY_BACKUP_RUN=""
+        apply_memory_policy "$T45_FPATH" "$T45_MEMORY/$T45_NAME"
+        apply_memory_policy "$T45_STALE_FPATH" "$T45_MEMORY/$T45_STALE_NAME"
+    ) || true
+    T45_BACKUP=$(find "$T45_WORKSPACE/.backups" -type f -name "$T45_STALE_NAME" -print -quit 2>/dev/null || true)
+    if cmp -s "$T45_MEMORY/$T45_STALE_NAME" "$T45_TEMPLATE/$T45_STALE_FPATH" \
+        && [ -n "$T45_BACKUP" ] && grep -q 'stale template v1' "$T45_BACKUP" && [ ! -e "$T45_EXPANDED" ]; then
+        pass "T45: a copy equal to a committed version is refreshed at exactly its odd path, after a backup"
+    else
+        fail "T45: the stale copy on an odd path was not refreshed with a backup: $(printf '%s' "$T45_OUT" | tr '\n' ' ')"
+    fi
+    T45_LINE=$(grep -F -- "$T45_FPATH — НЕ обновлён: " <<<"$T45_OUT" || true)
+    if grep -qF -- 'Если ваших правок там нет, примите версию шаблона (прежняя копия останется рядом): ' <<<"$T45_LINE"; then
+        T45_HINT="${T45_LINE#*прежняя копия останется рядом): }"
+        check_saving_hint "T45" "$T45_HINT" "$T45_MEMORY/$T45_NAME" "$(cat "$T45_MEMORY/$T45_NAME")" "$(cat "$T45_TEMPLATE/$T45_FPATH")" "$T45_EXPANDED"
+    else
+        fail "T45: apply_memory_policy() printed no saving command for a kept copy: '${T45_OUT:-<empty>}'"
+    fi
+fi
+
+# ============================================================================
+# T46: one rule for every memory/* file, whatever its owner: marker — a copy the pilot did not
+# change is refreshed after a backup, a changed or unverifiable one is kept with a ready command
+# to accept the template version (issues #965/#967)
+# ============================================================================
+echo "--- T46: memory policy — untouched copies refreshed, edited ones kept (issues #965/#967) ---"
+
+# The real Step 6 memory loop (extracted as in T43) and the real repair_pass() run on throwaway
+# fixtures, with every update.sh function they may call (see update_sh_functions).
+T46_FUNCS=$(update_sh_functions hash_file is_personal_config is_author_mode report_author_skip \
+    saving_cp_command backup_memory_file_before_overwrite sync_workspace_agents repair_pass \
+    is_migrated_platform_memory_path migrate_platform_memory report_owner_user_memory_drift \
+    record_memory_old_hash memory_old_hash apply_memory_policy report_memory_policy_summary prune_memory_backups \
+    memory_record_size_ok memory_record_put memory_record_get remember_memory_deployed memory_decided_once memory_reason_text memory_copy_verdict replace_memory_copy is_user_owned_memory report_author_user_memory report_author_skip_summary apply_refresh_stale \
+    remember_untouched_memory_before_apply)
+T46_STEP6=$(awk '
+    /^# Copy memory files to Claude projects directory$/ { armed=1; next }
+    armed && /^if \[ -d "\$CLAUDE_MEMORY_DIR" \]; then$/ { found=1 }
+    found { print }
+    found && /^fi$/ { exit }
+' "$TEMPLATE_DIR/update.sh")
+
+# t46_doc OWNER TEXT — a memory file with an owner: marker.
+t46_doc() { printf -- '---\nowner: %s\n---\n%s\n' "$1" "$2"; }
+
+# t46_manifest FILE PATH... — a manifest listing PATH...: the paths repair_pass() walks.
+t46_manifest() {
+    local out="$1"
+    shift
+    python3 - "$out" "$@" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({"files": [{"path": p} for p in sys.argv[2:]]}, handle)
+PY
+}
+
+# t46_template DIR — a template copy that ships the real classifier.
+t46_template() {
+    mkdir -p "$1/memory" "$1/.claude/scripts"
+    cp "$TEMPLATE_DIR/.claude/scripts/classify-workspace-copy.sh" "$1/.claude/scripts/classify-workspace-copy.sh"
+    chmod +x "$1/.claude/scripts/classify-workspace-copy.sh"
+}
+
+# t46_prepare TEMPLATE WORKSPACE MEMORY MANIFEST — inside a run: the update.sh functions plus the
+# globals its memory code reads. update.sh itself runs under set -e only: no -u, no pipefail.
+# shellcheck disable=SC2329  # called by the world functions t46_run invokes
+t46_prepare() {
+    set +u +o pipefail
+    # shellcheck source=/dev/null
+    source "$TEMPLATE_DIR/.claude/lib/frontmatter.sh"
+    eval "$T46_FUNCS"
+    # shellcheck disable=SC2329  # called by the eval'd update.sh code
+    py_available() { return 0; }
+    # shellcheck disable=SC2034  # read by the eval'd update.sh code
+    PY_BIN=python3
+    SCRIPT_DIR="$1"
+    WORKSPACE_DIR="$2"
+    # shellcheck disable=SC2034
+    CLAUDE_MEMORY_DIR="$3"
+    # shellcheck disable=SC2034
+    MANIFEST="$4"
+    # shellcheck disable=SC2034
+    MEMORY_BACKUP_RUN=""
+    MEMORY_OLD_HASHES="$(dirname "$1")/old-hashes.tsv"
+    : > "$MEMORY_OLD_HASHES"
+    # shellcheck disable=SC2034
+    MEMORY_DEPLOYED_RECORD="$WORKSPACE_DIR/.memory-deployed.tsv"
+    mkdir -p "$WORKSPACE_DIR" "$CLAUDE_MEMORY_DIR"
+}
+
+# t46_release UPDATED_FILE... — what update.sh does to the template between Step 2 and Step 6:
+# remember the version each changed file had (Step 2), then lay the release over the template
+# (Step 5). The release lies next to the template, in DIR/release.
+# shellcheck disable=SC2329  # called by the world functions t46_run invokes
+t46_release() {
+    local f
+    for f in "$@"; do
+        # An update.sh without the recorder records nothing; its Step 6 still runs and is judged
+        # by what it does to the copies.
+        if declare -F record_memory_old_hash >/dev/null; then
+            record_memory_old_hash "$f" "$(hash_file "$SCRIPT_DIR/$f")"
+        fi
+    done
+    cp -R "$(dirname "$SCRIPT_DIR")/release/." "$SCRIPT_DIR/"
+}
+
+# t46_run BODY — one update.sh run: the function BODY in a subshell under set -e, the way
+# update.sh runs, stderr folded into stdout. T46_OUT gets the output, T46_RC the exit status.
+# Plain assignment, not "|| true": bash 5 ignores set -e inside a command substitution whose
+# status is tested. The caller's own errexit (this file runs under set -e from T25 on) is
+# restored afterwards.
+t46_run() {
+    local had_errexit=false
+    case $- in *e*) had_errexit=true ;; esac
+    set +e
+    T46_OUT=$(exec 2>&1; set -e; "$1")
+    T46_RC=$?
+    if $had_errexit; then set -e; fi
+    return 0
+}
+
+# t46_state DIR — the content of every file under DIR, to compare two runs.
+t46_state() { { find "$1" -type f -exec cksum {} + 2>/dev/null || true; } | sort; }
+
+# t46_files DIR — how many files lie under DIR (0 when it does not exist).
+t46_files() { { find "$1" -type f 2>/dev/null || true; } | wc -l | tr -d ' '; }
+
+# t46_count TEXT OUTPUT — how many lines of OUTPUT contain TEXT.
+t46_count() { grep -cF -- "$1" <<<"$2" || true; }
+
+# --- World A: an update that changes eight memory files (Step 6 + the repair pass after it),
+# proof by the version installed last time, no git history to help. The memory directory, the
+# workspace and one file name carry a space, double quotes, a $(...) and backticks.
+T46A_DIR="$TEST_WS/t46-a"
+# shellcheck disable=SC2016  # literal characters, nothing is meant to expand
+T46_ODD='odd "q" $(printf EXPANDED) `b`'
+T46A_TEMPLATE="$T46A_DIR/template"
+T46A_WS="$T46A_DIR/workspace $T46_ODD"
+T46A_MEM="$T46A_DIR/memory $T46_ODD"
+T46A_ODD_FILE="memory/note $T46_ODD.md"
+T46A_MANIFEST="$T46A_DIR/manifest.json"
+t46_template "$T46A_TEMPLATE"
+mkdir -p "$T46A_DIR/release/memory" "$T46A_MEM"
+# Release one is in the template (installed last time), release two lies in release/.
+for t46_pair in user:user-untouched user:user-edited platform:platform-untouched platform:platform-edited platform:same; do
+    t46_doc "${t46_pair%%:*}" "${t46_pair#*:} release one" > "$T46A_TEMPLATE/memory/${t46_pair#*:}.md"
+    t46_doc "${t46_pair%%:*}" "${t46_pair#*:} release two" > "$T46A_DIR/release/memory/${t46_pair#*:}.md"
+done
+# Old releases shipped these two platform protocols as owner: user (#354/#384).
+t46_doc user "protocol-open release one" > "$T46A_TEMPLATE/memory/protocol-open.md"
+t46_doc platform "protocol-open release two" > "$T46A_DIR/release/memory/protocol-open.md"
+t46_doc user "protocol-work release one" > "$T46A_TEMPLATE/memory/protocol-work.md"
+t46_doc platform "protocol-work release two" > "$T46A_DIR/release/memory/protocol-work.md"
+t46_doc platform "odd release one" > "$T46A_TEMPLATE/$T46A_ODD_FILE"
+t46_doc platform "odd release two" > "$T46A_DIR/release/$T46A_ODD_FILE"
+t46_doc platform "brand new in release two" > "$T46A_DIR/release/memory/brand-new.md"
+# The pilot's copies: untouched ones equal release one, edited ones carry the pilot's lines.
+for t46_name in user-untouched platform-untouched protocol-open; do
+    cp "$T46A_TEMPLATE/memory/$t46_name.md" "$T46A_MEM/$t46_name.md"
+done
+cp "$T46A_TEMPLATE/$T46A_ODD_FILE" "$T46A_MEM/${T46A_ODD_FILE#memory/}"
+for t46_name in user-edited platform-edited protocol-work; do
+    { cat "$T46A_TEMPLATE/memory/$t46_name.md"; echo "Pilot line in $t46_name"; } > "$T46A_MEM/$t46_name.md"
+done
+cp "$T46A_DIR/release/memory/same.md" "$T46A_MEM/same.md"
+t46_manifest "$T46A_MANIFEST" memory/user-untouched.md memory/user-edited.md memory/platform-untouched.md \
+    memory/platform-edited.md memory/protocol-open.md memory/protocol-work.md memory/same.md \
+    memory/brand-new.md "$T46A_ODD_FILE"
+
+# t46a_update — the update that brings release two: Step 2 and 5, Step 6, then the repair pass.
+# shellcheck disable=SC2329  # invoked through t46_run
+t46a_update() {
+    t46_prepare "$T46A_TEMPLATE" "$T46A_WS" "$T46A_MEM" "$T46A_MANIFEST"
+    # shellcheck disable=SC2034  # read by the eval'd Step 6 loop
+    NEW_FILES=(memory/brand-new.md)
+    # shellcheck disable=SC2034
+    UPDATED_FILES=(memory/user-untouched.md memory/user-edited.md memory/platform-untouched.md
+        memory/platform-edited.md memory/protocol-open.md memory/protocol-work.md memory/same.md
+        "$T46A_ODD_FILE")
+    t46_release "${UPDATED_FILES[@]}"
+    eval "$T46_STEP6"
+    repair_pass
+}
+# t46a_repeat — the next update brings nothing new: only the repair pass runs.
+# shellcheck disable=SC2329  # invoked through t46_run
+t46a_repeat() {
+    t46_prepare "$T46A_TEMPLATE" "$T46A_WS" "$T46A_MEM" "$T46A_MANIFEST"
+    repair_pass
+}
+t46_run t46a_update
+T46A_OUT="$T46_OUT"
+T46A_RC="$T46_RC"
+
+# t46_backup NAME — the backup of memory file NAME this world's runs made, if any.
+t46_backup() { find "$T46A_WS/.backups" -type f -name "$1" -print -quit 2>/dev/null || true; }
+
+if [ "$T46A_RC" -eq 0 ]; then
+    pass "T46: the update runs to its end under set -e"
+else
+    fail "T46: the update ended with status $T46A_RC: $(printf '%s' "$T46A_OUT" | tail -3 | tr '\n' ' ')"
+fi
+t46_replaced_ok=true
+for t46_name in user-untouched.md platform-untouched.md protocol-open.md "${T46A_ODD_FILE#memory/}"; do
+    t46_bak=$(t46_backup "$t46_name")
+    if ! cmp -s "$T46A_MEM/$t46_name" "$T46A_DIR/release/memory/$t46_name" \
+        || [ -z "$t46_bak" ] || ! grep -q 'release one' "$t46_bak"; then
+        t46_replaced_ok=false
+        fail "T46: untouched $t46_name was not refreshed with a backup of the previous version (backup: ${t46_bak:-none})"
+    fi
+done
+if $t46_replaced_ok; then
+    pass "T46: untouched copies are refreshed after a backup — owner: user and owner: platform alike, odd paths included"
+fi
+if grep -qF -- 'owner: platform' "$T46A_MEM/protocol-open.md" \
+    && grep -qF -- 'memory/protocol-open.md → memory/ — обновлён (не менялся: равен прошлой версии шаблона; если в клоне шаблона была ваша правка, она в прежней версии)' <<<"$T46A_OUT"; then
+    pass "T46: an untouched legacy owner: user protocol migrates to the platform version, the line naming the proof"
+else
+    fail "T46: the untouched legacy protocol-open.md did not migrate with its line"
+fi
+if [ -z "$(find "$T46A_DIR" -name '*EXPANDED*' ! -name "*\$(printf EXPANDED)*" 2>/dev/null)" ]; then
+    pass "T46: no shell expanded the odd paths (no '…EXPANDED…' path appeared)"
+else
+    fail "T46: an odd path was expanded by a shell: $(find "$T46A_DIR" -name '*EXPANDED*' ! -name "*\$(printf EXPANDED)*")"
+fi
+
+t46_kept_ok=true
+for t46_name in user-edited platform-edited protocol-work; do
+    t46_line=$(grep -F -- "memory/$t46_name.md — НЕ обновлён: " <<<"$T46A_OUT" || true)
+    if ! grep -q "Pilot line in $t46_name" "$T46A_MEM/$t46_name.md" || [ -n "$(t46_backup "$t46_name.md")" ] \
+        || ! grep -qF -- '. Сам он не обновится. Сверьте: diff ' <<<"$t46_line" || ! grep -qF -- 'Если ваших правок там нет, примите версию шаблона (прежняя копия останется рядом): ' <<<"$t46_line"; then
+        t46_kept_ok=false
+        fail "T46: edited $t46_name.md was replaced, backed up, or got no one-line reason with a command: '${t46_line:-<no line>}'"
+    fi
+    t46_times=$(t46_count "memory/$t46_name.md — НЕ обновлён" "$T46A_OUT")
+    if [ "$t46_times" != "1" ]; then
+        t46_kept_ok=false
+        fail "T46: edited $t46_name.md is reported $t46_times times in one run (Step 6 and the repair pass must report it once)"
+    fi
+done
+if $t46_kept_ok; then
+    pass "T46: edited copies are kept — owner: user, owner: platform and a legacy protocol — each with one line and a ready command"
+fi
+
+if [ -f "$T46A_MEM/brand-new.md" ] && [ -z "$(t46_backup brand-new.md)" ] && [ -z "$(t46_backup same.md)" ] \
+    && ! grep -qF -- 'memory/same.md' <<<"$T46A_OUT"; then
+    pass "T46: a missing copy is copied and an identical one left alone, neither backed up"
+else
+    fail "T46: the new file is missing, or a new/identical file was backed up or reported"
+fi
+
+T46A_SUMMARY=$(grep -F -- 'Заменено файлов памяти' <<<"$T46A_OUT" || true)
+T46A_KEPT_SUMMARY=$(grep -F -- 'Не обновлено файлов памяти' <<<"$T46A_OUT" || true)
+if grep -qF -- 'Заменено файлов памяти: 4 (' <<<"$T46A_SUMMARY" \
+    && grep -qF -- 'memory/user-untouched.md' <<<"$T46A_SUMMARY" \
+    && grep -qF -- "$T46A_WS/.backups/memory-pre-update" <<<"$T46A_SUMMARY" \
+    && ! grep -qE -- 'edited|protocol-work|brand-new|same\.md' <<<"$T46A_SUMMARY" \
+    && grep -qF -- ': 3 (' <<<"$T46A_KEPT_SUMMARY"; then
+    pass "T46: the summary names all four replaced files and the backup directory, and counts the three kept ones"
+else
+    fail "T46: summary is missing or wrong: replaced '${T46A_SUMMARY:-<none>}', kept '${T46A_KEPT_SUMMARY:-<none>}'"
+fi
+
+# The record: a line for every copy the update put in place or found equal to the template, with
+# the template's hash; none for a kept copy (it must stay provably edited).
+T46A_RECORD="$T46A_WS/.memory-deployed.tsv"
+t46_record_ok=true
+for t46_name in user-untouched.md platform-untouched.md protocol-open.md brand-new.md same.md "${T46A_ODD_FILE#memory/}"; do
+    t46_want=$(printf 'memory/%s\t%s' "$t46_name" "$(shasum -a 256 "$T46A_TEMPLATE/memory/$t46_name" | cut -d' ' -f1)")
+    grep -qxF -- "$t46_want" "$T46A_RECORD" 2>/dev/null || t46_record_ok=false
+done
+for t46_name in user-edited platform-edited protocol-work; do
+    ! grep -qF -- "memory/$t46_name.md" "$T46A_RECORD" 2>/dev/null || t46_record_ok=false
+done
+if $t46_record_ok; then
+    pass "T46: the record names the template version of every refreshed, new and identical copy, and no kept one"
+else
+    fail "T46: the record is missing a line or names a kept copy: $(tr '\n' '|' < "$T46A_RECORD" 2>/dev/null)"
+fi
+
+# The next update brings nothing new: only the repair pass runs. It changes nothing.
+T46A_RECORD_STATE=$(cksum < "$T46A_RECORD" 2>/dev/null || true)
+T46A_STATE=$(t46_state "$T46A_MEM")
+T46A_BACKUPS=$(t46_files "$T46A_WS/.backups")
+t46_run t46a_repeat
+if [ "$T46_RC" -eq 0 ] && [ "$T46A_STATE" = "$(t46_state "$T46A_MEM")" ] \
+    && [ "$T46A_BACKUPS" = "$(t46_files "$T46A_WS/.backups")" ] \
+    && [ "$T46A_RECORD_STATE" = "$(cksum < "$T46A_RECORD" 2>/dev/null || true)" ] \
+    && ! grep -qF -- 'Заменено файлов памяти' <<<"$T46_OUT" \
+    && [ "$(t46_count '— НЕ обновлён: ' "$T46_OUT")" = "3" ]; then
+    pass "T46: a repeated update changes nothing — copies, backups, record; the three kept files are reported again"
+else
+    fail "T46: the repeated update changed files or backups, or lost the kept-file lines (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- World B: the repair pass (no version from this run) on a clone with full history.
+T46B_DIR="$TEST_WS/t46-b"
+T46B_TEMPLATE="$T46B_DIR/template"
+T46B_MEM="$T46B_DIR/memory"
+T46B_MANIFEST="$T46B_DIR/manifest.json"
+t46_template "$T46B_TEMPLATE"
+mkdir -p "$T46B_MEM"
+git -C "$T46B_TEMPLATE" init -q
+git -C "$T46B_TEMPLATE" config user.email "test@test"
+git -C "$T46B_TEMPLATE" config user.name "test"
+for t46_v in one two three; do
+    t46_doc user "stuck-user release $t46_v" > "$T46B_TEMPLATE/memory/stuck-user.md"
+    t46_doc platform "stuck-platform release $t46_v" > "$T46B_TEMPLATE/memory/stuck-platform.md"
+    t46_doc platform "authored release $t46_v" > "$T46B_TEMPLATE/memory/authored.md"
+    git -C "$T46B_TEMPLATE" add memory
+    git -C "$T46B_TEMPLATE" commit -q -m "release $t46_v"
+done
+t46_doc user "stuck-user release two" > "$T46B_MEM/stuck-user.md"          # a past release, not the last
+t46_doc platform "stuck-platform release two" > "$T46B_MEM/stuck-platform.md"
+t46_doc platform "The pilot rewrote this file" > "$T46B_MEM/authored.md"
+t46_manifest "$T46B_MANIFEST" memory/stuck-user.md memory/stuck-platform.md memory/authored.md
+# shellcheck disable=SC2329  # invoked through t46_run
+t46b_repair() {
+    t46_prepare "$T46B_TEMPLATE" "$T46B_DIR/workspace" "$T46B_MEM" "$T46B_MANIFEST"
+    repair_pass
+}
+t46_run t46b_repair
+T46B_BACKUP=$(find "$T46B_DIR/workspace/.backups" -type f -name stuck-user.md -print -quit 2>/dev/null || true)
+if [ "$T46_RC" -eq 0 ] && cmp -s "$T46B_MEM/stuck-user.md" "$T46B_TEMPLATE/memory/stuck-user.md" \
+    && cmp -s "$T46B_MEM/stuck-platform.md" "$T46B_TEMPLATE/memory/stuck-platform.md" \
+    && [ -n "$T46B_BACKUP" ] && grep -q 'release two' "$T46B_BACKUP" \
+    && grep -qF -- 'memory/stuck-user.md → memory/ — обновлён (не менялся: равен версии из истории клона шаблона' <<<"$T46_OUT"; then
+    pass "T46: a copy stuck on a past release is refreshed through the clone's history, with a backup"
+else
+    fail "T46: the stuck copy was not refreshed through history (status $T46_RC): $(grep -F 'stuck' <<<"$T46_OUT" | tr '\n' ' ')"
+fi
+if grep -q 'The pilot rewrote this file' "$T46B_MEM/authored.md" \
+    && grep -qF -- 'memory/authored.md — НЕ обновлён: не совпадает ни с одной версией в истории текущей ветки клона (ваши правки или уже применённый прошлый релиз). Сам он не обновится. Сверьте: diff ' <<<"$T46_OUT"; then
+    pass "T46: an owner: platform copy that matches no committed version is kept, naming both possible causes"
+else
+    fail "T46: the authored owner: platform copy was replaced or reported wrongly: $(grep -F 'authored' <<<"$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- World C: the same stuck copies in a clone made with --depth 1: nothing can be proven.
+T46C_DIR="$TEST_WS/t46-c"
+T46C_TEMPLATE="$T46C_DIR/template"
+T46C_MEM="$T46C_DIR/memory"
+T46C_MANIFEST="$T46C_DIR/manifest.json"
+mkdir -p "$T46C_DIR" "$T46C_MEM"
+git clone -q --depth 1 "file://$T46B_TEMPLATE" "$T46C_TEMPLATE" 2>/dev/null
+t46_template "$T46C_TEMPLATE"
+t46_doc user "stuck-user release two" > "$T46C_MEM/stuck-user.md"
+t46_doc platform "stuck-platform release two" > "$T46C_MEM/stuck-platform.md"
+t46_manifest "$T46C_MANIFEST" memory/stuck-user.md memory/stuck-platform.md
+# shellcheck disable=SC2329  # invoked through t46_run
+t46c_repair() {
+    t46_prepare "$T46C_TEMPLATE" "$T46C_DIR/workspace" "$T46C_MEM" "$T46C_MANIFEST"
+    repair_pass
+}
+t46_run t46c_repair
+if [ "$T46_RC" -eq 0 ] && grep -q 'stuck-platform release two' "$T46C_MEM/stuck-platform.md" \
+    && grep -q 'stuck-user release two' "$T46C_MEM/stuck-user.md" && [ ! -d "$T46C_DIR/workspace/.backups" ] \
+    && grep -qF -- 'memory/stuck-platform.md — НЕ обновлён: не удалось проверить, менялся ли файл (клон шаблона сделан с --depth, его истории нет). Сам он не обновится. Сверьте: diff ' <<<"$T46_OUT"; then
+    pass "T46: in a --depth 1 clone a stuck copy is kept — owner: platform too — with the reason and a command"
+else
+    fail "T46: the shallow clone's stuck copy was replaced or not reported (status $T46_RC): $(grep -F 'stuck' <<<"$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- World D: the backup cannot be written (.backups is a file): no replacement, no abort.
+T46D_DIR="$TEST_WS/t46-d"
+T46D_TEMPLATE="$T46D_DIR/template"
+T46D_WS="$T46D_DIR/workspace"
+T46D_MEM="$T46D_DIR/memory"
+t46_template "$T46D_TEMPLATE"
+mkdir -p "$T46D_DIR/release/memory" "$T46D_MEM" "$T46D_WS"
+t46_doc platform "untouched release one" > "$T46D_TEMPLATE/memory/untouched.md"
+t46_doc platform "untouched release two" > "$T46D_DIR/release/memory/untouched.md"
+cp "$T46D_TEMPLATE/memory/untouched.md" "$T46D_MEM/untouched.md"
+printf 'a file where the backup directory would go\n' > "$T46D_WS/.backups"
+# shellcheck disable=SC2329  # invoked through t46_run
+t46d_update() {
+    t46_prepare "$T46D_TEMPLATE" "$T46D_WS" "$T46D_MEM" "$T46D_DIR/manifest.json"
+    # shellcheck disable=SC2034
+    NEW_FILES=()
+    # shellcheck disable=SC2034
+    UPDATED_FILES=(memory/untouched.md)
+    t46_release memory/untouched.md
+    eval "$T46_STEP6"
+    if declare -F report_memory_policy_summary >/dev/null; then report_memory_policy_summary; fi
+    echo "T46D: the run went on"
+}
+t46_run t46d_update
+if [ "$T46_RC" -eq 0 ] && grep -q 'untouched release one' "$T46D_MEM/untouched.md" \
+    && grep -qF -- 'T46D: the run went on' <<<"$T46_OUT" \
+    && grep -qF -- 'memory/untouched.md — НЕ обновлён: не удалось сохранить прежнюю версию' <<<"$T46_OUT" \
+    && ! grep -qE -- 'Заменено файлов памяти|memory-файлов обновлено' <<<"$T46_OUT" \
+    && grep -qF -- 'Не обновлено файлов памяти: 1 (memory/untouched.md)' <<<"$T46_OUT"; then
+    pass "T46: a failed backup leaves the copy as it was, warns, counts it among the files not updated and does not end the run"
+else
+    fail "T46: failed backup: copy replaced, run ended (status $T46_RC), no warning, or counted: $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- World E: author_mode keeps its own branch — the policy never writes the author's copies.
+T46E_DIR="$TEST_WS/t46-e"
+T46E_TEMPLATE="$T46E_DIR/template"
+T46E_WS="$T46E_DIR/workspace"
+T46E_MEM="$T46E_DIR/memory"
+t46_template "$T46E_TEMPLATE"
+mkdir -p "$T46E_DIR/release/memory" "$T46E_MEM" "$T46E_WS"
+printf 'author_mode: true\n' > "$T46E_WS/params.yaml"
+t46_doc user "author copy release one" > "$T46E_TEMPLATE/memory/untouched.md"
+t46_doc user "author copy release two" > "$T46E_DIR/release/memory/untouched.md"
+cp "$T46E_TEMPLATE/memory/untouched.md" "$T46E_MEM/untouched.md"
+# shellcheck disable=SC2329  # invoked through t46_run
+t46e_update() {
+    t46_prepare "$T46E_TEMPLATE" "$T46E_WS" "$T46E_MEM" "$T46E_DIR/manifest.json"
+    # shellcheck disable=SC2034
+    NEW_FILES=()
+    # shellcheck disable=SC2034
+    UPDATED_FILES=(memory/untouched.md)
+    t46_release memory/untouched.md
+    eval "$T46_STEP6"
+}
+t46_run t46e_update
+if grep -q 'author copy release one' "$T46E_MEM/untouched.md" && [ ! -e "$T46E_WS/.backups" ] \
+    && grep -qF -- 'memory/untouched.md — author_mode, owner: user: рабочая копия не тронута' <<<"$T46_OUT"; then
+    pass "T46: author_mode keeps its own branch — the author's copy is reported, not refreshed"
+else
+    fail "T46: author_mode copy was written or not reported (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+
+# ============================================================================
+# T47: the record of installed memory versions (.memory-deployed.tsv), proof (a) of the memory
+# policy: it outlives a broken-off run and a copy several releases behind, an edited copy never
+# enters it, an unusable record never stops the update, setup.sh writes the first one; author_mode
+# keeps its quiet report for owner: user copies, in Step 6 and in the repair pass (review of
+# #965/#967: С1, С2, М1, М5, М7)
+# ============================================================================
+echo "--- T47: memory record — broken-off run, lag, unusable record, setup, author_mode (#965/#967 review) ---"
+
+# t47_sha FILE — the sha256 the record keeps for FILE's content.
+t47_sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+# t47_line KEY FILE — the record line that says the deployed copy KEY holds FILE's content.
+t47_line() { printf '%s\t%s' "$1" "$(t47_sha "$2")"; }
+
+# --- 47a: setup.sh writes the record with the same writer and hash as update.sh.
+t47_same=true
+for t47_fn in memory_record_size_ok memory_record_put hash_file; do
+    t47_u=$(awk -v fn="$t47_fn" '$0 ~ "^" fn "\\(\\) \\{" {c=1} c{print} c && /^}/{exit}' "$TEMPLATE_DIR/update.sh")
+    t47_s=$(awk -v fn="$t47_fn" '$0 ~ "^" fn "\\(\\) \\{" {c=1} c{print} c && /^}/{exit}' "$TEMPLATE_DIR/setup.sh")
+    if [ -z "$t47_u" ] || [ "$t47_u" != "$t47_s" ]; then
+        t47_same=false
+        fail "T47: $t47_fn differs between update.sh and setup.sh (or one of them lacks it)"
+    fi
+done
+if $t47_same; then
+    pass "T47: update.sh and setup.sh write the record with the same memory_record_put and hash_file"
+fi
+
+# --- 47b: a broken-off run. An earlier run recorded the copies (they equalled the template);
+# then the template moved on twice without Step 6 (code 49 or Ctrl-C, the run's own hashes gone
+# with its temporary directory), and the clone has no history that knows the copies. The next run
+# must refresh the untouched copy by the record and keep the edited one, its record line unchanged.
+T47F_DIR="$TEST_WS/t47-f"
+T47F_TEMPLATE="$T47F_DIR/template"
+T47F_WS="$T47F_DIR/workspace"
+T47F_MEM="$T47F_DIR/memory"
+T47F_MANIFEST="$T47F_DIR/manifest.json"
+t46_template "$T47F_TEMPLATE"
+mkdir -p "$T47F_MEM"
+t46_doc user "untouched release one" > "$T47F_TEMPLATE/memory/untouched.md"
+t46_doc platform "edited release one" > "$T47F_TEMPLATE/memory/edited.md"
+cp "$T47F_TEMPLATE/memory/untouched.md" "$T47F_TEMPLATE/memory/edited.md" "$T47F_MEM/"
+t46_manifest "$T47F_MANIFEST" memory/untouched.md memory/edited.md
+# shellcheck disable=SC2329  # invoked through t46_run
+t47f_repair() {
+    t46_prepare "$T47F_TEMPLATE" "$T47F_WS" "$T47F_MEM" "$T47F_MANIFEST"
+    repair_pass
+}
+t46_run t47f_repair        # in step with the template: the copies get their record lines
+echo "Pilot line in edited" >> "$T47F_MEM/edited.md"
+T47F_EDITED_LINE=$(t47_line memory/edited.md "$T47F_TEMPLATE/memory/edited.md")
+for t47_v in two three; do  # two releases land in the clone, memory never sees them
+    t46_doc user "untouched release $t47_v" > "$T47F_TEMPLATE/memory/untouched.md"
+    t46_doc platform "edited release $t47_v" > "$T47F_TEMPLATE/memory/edited.md"
+done
+t46_run t47f_repair
+T47F_RECORD="$T47F_WS/.memory-deployed.tsv"
+if [ "$T46_RC" -eq 0 ] && cmp -s "$T47F_MEM/untouched.md" "$T47F_TEMPLATE/memory/untouched.md" \
+    && grep -qF -- 'memory/untouched.md → memory/ — обновлён (не менялся: равен версии, установленной в прошлый раз' <<<"$T46_OUT" \
+    && grep -qxF -- "$(t47_line memory/untouched.md "$T47F_TEMPLATE/memory/untouched.md")" "$T47F_RECORD"; then
+    pass "T47: after a broken-off run a copy two releases behind is refreshed by the record, which then names the new version"
+else
+    fail "T47: the untouched copy left behind by a broken-off run was not refreshed by the record (status $T46_RC): $(grep -F 'untouched' <<<"$T46_OUT" | tr '\n' ' ')"
+fi
+if grep -q 'Pilot line in edited' "$T47F_MEM/edited.md" && grep -qxF -- "$T47F_EDITED_LINE" "$T47F_RECORD" \
+    && grep -qF -- 'memory/edited.md — НЕ обновлён: ' <<<"$T46_OUT"; then
+    pass "T47: an edited copy stays after a broken-off run, and its record line still names the version installed before"
+else
+    fail "T47: the edited copy was replaced, or its record line moved: $(grep -F 'edited' <<<"$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- 47c: a record that cannot be used never stops the update.
+# The record path is a directory: the run goes on under set -e, a copy proven by the version this
+# run replaced is still refreshed, one warning names the record, nothing lands inside the directory.
+T47G_DIR="$TEST_WS/t47-g"
+T47G_TEMPLATE="$T47G_DIR/template"
+T47G_WS="$T47G_DIR/workspace"
+T47G_MEM="$T47G_DIR/memory"
+t46_template "$T47G_TEMPLATE"
+mkdir -p "$T47G_DIR/release/memory" "$T47G_MEM" "$T47G_WS/.memory-deployed.tsv"
+t46_doc platform "proven release one" > "$T47G_TEMPLATE/memory/proven.md"
+t46_doc platform "proven release two" > "$T47G_DIR/release/memory/proven.md"
+cp "$T47G_TEMPLATE/memory/proven.md" "$T47G_MEM/proven.md"
+t46_manifest "$T47G_DIR/manifest.json" memory/proven.md
+# shellcheck disable=SC2329  # invoked through t46_run
+t47g_update() {
+    t46_prepare "$T47G_TEMPLATE" "$T47G_WS" "$T47G_MEM" "$T47G_DIR/manifest.json"
+    # shellcheck disable=SC2034
+    NEW_FILES=()
+    # shellcheck disable=SC2034
+    UPDATED_FILES=(memory/proven.md)
+    t46_release memory/proven.md
+    eval "$T46_STEP6"
+    repair_pass
+}
+t46_run t47g_update
+if [ "$T46_RC" -eq 0 ] && cmp -s "$T47G_MEM/proven.md" "$T47G_DIR/release/memory/proven.md" \
+    && [ "$(t46_count 'не удалось записать' "$T46_OUT")" = "1" ] && [ -z "$(ls -A "$T47G_WS/.memory-deployed.tsv")" ]; then
+    pass "T47: a record path that is a directory costs one warning; the update and its other proofs go on"
+else
+    fail "T47: an unusable record broke the update or went unreported (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+# Lines that do not parse are ignored, and dropped when the record is written next.
+T47H_DIR="$TEST_WS/t47-h"
+T47H_TEMPLATE="$T47H_DIR/template"
+T47H_WS="$T47H_DIR/workspace"
+T47H_MEM="$T47H_DIR/memory"
+t46_template "$T47H_TEMPLATE"
+mkdir -p "$T47H_MEM" "$T47H_WS"
+for t47_name in good bad; do
+    t46_doc platform "$t47_name release one" > "$T47H_MEM/$t47_name.md"
+    t46_doc platform "$t47_name release two" > "$T47H_TEMPLATE/memory/$t47_name.md"
+done
+{
+    echo "a line that is no record"
+    printf 'memory/bad.md\tnot-a-sha256\n'
+    t47_line memory/good.md "$T47H_MEM/good.md"; echo
+} > "$T47H_WS/.memory-deployed.tsv"
+t46_manifest "$T47H_DIR/manifest.json" memory/good.md memory/bad.md
+# shellcheck disable=SC2329  # invoked through t46_run
+t47h_repair() {
+    t46_prepare "$T47H_TEMPLATE" "$T47H_WS" "$T47H_MEM" "$T47H_DIR/manifest.json"
+    repair_pass
+}
+t46_run t47h_repair
+if [ "$T46_RC" -eq 0 ] && cmp -s "$T47H_MEM/good.md" "$T47H_TEMPLATE/memory/good.md" \
+    && grep -q 'bad release one' "$T47H_MEM/bad.md" \
+    && ! grep -qE 'no record|not-a-sha256' "$T47H_WS/.memory-deployed.tsv" \
+    && grep -qxF -- "$(t47_line memory/good.md "$T47H_TEMPLATE/memory/good.md")" "$T47H_WS/.memory-deployed.tsv"; then
+    pass "T47: malformed record lines prove nothing and are dropped; a valid line still proves its copy"
+else
+    fail "T47: malformed record lines changed the outcome (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- 47d: author_mode, Step 6 and the repair pass: an owner: user copy keeps one quiet line and no
+# author_mode counter — the summary counts only the platform copy, --refresh-stale is not refused.
+T47A_DIR="$TEST_WS/t47-author"
+T47A_TEMPLATE="$T47A_DIR/template"
+T47A_WS="$T47A_DIR/workspace"
+T47A_MEM="$T47A_DIR/memory"
+T47A_MANIFEST="$T47A_DIR/manifest.json"
+t46_template "$T47A_TEMPLATE"
+mkdir -p "$T47A_MEM" "$T47A_WS"
+printf 'author_mode: true\n' > "$T47A_WS/params.yaml"
+git -C "$T47A_TEMPLATE" init -q
+git -C "$T47A_TEMPLATE" config user.email "test@test"
+git -C "$T47A_TEMPLATE" config user.name "test"
+for t47_v in one two; do
+    t46_doc platform "platform release $t47_v" > "$T47A_TEMPLATE/memory/platform.md"
+    git -C "$T47A_TEMPLATE" add memory/platform.md
+    git -C "$T47A_TEMPLATE" commit -q -m "release $t47_v"
+done
+t46_doc user "notes the template ships" > "$T47A_TEMPLATE/memory/notes.md"   # never committed
+t46_doc platform "platform release one" > "$T47A_MEM/platform.md"           # behind: stale
+t46_doc user "The author's own notes" > "$T47A_MEM/notes.md"
+t46_manifest "$T47A_MANIFEST" memory/platform.md memory/notes.md
+# shellcheck disable=SC2329  # invoked through t46_run
+t47a_update() {
+    t46_prepare "$T47A_TEMPLATE" "$T47A_WS" "$T47A_MEM" "$T47A_MANIFEST"
+    # shellcheck disable=SC2034  # read by the eval'd update.sh code
+    AUTHOR_SKIP_AUTHORED=0 AUTHOR_SKIP_STALE=0 AUTHOR_SKIP_UNKNOWN=0 CLASSIFIER_DEGRADED_WARNED=false REFRESH_STALE=true
+    # shellcheck disable=SC2034
+    AUTHOR_STALE_PAIRS=()
+    # shellcheck disable=SC2034
+    NEW_FILES=()
+    # shellcheck disable=SC2034
+    UPDATED_FILES=(memory/platform.md memory/notes.md)
+    eval "$T46_STEP6"
+    repair_pass
+    report_author_skip_summary
+}
+t46_run t47a_update
+if [ "$T46_RC" -eq 0 ] && grep -q "The author's own notes" "$T47A_MEM/notes.md" \
+    && [ "$(t46_count 'memory/notes.md — author_mode, owner: user: рабочая копия не тронута' "$T46_OUT")" = "1" ] \
+    && [ "$(t46_count 'memory/notes.md' "$T46_OUT")" = "1" ] \
+    && grep -qF -- 'author_mode: пропущено 1 файл(ов) — авторских 0, отставших 1, неизвестно 0' <<<"$T46_OUT" \
+    && ! grep -qF -- 'refresh-stale отклонён' <<<"$T46_OUT" \
+    && cmp -s "$T47A_MEM/platform.md" "$T47A_TEMPLATE/memory/platform.md" && [ ! -e "$T47A_WS/.memory-deployed.tsv" ]; then
+    pass "T47: author_mode reports an owner: user copy once, outside its counters; --refresh-stale still refreshes the stale platform copy"
+else
+    fail "T47: author_mode changed for an owner: user copy (status $T46_RC): $(grep -E 'notes|пропущено|refresh' <<<"$T46_OUT" | tr '\n' ' ')"
+fi
+
+# --- 47e: setup.sh records what it installs: the copied files' lines replace older ones, lines for
+# files it does not copy stay, and --dry-run writes nothing. The workspace path has odd characters.
+T47S_SETUP=$(awk '
+    /^# === 3\. Copy memory to Claude projects directory ===$/ { on=1 }
+    /^# === 4\. / { exit }
+    on { print }
+' "$TEMPLATE_DIR/setup.sh")
+T47S_FUNCS=$(for t47_fn in hash_file memory_record_size_ok memory_record_put; do
+    awk -v fn="$t47_fn" '$0 ~ "^" fn "\\(\\) \\{" {c=1} c{print} c && /^}/{exit}' "$TEMPLATE_DIR/setup.sh"
+done)
+T47S_DIR="$TEST_WS/t47-setup"
+T47S_TEMPLATE="$T47S_DIR/template"
+mkdir -p "$T47S_TEMPLATE/memory"
+t46_doc platform "a as shipped" > "$T47S_TEMPLATE/memory/a.md"
+t46_doc user "b as shipped" > "$T47S_TEMPLATE/memory/b.md"
+printf '# Index\n' > "$T47S_TEMPLATE/memory/MEMORY.md"
+printf 'calendar_ids: []\n' > "$T47S_TEMPLATE/memory/day-rhythm-config.yaml"
+# t47s_setup WORKSPACE HOME DRY_RUN — setup.sh's memory step in one t46_run, under set -e only, as
+# setup.sh runs (no -u, no pipefail).
+t47s_setup() {
+    T47S_ARGS_WS="$1" T47S_ARGS_HOME="$2" T47S_ARGS_DRY="$3"
+    t46_run t47s_body
+}
+# shellcheck disable=SC2329  # invoked through t46_run
+t47s_body() {
+    set +u +o pipefail
+    eval "$T47S_FUNCS"
+    # shellcheck disable=SC2034  # read by the eval'd setup.sh code
+    TEMPLATE_DIR="$T47S_TEMPLATE" WORKSPACE_DIR="$T47S_ARGS_WS" HOME="$T47S_ARGS_HOME" DRY_RUN="$T47S_ARGS_DRY" CLAUDE_PROJECT_SLUG="t47-slug"
+    mkdir -p "$WORKSPACE_DIR"
+    eval "$T47S_SETUP"
+}
+# shellcheck disable=SC2016  # literal characters, nothing is meant to expand
+T47S_WS="$T47S_DIR/workspace \"q\" \$(printf EXPANDED)"
+T47S_MEM="$T47S_DIR/home/.claude/projects/t47-slug/memory"
+mkdir -p "$T47S_WS"
+{
+    printf 'memory/reference/agent-core.md\t%s\n' "$(printf 'x' | shasum -a 256 | cut -d' ' -f1)"
+    printf 'memory/a.md\t%s\n' "$(printf 'old' | shasum -a 256 | cut -d' ' -f1)"
+} > "$T47S_WS/.memory-deployed.tsv"
+T47S_KEPT_LINE=$(head -1 "$T47S_WS/.memory-deployed.tsv")
+t47s_setup "$T47S_WS" "$T47S_DIR/home" false
+t47s_record_ok=true
+for t47_name in a.md b.md MEMORY.md day-rhythm-config.yaml; do
+    grep -qxF -- "$(t47_line "memory/$t47_name" "$T47S_MEM/$t47_name")" "$T47S_WS/.memory-deployed.tsv" || t47s_record_ok=false
+done
+if [ "$T46_RC" -eq 0 ] && $t47s_record_ok && grep -qxF -- "$T47S_KEPT_LINE" "$T47S_WS/.memory-deployed.tsv" \
+    && [ "$(grep -c '^memory/a\.md' "$T47S_WS/.memory-deployed.tsv")" = "1" ]; then
+    pass "T47: setup.sh records every memory file it installs, keeps other lines, replaces an older line"
+else
+    fail "T47: setup.sh did not write the record as expected (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+T47S_DRY_WS="$T47S_DIR/dry-workspace"
+t47s_setup "$T47S_DRY_WS" "$T47S_DIR/dry-home" true
+if [ "$T46_RC" -eq 0 ] && [ ! -e "$T47S_DRY_WS/.memory-deployed.tsv" ] && [ ! -e "$T47S_DIR/dry-home/.claude" ]; then
+    pass "T47: setup.sh --dry-run writes no record"
+else
+    fail "T47: setup.sh --dry-run wrote memory or its record, or failed (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+
+# ============================================================================
+# T48: the record before Step 5 and the safety of every write (review-12 of #965/#967: С1, М1-М3).
+# A copy equal to the version this run replaces gets its record line BEFORE Step 5, so a run broken
+# off between Step 5 and Step 6 cannot leave it unprovable; the record and the memory copies are
+# replaced by rename, never rewritten in place; a record that cannot be read, or is a link, is not
+# written; every file left as it was is listed in the closing summary.
+# ============================================================================
+echo "--- T48: record before Step 5, atomic writes, unusable record, closing summary (review-12 of #965/#967) ---"
+
+# t48_inode FILE — the inode number: a rename gives the path a new one, an in-place write does not.
+# shellcheck disable=SC2012  # ls -i is the portable inode reader (stat differs between BSD and GNU)
+t48_inode() { ls -i "$1" | awk '{print $1}'; }
+T48_ROOT=false
+[ "$(id -u)" -eq 0 ] && T48_ROOT=true   # root ignores file modes: the mode-based checks say so and stand aside
+
+# --- 48a: the record before Step 5. Untouched copies (owner: user and owner: platform) get the version
+# this run is about to replace; the edited copy, MEMORY.md and the personal config get nothing; author_mode
+# records nothing.
+T48A_DIR="$TEST_WS/t48-a"
+T48A_TEMPLATE="$T48A_DIR/template"
+T48A_WS="$T48A_DIR/workspace"
+T48A_MEM="$T48A_DIR/memory"
+t46_template "$T48A_TEMPLATE"
+mkdir -p "$T48A_MEM" "$T48A_WS"
+t46_doc user "user copy release one" > "$T48A_TEMPLATE/memory/user-copy.md"
+t46_doc platform "platform copy release one" > "$T48A_TEMPLATE/memory/platform-copy.md"
+t46_doc platform "edited copy release one" > "$T48A_TEMPLATE/memory/edited-copy.md"
+printf '# Index\n' > "$T48A_TEMPLATE/memory/MEMORY.md"
+printf 'calendar_ids: []\n' > "$T48A_TEMPLATE/memory/day-rhythm-config.yaml"
+cp "$T48A_TEMPLATE/memory/"* "$T48A_MEM/"
+echo "Pilot line in edited-copy" >> "$T48A_MEM/edited-copy.md"
+# shellcheck disable=SC2329  # invoked through t46_run
+t48a_before_apply() {
+    t46_prepare "$T48A_TEMPLATE" "$T48A_WS" "$T48A_MEM" "$T48A_DIR/manifest.json"
+    # shellcheck disable=SC2034
+    UPDATED_FILES=(memory/user-copy.md memory/platform-copy.md memory/edited-copy.md memory/MEMORY.md memory/day-rhythm-config.yaml)
+    for t48_f in "${UPDATED_FILES[@]}"; do
+        record_memory_old_hash "$t48_f" "$(hash_file "$SCRIPT_DIR/$t48_f")"
+    done
+    remember_untouched_memory_before_apply
+}
+t46_run t48a_before_apply
+T48A_RECORD="$T48A_WS/.memory-deployed.tsv"
+if [ "$T46_RC" -eq 0 ] \
+    && grep -qxF -- "$(t47_line memory/user-copy.md "$T48A_TEMPLATE/memory/user-copy.md")" "$T48A_RECORD" 2>/dev/null \
+    && grep -qxF -- "$(t47_line memory/platform-copy.md "$T48A_TEMPLATE/memory/platform-copy.md")" "$T48A_RECORD" 2>/dev/null \
+    && ! grep -qE 'edited-copy|MEMORY\.md|day-rhythm' "$T48A_RECORD" 2>/dev/null; then
+    pass "T48: before Step 5 untouched copies get their record line — owner: user and owner: platform; edited copy, MEMORY.md, personal config none"
+else
+    fail "T48: the record before Step 5 is wrong (status $T46_RC): '$(tr '\n' '|' < "$T48A_RECORD" 2>/dev/null)' $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+fi
+rm -f "$T48A_RECORD"
+printf 'author_mode: true\n' > "$T48A_WS/params.yaml"
+t46_run t48a_before_apply
+if [ "$T46_RC" -eq 0 ] && [ ! -e "$T48A_RECORD" ]; then
+    pass "T48: author_mode writes no record before Step 5"
+else
+    fail "T48: author_mode wrote a record before Step 5 (status $T46_RC)"
+fi
+
+# The functions below are update.sh's own; each check runs them in a subshell under set -e.
+T48_FUNCS=$(update_sh_functions hash_file memory_record_size_ok memory_record_put memory_record_get remember_memory_deployed replace_memory_copy)
+T48_H1=$(printf one | shasum -a 256 | cut -d' ' -f1)
+T48_H2=$(printf two | shasum -a 256 | cut -d' ' -f1)
+T48_DIR="$TEST_WS/t48-units"
+mkdir -p "$T48_DIR"
+
+# --- 48b: the record is replaced by rename: a read-only record still takes the new line, and the path
+# gets a new inode (an in-place `cat >` fails on it, or keeps the inode).
+T48B_REC="$T48_DIR/readonly-record.tsv"
+printf 'memory/a.md\t%s\nmemory/b.md\t%s\n' "$T48_H1" "$T48_H2" > "$T48B_REC"
+chmod 444 "$T48B_REC"
+T48B_INODE=$(t48_inode "$T48B_REC")
+T48B_RC=0
+( set -e; eval "$T48_FUNCS"; memory_record_put "$T48B_REC" memory/c.md "$T48_H1" ) || T48B_RC=$?
+if [ "$T48B_RC" -eq 0 ] && grep -qxF -- "$(printf 'memory/c.md\t%s' "$T48_H1")" "$T48B_REC" \
+    && grep -qxF -- "$(printf 'memory/a.md\t%s' "$T48_H1")" "$T48B_REC" \
+    && [ "$(t48_inode "$T48B_REC")" != "$T48B_INODE" ]; then
+    pass "T48: the record is rewritten by rename — a read-only record still takes the line, under a new inode"
+else
+    fail "T48: the record was written in place or not at all (rc $T48B_RC, inode $T48B_INODE -> $(t48_inode "$T48B_REC")): $(tr '\n' '|' < "$T48B_REC")"
+fi
+rm -f "$T48B_REC"
+
+# --- 48c: a memory copy is replaced by rename too, keeping its mode: no moment shows it cut short.
+printf 'release two\n' > "$T48_DIR/src.md"
+printf 'release one\n' > "$T48_DIR/dst.md"
+chmod 640 "$T48_DIR/dst.md"
+T48C_INODE=$(t48_inode "$T48_DIR/dst.md")
+T48C_RC=0
+( set -e; eval "$T48_FUNCS"; replace_memory_copy "$T48_DIR/src.md" "$T48_DIR/dst.md" ) || T48C_RC=$?
+# shellcheck disable=SC2012  # the mode string of one known file
+T48C_MODE=$(ls -l "$T48_DIR/dst.md" | cut -c1-10)
+if [ "$T48C_RC" -eq 0 ] && cmp -s "$T48_DIR/src.md" "$T48_DIR/dst.md" \
+    && [ "$(t48_inode "$T48_DIR/dst.md")" != "$T48C_INODE" ] && [ "$T48C_MODE" = "-rw-r-----" ] \
+    && [ -z "$(find "$T48_DIR" -name 'dst.md.update-*')" ]; then
+    pass "T48: a memory copy is replaced by rename (new inode), keeps its mode and leaves no temporary file"
+else
+    fail "T48: the memory copy was rewritten in place or lost its mode (rc $T48C_RC, mode $T48C_MODE, inode $T48C_INODE -> $(t48_inode "$T48_DIR/dst.md"))"
+fi
+
+# --- 48d: a record that cannot be read, or that is a link, is not written: other files keep proof (a).
+T48D_REC="$T48_DIR/unreadable-record.tsv"
+for t48_n in 1 2 3 4 5 6; do printf 'memory/f%s.md\t%s\n' "$t48_n" "$T48_H1"; done > "$T48D_REC"
+if $T48_ROOT; then
+    echo "  (T48: unreadable-record check skipped — root reads any file)"
+else
+    chmod 000 "$T48D_REC"
+    T48D_RC=0
+    ( set -e; eval "$T48_FUNCS"; memory_record_put "$T48D_REC" memory/new.md "$T48_H2" ) || T48D_RC=$?
+    chmod 600 "$T48D_REC"
+    if [ "$T48D_RC" -ne 0 ] && [ "$(wc -l < "$T48D_REC" | tr -d ' ')" = "6" ] && ! grep -q 'memory/new.md' "$T48D_REC"; then
+        pass "T48: an unreadable record is not rewritten — its six lines survive"
+    else
+        fail "T48: an unreadable record was rewritten (rc $T48D_RC): $(wc -l < "$T48D_REC" | tr -d ' ') line(s) left"
+    fi
+fi
+printf 'memory/x.md\t%s\n' "$T48_H1" > "$T48_DIR/elsewhere.tsv"
+ln -s "$T48_DIR/elsewhere.tsv" "$T48_DIR/linked-record.tsv"
+T48D_OUT=$(
+    exec 2>&1
+    eval "$T48_FUNCS"
+    # shellcheck disable=SC2034  # read by the eval'd update.sh functions
+    MEMORY_DEPLOYED_RECORD="$T48_DIR/linked-record.tsv"
+    # shellcheck disable=SC2034
+    MEMORY_RECORD_WARNED=false
+    remember_memory_deployed memory/y.md "$T48_H2"
+    remember_memory_deployed memory/z.md "$T48_H2"
+) || true
+if [ -L "$T48_DIR/linked-record.tsv" ] && [ "$(cat "$T48_DIR/elsewhere.tsv")" = "$(printf 'memory/x.md\t%s' "$T48_H1")" ] \
+    && [ "$(t46_count 'не удалось записать' "$T48D_OUT")" = "1" ]; then
+    pass "T48: a record that is a link is left as it is, with one warning for the run"
+else
+    fail "T48: a linked record was replaced or written through, or warned $(t46_count 'не удалось записать' "$T48D_OUT") times"
+fi
+
+# --- 48f: a link is no proof when READ either (red team of the 0.41.1 candidate). memory_record_put never writes
+# through one, but memory_record_get followed it: a link to a file somebody else filled with the hash of an edited
+# copy made that copy count as untouched, and the update replaced it.
+printf 'memory/x.md\t%s\n' "$T48_H1" > "$T48_DIR/proof-elsewhere.tsv"
+ln -s "$T48_DIR/proof-elsewhere.tsv" "$T48_DIR/proof-link.tsv"
+T48F_PLAIN=$( eval "$T48_FUNCS"; memory_record_get "$T48_DIR/proof-elsewhere.tsv" memory/x.md )
+T48F_LINK=$( eval "$T48_FUNCS"; memory_record_get "$T48_DIR/proof-link.tsv" memory/x.md )
+if [ "$T48F_PLAIN" = "$T48_H1" ] && [ -z "$T48F_LINK" ]; then
+    pass "T48: a record that is a link proves nothing when it is read (the same file read directly does)"
+else
+    fail "T48: a link was read as proof (direct read '$T48F_PLAIN', through the link '$T48F_LINK')"
+fi
+
+# --- 48e: every file left as it was is in the closing summary, whatever the reason; the summary does not
+# promise a command where there is none.
+if $T48_ROOT; then
+    echo "  (T48: closing-summary check skipped — root ignores the modes it needs)"
+else
+    T48E_DIR="$TEST_WS/t48-e"
+    T48E_TEMPLATE="$T48E_DIR/template"
+    T48E_MEM="$T48E_DIR/memory"
+    t46_template "$T48E_TEMPLATE"
+    mkdir -p "$T48E_TEMPLATE/memory/sub" "$T48E_MEM/sub" "$T48E_DIR/workspace"
+    t46_doc platform "new file" > "$T48E_TEMPLATE/memory/sub/new.md"
+    t46_doc platform "template file nobody can read" > "$T48E_TEMPLATE/memory/unreadable.md"
+    t46_doc platform "the copy" > "$T48E_MEM/unreadable.md"
+    chmod 555 "$T48E_MEM/sub"
+    chmod 000 "$T48E_TEMPLATE/memory/unreadable.md"
+    # shellcheck disable=SC2329  # invoked through t46_run
+    t48e_policy() {
+        t46_prepare "$T48E_TEMPLATE" "$T48E_DIR/workspace" "$T48E_MEM" "$T48E_DIR/manifest.json"
+        apply_memory_policy memory/sub/new.md "$T48E_MEM/sub/new.md" || true
+        apply_memory_policy memory/unreadable.md "$T48E_MEM/unreadable.md" || true
+        report_memory_policy_summary
+    }
+    t46_run t48e_policy
+    chmod 755 "$T48E_MEM/sub"
+    chmod 644 "$T48E_TEMPLATE/memory/unreadable.md"
+    T48E_SUMMARY=$(grep -F -- 'Не обновлено файлов памяти' <<<"$T46_OUT" || true)
+    if [ "$T46_RC" -eq 0 ] && grep -qF -- 'Не обновлено файлов памяти: 2 (memory/sub/new.md, memory/unreadable.md)' <<<"$T48E_SUMMARY" \
+        && grep -qF -- 'почему и что сделать — в строке каждого файла выше' <<<"$T48E_SUMMARY" \
+        && grep -qF -- 'memory/sub/new.md — НЕ доставлен: ' <<<"$T46_OUT" \
+        && grep -qF -- 'memory/unreadable.md — НЕ обновлён: не удалось прочитать шаблонный файл' <<<"$T46_OUT"; then
+        pass "T48: a copy that could not be delivered and an unreadable template file are in the closing summary"
+    else
+        fail "T48: the closing summary misses a file left as it was (status $T46_RC): $(printf '%s' "$T46_OUT" | tr '\n' ' ')"
+    fi
+fi
+
+# ============================================================================
+# T49: governance script policy — content decides, never git status; never aborts the run
+# (WP-485 Ф17, 2026-10-05). backfill_governance_seed_script() used to decide "safe to
+# replace" from the deployed copy's git status: clean-tracked was always treated as ours,
+# which replaced a pilot's own committed, more-advanced version with an older seed (the
+# live incident this phase fixes). apply_governance_script_policy reuses the memory/*
+# policy's classifier (content vs. the template clone's own history at the seed path) and
+# its never-abort contract instead.
+# ============================================================================
+echo "--- T49: governance script policy — content decides, never git status; never aborts (WP-485 Ф17) ---"
+
+T49_FUNCS=$(update_sh_functions hash_file atomic_copy_executable memory_record_size_ok memory_record_put memory_record_get \
+    memory_old_hash remember_memory_deployed memory_reason_text memory_copy_verdict saving_cp_command \
+    backup_governance_script_before_overwrite apply_governance_script_policy report_governance_script_policy_summary)
+if ! grep -q '^apply_governance_script_policy() {' <<<"$T49_FUNCS"; then
+    fail "T49: could not extract apply_governance_script_policy() from update.sh"
+else
+    T49_DIR="$TEST_WS/t49-governance-script-policy"
+    T49_TEMPLATE="$T49_DIR/template"
+    T49_WS="$T49_DIR/workspace"
+    # apply_governance_script_policy resolves governance_dir="$WORKSPACE_DIR/$EFFECTIVE_GOVERNANCE_REPO"
+    # itself (same as the backfill_governance_seed_script it replaces) -- the fixture must nest the
+    # governance directory under the workspace, not place it as a sibling.
+    T49_GOV="$T49_WS/governance"
+    mkdir -p "$T49_TEMPLATE/seed/strategy/scripts" "$T49_TEMPLATE/.claude/scripts" "$T49_GOV/scripts" "$T49_WS"
+    cp "$TEMPLATE_DIR/.claude/scripts/classify-workspace-copy.sh" "$T49_TEMPLATE/.claude/scripts/classify-workspace-copy.sh"
+    git -C "$T49_TEMPLATE" init -q
+    git -C "$T49_TEMPLATE" config user.email "test@test"
+    git -C "$T49_TEMPLATE" config user.name "test"
+    printf '#!/usr/bin/env python3\n# v1 — historical release\n' > "$T49_TEMPLATE/seed/strategy/scripts/one.py"
+    git -C "$T49_TEMPLATE" add -- seed/strategy/scripts/one.py
+    git -C "$T49_TEMPLATE" commit -q -m v1
+    printf '#!/usr/bin/env python3\n# v2 — current release\n' > "$T49_TEMPLATE/seed/strategy/scripts/one.py"
+    git -C "$T49_TEMPLATE" add -- seed/strategy/scripts/one.py
+    git -C "$T49_TEMPLATE" commit -q -m v2
+    printf '#!/usr/bin/env python3\n# v1 — current release\n' > "$T49_TEMPLATE/seed/strategy/scripts/two.py"
+    git -C "$T49_TEMPLATE" add -- seed/strategy/scripts/two.py
+    git -C "$T49_TEMPLATE" commit -q -m two-v1
+
+    # scripts/absent.py: not yet delivered anywhere.
+    # scripts/one.py: deployed copy equals a HISTORICAL (not current) release -- "stale", safe to
+    #   replace after a backup, the live case that replaced the pilot's own committed day-open-llm-
+    #   fill.py on 2026-10-04 (WP-485 Ф17 finding).
+    # scripts/two.py: deployed copy matches no release in the clone's history -- "authored" (could
+    #   be the pilot's own edit, or an earlier unlogged backfill): kept, diff and command offered,
+    #   never overwritten.
+    printf '#!/usr/bin/env python3\n# v1 — current release\n' > "$T49_TEMPLATE/seed/strategy/scripts/absent.py"
+    git -C "$T49_TEMPLATE" add -- seed/strategy/scripts/absent.py
+    git -C "$T49_TEMPLATE" commit -q -m absent-v1
+    printf '#!/usr/bin/env python3\n# v1 — historical release\n' > "$T49_GOV/scripts/one.py"
+    printf '#!/usr/bin/env python3\n# not in any release\n' > "$T49_GOV/scripts/two.py"
+    T49_TWO_BEFORE=$(cat "$T49_GOV/scripts/two.py")
+
+    T49_OUT=$(
+        set +e
+        eval "$T49_FUNCS"
+        SCRIPT_DIR="$T49_TEMPLATE"
+        WORKSPACE_DIR="$T49_WS"
+        EFFECTIVE_GOVERNANCE_REPO="$(basename "$T49_GOV")"
+        MEMORY_DEPLOYED_RECORD="$T49_WS/.memory-deployed.tsv"
+        # update.sh itself runs under set -e only (no -u, like T46's t46_prepare notes) -- this
+        # harness runs the whole suite under set -u (line 68), so the globals update.sh's own
+        # top-level script body would initialize before any call need setting here explicitly.
+        GOVSCRIPT_BACKUP_RUN=""
+        GOVSCRIPT_REPLACED=()
+        GOVSCRIPT_KEPT=()
+        apply_governance_script_policy "scripts/absent.py"
+        apply_governance_script_policy "scripts/one.py"
+        apply_governance_script_policy "scripts/two.py"
+        report_governance_script_policy_summary
+    )
+    T49_BACKUP=$(find "$T49_WS/.backups/governance-script-pre-update" -type f -name "one.py" -print -quit 2>/dev/null || true)
+
+    if [ -f "$T49_GOV/scripts/absent.py" ] \
+        && cmp -s "$T49_GOV/scripts/absent.py" "$T49_TEMPLATE/seed/strategy/scripts/absent.py" \
+        && [ -x "$T49_GOV/scripts/absent.py" ]; then
+        pass "T49: a never-delivered path is copied fresh, executable"
+    else
+        fail "T49: scripts/absent.py was not delivered: $T49_OUT"
+    fi
+
+    if cmp -s "$T49_GOV/scripts/one.py" "$T49_TEMPLATE/seed/strategy/scripts/one.py" \
+        && [ -n "$T49_BACKUP" ] && grep -qF 'v1 — historical release' "$T49_BACKUP"; then
+        pass "T49: a copy equal to a historical (not current) release is replaced after a backup — not blocked by git status"
+    else
+        fail "T49: scripts/one.py (stale historical release) was not safely replaced: $T49_OUT"
+    fi
+
+    if [ "$(cat "$T49_GOV/scripts/two.py")" = "$T49_TWO_BEFORE" ]; then
+        pass "T49: content matching no release is kept untouched (authored — could be the pilot's own edit)"
+    else
+        fail "T49: scripts/two.py (content in no release) was overwritten: $T49_OUT"
+    fi
+
+    if grep -qF -- 'scripts/two.py — НЕ обновлён: ' <<<"$T49_OUT" \
+        && grep -qF -- 'Если ваших правок там нет, примите версию шаблона (прежняя копия останется рядом): ' <<<"$T49_OUT"; then
+        pass "T49: the kept file's line carries a diff pointer and a ready accept command"
+    else
+        fail "T49: scripts/two.py produced no actionable kept-file message: $T49_OUT"
+    fi
+
+    if grep -qF -- 'Не обновлено скриптов governance-репо: 1 (scripts/two.py)' <<<"$T49_OUT"; then
+        pass "T49: the closing summary names the kept script by its own label, not as a 'файл памяти'"
+    else
+        fail "T49: closing summary missing or mislabeled: $T49_OUT"
+    fi
+fi
+
+# ============================================================
+# T50: skill personalization (<!-- USER-SPACE --> block) survives an update
+# through copy_platform_file_preserving_user_space() — issue #1010 F3 added
+# the preservation, but no test exercised the real function end-to-end
+# (РП-529 Ф96, S-33 authorized 17.10.2026).
+# ============================================================
+echo ""
+echo "=== T50: skill SKILL.md keeps its USER-SPACE block across an update ==="
+
+T50_DIR="$TEST_WS/t50-skill-user-space"
+mkdir -p "$T50_DIR"
+
+T50_FN_BLOCK=$(awk '
+    /^copy_platform_file_preserving_user_space\(\) \{$/{found=1}
+    found{print}
+    found && /^}$/{exit}
+' "$TEMPLATE_DIR/update.sh")
+T50_HASH_BLOCK=$(awk '/^hash_file\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+T50_SAFE_BLOCK=$(awk '/^rule_was_safe_to_update\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+T50_BACKUP_BLOCK=$(awk '/^backup_rule_before_overwrite\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+T50_REINJECT_BLOCK=$(awk '/^reinject_user_section\(\) \{$/{found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh")
+
+if [ -z "$T50_FN_BLOCK" ] || [ -z "$T50_HASH_BLOCK" ] || [ -z "$T50_SAFE_BLOCK" ] || [ -z "$T50_BACKUP_BLOCK" ] || [ -z "$T50_REINJECT_BLOCK" ]; then
+    fail "T50: could not extract copy_platform_file_preserving_user_space() or a dependency from update.sh — signature moved?"
+else
+    T50_FN_FILE="$T50_DIR/fn.sh"
+    {
+        printf '%s\n' "$T50_HASH_BLOCK"
+        printf '%s\n' "$T50_SAFE_BLOCK"
+        printf '%s\n' "$T50_BACKUP_BLOCK"
+        printf '%s\n' "$T50_REINJECT_BLOCK"
+        printf '%s\n' "$T50_FN_BLOCK"
+    } > "$T50_FN_FILE"
+    source "$T50_FN_FILE"
+
+    # Case A: the pilot's copy carries a USER-SPACE block (a personalization);
+    # upstream shipped a new version of the platform text with no block of
+    # its own (that's the normal shape — the block only ever exists in the
+    # workspace copy, never in the template source).
+    T50_SRC_A="$T50_DIR/src-a.md"
+    T50_DST_A="$T50_DIR/dst-a.md"
+    cat > "$T50_SRC_A" <<'HEREDOC'
+---
+name: demo
+---
+# Demo skill
+
+Platform text, new revision.
+HEREDOC
+    cat > "$T50_DST_A" <<'HEREDOC'
+---
+name: demo
+---
+# Demo skill
+
+Platform text, old revision.
+<!-- USER-SPACE -->
+my own note about this skill
+<!-- /USER-SPACE -->
+HEREDOC
+
+    WORKSPACE_DIR="$T50_DIR" RULES_SAFE_TO_UPDATE="" RULES_BACKUP_RUN=""
+    copy_platform_file_preserving_user_space "$T50_SRC_A" "$T50_DST_A" ".claude/skills/demo/SKILL.md"
+
+    if grep -qF "new revision" "$T50_DST_A"; then
+        pass "T50: Case A — the platform text outside the block moved to the upstream revision"
+    else
+        fail "T50: Case A — upstream revision did not land: $(cat "$T50_DST_A")"
+    fi
+    if grep -qF "my own note about this skill" "$T50_DST_A"; then
+        pass "T50: Case A — the pilot's USER-SPACE block survived the update"
+    else
+        fail "T50: Case A — the pilot's USER-SPACE block was dropped (issue #1010 F3 regression): $(cat "$T50_DST_A")"
+    fi
+    if grep -qF "old revision" "$T50_DST_A"; then
+        fail "T50: Case A — stale platform text from before the update is still present"
+    fi
+
+    # Case B: a skill with no USER-SPACE block (never personalized, or a
+    # fresh install) — plain overwrite, no markers appear out of nowhere.
+    T50_SRC_B="$T50_DIR/src-b.md"
+    T50_DST_B="$T50_DIR/dst-b.md"
+    printf '%s\n' "Platform text, new revision." > "$T50_SRC_B"
+    printf '%s\n' "Platform text, old revision." > "$T50_DST_B"
+
+    WORKSPACE_DIR="$T50_DIR" RULES_SAFE_TO_UPDATE="" RULES_BACKUP_RUN=""
+    copy_platform_file_preserving_user_space "$T50_SRC_B" "$T50_DST_B" ".claude/skills/demo/SKILL.md"
+
+    if [ "$(cat "$T50_DST_B")" = "Platform text, new revision." ]; then
+        pass "T50: Case B — a skill with no USER-SPACE block is a plain overwrite"
+    else
+        fail "T50: Case B — plain overwrite regressed: $(cat "$T50_DST_B")"
+    fi
+    if grep -qF "USER-SPACE" "$T50_DST_B"; then
+        fail "T50: Case B — markers appeared in a file that never had any"
+    fi
+fi
+
+# ============================================================================
+# T51: require_backup_root_writable() stops Step 5 before any file is
+# replaced when .backups/ can't take new entries (issue #1326 п.4)
+# ============================================================================
+echo "--- T51: .backups/ unwritable stops the update before it touches anything ---"
+
+# WP-529 F244: the gate's type and permission checks live in
+# backup_root_preflight_reason(), shared with --check — extract both.
+t51_extract_fn() {
+    awk -v header="$1() {" '$0 == header {found=1} found{print} found && /^}$/{exit}' "$TEMPLATE_DIR/update.sh"
+}
+T51_PREFLIGHT_BLOCK=$(t51_extract_fn backup_root_preflight_reason)
+T51_GATE_BLOCK=$(t51_extract_fn require_backup_root_writable)
+T51_FN_BLOCK="$T51_PREFLIGHT_BLOCK
+$T51_GATE_BLOCK"
+if [ -z "$T51_PREFLIGHT_BLOCK" ] || [ -z "$T51_GATE_BLOCK" ]; then
+    fail "T51: could not extract backup_root_preflight_reason()/require_backup_root_writable() from update.sh — signature moved?"
+else
+    T51_DIR="$TEST_WS/t51-backup-root-guard"
+    mkdir -p "$T51_DIR"
+    printf '%s\n' "$T51_FN_BLOCK" > "$T51_DIR/fn.sh"
+
+    # chmod 000 only means anything for a non-root test process — a root
+    # runner (seen on some CI containers) ignores the mode bits entirely, so
+    # this one scenario is skipped there rather than reported as a failure.
+    T51_IS_ROOT=false
+    [ "$(id -u)" = "0" ] && T51_IS_ROOT=true
+
+    t51_run() {
+        # $1 = workspace dir; isolates EXIT_RUNTIME/WORKSPACE_DIR to the
+        # subshell so the guard's own `exit` can't end this test script.
+        bash -c 'set -e; EXIT_RUNTIME=3; WORKSPACE_DIR="$1"; source "$2"; require_backup_root_writable; echo T51_PASSED_GATE' \
+            -- "$1" "$T51_DIR/fn.sh"
+    }
+
+    if $T51_IS_ROOT; then
+        echo "  (skip: running as root — chmod 000 is a no-op for this scenario)"
+    else
+        T51_WS="$T51_DIR/ws-unwritable"
+        mkdir -p "$T51_WS/.backups/memory-pre-update"
+        printf 'a prior backup' > "$T51_WS/.backups/memory-pre-update/old.md"
+        T51_SUM_BEFORE=$(find "$T51_WS" -type f -exec shasum -a 256 {} \; | sort)
+        chmod 000 "$T51_WS/.backups"
+        set +e
+        T51_OUT=$(t51_run "$T51_WS" 2>&1)
+        T51_RC=$?
+        set -e
+        chmod 755 "$T51_WS/.backups"
+        T51_SUM_AFTER=$(find "$T51_WS" -type f -exec shasum -a 256 {} \; | sort)
+
+        if [ "$T51_RC" -eq 3 ] && ! printf '%s' "$T51_OUT" | grep -q T51_PASSED_GATE; then
+            pass "T51: an existing .backups/ with mode 000 fails the gate with exit 3"
+        else
+            fail "T51: expected exit 3 before the gate passes, got rc=$T51_RC out=$T51_OUT"
+        fi
+        if [ "$T51_SUM_BEFORE" = "$T51_SUM_AFTER" ]; then
+            pass "T51: the prior backup under .backups/ is untouched by the failed probe"
+        else
+            fail "T51: files under the workspace changed even though the gate should run before any apply"
+        fi
+    fi
+
+    T51_SYMLINK_WS="$T51_DIR/ws-symlink"
+    mkdir -p "$T51_SYMLINK_WS" "$T51_DIR/elsewhere"
+    ln -s "$T51_DIR/elsewhere" "$T51_SYMLINK_WS/.backups"
+    set +e
+    T51_SYMLINK_RC=$(t51_run "$T51_SYMLINK_WS" >/dev/null 2>&1; echo $?)
+    set -e
+    if [ "$T51_SYMLINK_RC" -eq 3 ]; then
+        pass "T51: .backups as a symlink (even to a writable target) fails the gate with exit 3"
+    else
+        fail "T51: expected exit 3 for a symlinked .backups, got rc=$T51_SYMLINK_RC"
+    fi
+
+    T51_BROKEN_WS="$T51_DIR/ws-broken-symlink"
+    mkdir -p "$T51_BROKEN_WS"
+    ln -s "$T51_DIR/does-not-exist" "$T51_BROKEN_WS/.backups"
+    set +e
+    T51_BROKEN_RC=$(t51_run "$T51_BROKEN_WS" >/dev/null 2>&1; echo $?)
+    set -e
+    if [ "$T51_BROKEN_RC" -eq 3 ]; then
+        pass "T51: a broken .backups symlink fails the gate with exit 3"
+    else
+        fail "T51: expected exit 3 for a broken .backups symlink, got rc=$T51_BROKEN_RC"
+    fi
+
+    T51_FILE_WS="$T51_DIR/ws-file-not-dir"
+    mkdir -p "$T51_FILE_WS"
+    touch "$T51_FILE_WS/.backups"
+    set +e
+    T51_FILE_RC=$(t51_run "$T51_FILE_WS" >/dev/null 2>&1; echo $?)
+    set -e
+    if [ "$T51_FILE_RC" -eq 3 ]; then
+        pass "T51: .backups as a plain file (not a directory) fails the gate with exit 3"
+    else
+        fail "T51: expected exit 3 for a non-directory .backups, got rc=$T51_FILE_RC"
+    fi
+
+    T51_OK_WS="$T51_DIR/ws-missing-but-writable"
+    mkdir -p "$T51_OK_WS"
+    if t51_run "$T51_OK_WS" | grep -q T51_PASSED_GATE && [ -d "$T51_OK_WS/.backups" ]; then
+        pass "T51: a missing .backups/ under a writable parent is created and the gate passes"
+    else
+        fail "T51: the positive case (no .backups yet, writable parent) regressed"
+    fi
+
+    T51_WIRED=$(grep -c '^require_backup_root_writable$' "$TEMPLATE_DIR/update.sh")
+    if [ "$T51_WIRED" -ge 1 ]; then
+        pass "T51: Step 5 actually calls require_backup_root_writable()"
+    else
+        fail "T51: require_backup_root_writable() exists but Step 5 never calls it"
+    fi
 fi
 
 # ============================================================

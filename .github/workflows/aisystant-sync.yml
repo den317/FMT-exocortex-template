@@ -2,7 +2,7 @@ name: Aisystant Sync (Pipeline 1, pull-only)
 
 # WP-415 Pipeline 1: personal RU template (this repo) -> private RU repos in
 # the aisystant org, Variant A pull-only (pilot decision 2026-07-13).
-# Architecture: DS-ecosystem-development/0.OPS/0.9.Inbox/WP-415-pipeline-architecture.md
+# Architecture: WP-415-pipeline-architecture.md (0.OPS/0.9.Inbox in the pilot's own ecosystem-development repo)
 #
 # Manual dispatch only, on purpose -- unlike translate-sync.yml (Pipeline 2,
 # push-triggered), this workflow never fires on a plain push. Two reasons:
@@ -33,10 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history not needed, tree of HEAD is enough)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -52,7 +52,7 @@ jobs:
       - name: Generate aisystant installation token
         if: ${{ inputs.live }}
         id: aisystant_token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ vars.CANON_SYNC_APP_ID }}
           private-key: ${{ secrets.CANON_SYNC_APP_KEY }}

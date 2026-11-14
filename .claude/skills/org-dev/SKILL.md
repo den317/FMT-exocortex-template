@@ -6,6 +6,7 @@ related: [WP-377, WP-369, DP.SC.049, DP.ROLE.063, MIM.M.030, MIM.M.031]
 version: 1.0.0
 layer: L3
 status: active
+browser_safe: false
 triggers:
   slash: [/org-dev]
   phrases:
@@ -43,13 +44,13 @@ routing:
 
 1. Определить субъекта по запросу: `self` | `other_person` | `team` | `organization`.
 2. Найти контекст:
-   - `subject = self` → `~/IWE/PACK-personal/personal-guide/`
-   - `subject = team` → `~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/team-guide/`
-   - `subject = organization` → `~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/org-guide/`
+   - `subject = self` → `${IWE_WORKSPACE:-$HOME/IWE}/PACK-personal/personal-guide/`
+   - `subject = team` → `${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/team-guide/`
+   - `subject = organization` → `${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/org-guide/`
 3. Прочитать последние ≤5 записей блоков `## Org-Dev Session YYYY-MM-DD` для не-противоречивости с предыдущими рекомендациями.
 4. Если контекст-файл отсутствует — отметить «first interaction», продолжить.
 
-Лог: создать `~/IWE/.claude/state/org-dev-session-YYYY-MM-DD-NN.yaml` (NN = инкрементальный счётчик за день), записать `subject`, `request_raw`.
+Лог: создать `${IWE_WORKSPACE:-$HOME/IWE}/.claude/state/org-dev-session-YYYY-MM-DD-NN.yaml` (NN = инкрементальный счётчик за день), записать `subject`, `request_raw`.
 
 ## Шаг 0 — MIM.M.030 классификатор (7 вопросов)
 
@@ -130,8 +131,9 @@ margin   = scores[dominant] - second
 
 Цель: получить `cp.iwe` субъекта.
 
-- **VS Code режим** (Bash доступен): попытаться через `mcp__claude_ai_IWE__dt_read_digital_twin` (path `1_declarative/cp_profile`) или через psycopg2 запрос к `learning.cp_assessments` (для self-субъекта).
-- **Браузерный режим**: `mcp__claude_ai_IWE__dt_read_digital_twin` тот же.
+- **`subject = self`** (браузер и VS Code одинаково): `learning_ctx_get_my_cp_assessment` → `cp_scores["cp.iwe"]`. Это последняя самооценка из журнала (диагностика `/diagnose`), не подтверждённая ступень. Цифровой двойник (`1_declarative/cp_profile`) не читать: навык диагностики туда больше не пишет (WP-578 Ф21.3).
+- **Другой человек или команда:** чужую самооценку этот инструмент не отдаёт — сразу уточняющий вопрос ниже.
+- Инструмент вернул `null`, профиль с `expired: true`, без `cp.iwe` или ошибку → уточняющий вопрос ниже (ошибку назвать: «не смог прочитать прошлую диагностику», не «диагностики нет»).
 
 Маршрутизация:
 - `cp.iwe ≥ 2` → к Шагу 3.
@@ -164,7 +166,7 @@ margin   = scores[dominant] - second
 
 Сформулировать **конкретный первый шаг ≤30 мин**, взяв `action_template` из MIM.M.031 и адаптировав под applicability-результат и subject-контекст из Шага 0a.
 
-Записать в `personal-guide / team-guide / org-guide` субъекта новый блок (через Write или Edit; для self — `~/IWE/PACK-personal/personal-guide/CURRENT.md` или эквивалент):
+Записать в `personal-guide / team-guide / org-guide` субъекта новый блок (через Write или Edit; для self — `${IWE_WORKSPACE:-$HOME/IWE}/PACK-personal/personal-guide/CURRENT.md` или эквивалент):
 
 ```markdown
 ## Org-Dev Session YYYY-MM-DD

@@ -5,6 +5,7 @@ argument-hint: "[описание проблемы]"
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/iwe-bug-report]
   phrases: []
@@ -62,7 +63,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Запусти:
 ```bash
-git -C "$HOME/IWE/FMT-exocortex-template" log -1 --format="%h %ad" --date=short 2>/dev/null || echo "неизвестно"
+git -C "${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template" log -1 --format="%h %ad" --date=short 2>/dev/null || echo "неизвестно"
 ```
 
 ## Шаг 4. Проверить gh CLI

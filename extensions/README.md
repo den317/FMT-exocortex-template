@@ -52,6 +52,8 @@ fi
 | `day-open` | `before` | Перед шагом 1 (Вчера) — утренние ритуалы, подготовка |
 | `day-open` | `after` | После шага 6b (Требует внимания), перед записью DayPlan |
 | `day-open` | `checks` | После записи DayPlan, **ДО** git commit (БЛОКИРУЮЩЕЕ) |
+
+> **Два пути исполнения `day-open.*.md` (WP-529 Ф11).** Интерактивный скилл (`day-open/SKILL.md`) читает и исполняет файл как агент — `load-extensions.sh` + `Read`. Автономный конвейер `scripts/day-open-pipeline.sh` (launchd/cron, LLM в цикле нет физически) исполняет **те же файлы** через `scripts/day-open-hooks-runner.sh`: извлекает и `eval`ит каждый ```` ```bash ```` блок механически — тот же приём, что уже был у `checks` (`day-open-checks-runner.sh`). Отсюда правило: содержимое `day-open.before.md`/`day-open.after.md`/`day-open.checks*.md` должно быть исполняемым bash-блоком, а не прозой для LLM — иначе конвейер честно упадёт «извлечено 0 bash-блоков» на автономном прогоне. Неуспешный `before`/`after`/`checks`-хук блокирует commit конвейера целиком (может мутировать состояние до commit — тихий WARN рисковал бы закоммитить половинчатый результат).
 | `day-close` | `before` | Перед шагом 1 |
 | `day-close` | `checks` | После governance batch, перед архивацией |
 | `day-close` | `after` | После итогов дня, перед верификацией |
@@ -192,7 +194,7 @@ cp my-extension-pack/extensions/* ~/IWE/extensions/
 |---------|-----|---------|
 | без префикса | Платформенные (зарезервированы) | `iwe-knowledge` (Gateway, агрегирует knowledge + digital-twin) |
 | `ext-*` | Вендорские | `ext-google-calendar`, `ext-linear`, `ext-slack` |
-| `<ваш префикс>-*` | Ваши MCP | `tseren-notes`, `tseren-obsidian` |
+| `<ваш префикс>-*` | Ваши MCP | `<ваш-префикс>-notes`, `<ваш-префикс>-obsidian` |
 
 Используйте свой уникальный префикс (например username) — это предотвращает конфликты при обновлениях.
 
@@ -224,6 +226,12 @@ cp my-extension-pack/extensions/* ~/IWE/extensions/
 После `update.sh` эти серверы появятся в `.mcp.json`. Требуется `jq` (`brew install jq`).
 
 **Важно:** `update.sh` не трогает `extensions/mcp-user.json` — ваши MCP в безопасности при обновлениях.
+
+### Образец: Railway
+
+Раньше шаблон сам ставил сервер `ext-railway`, но его команда вела на скрипт-обёртку, которого у пользователей нет, и сервер падал при каждом запуске. Теперь Railway подключается только вручную, по образцу `extensions/mcp-railway.json.sample`. Сам образец ни установка, ни обновление не читают. Перенесите блок `ext-railway` в `extensions/mcp-user.json` и укажите путь к своему скрипту, который запускает MCP-сервер Railway с вашим токеном.
+
+При обновлении `update.sh` убирает из `.mcp.json` старую шаблонную запись railway, если её скрипта нет на месте. Запись, которую вы описали в `extensions/mcp-user.json`, вливается обратно.
 
 ## Фильтрация контекста Kimi (.agentigore)
 

@@ -539,9 +539,14 @@ def _prepare_database(paths: ProfilePaths, *, create: bool) -> bool:
 def _connect(paths: ProfilePaths, *, create: bool) -> sqlite3.Connection | None:
     if not _prepare_database(paths, create=create):
         return None
-    connection = sqlite3.connect(paths.database, timeout=5)
+    # 30s (was 5s): dozens of parallel writers (hooks of several agents
+    # at once) on a loaded host periodically exceeded the 5s queue wait on
+    # the lock — "database is locked" both in prod and in CI (issue-tests 533,
+    # flickered on every second run). busy_timeout remains a limit on
+    # waiting, not an infinite hang.
+    connection = sqlite3.connect(paths.database, timeout=30)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute("PRAGMA busy_timeout=30000")
     try:
         _migrate(connection)
         _harden_database_files(paths)
@@ -853,6 +858,35 @@ def _validate_subject(kind: str, subject_id: str) -> tuple[str, str]:
     return kind, value
 
 
+def _post_m15_practiced_fact(paths: ProfilePaths, fault: str) -> None:
+    """WP-522 (раздел М, пир-сессия 2026-08-31-30): за завершённую запись
+    косяка агента (М15 «зафиксировал инцидент или паттерн ошибки в журнале»)
+    отчитаться в чек-лист участника экосистемы — best-effort, не влияет на
+    уже сохранённую в SQLite запись косяка (вызывается ПОСЛЕ commit).
+    Специфично для персонального проекта этого пилота (writer живёт в
+    governance-репо, не в этом платформенном шаблоне) — молча пропустить,
+    если writer не установлен, вместо ошибки для остальных пользователей IWE."""
+    writer = paths.governance / "scripts" / "post-culture-fact.py"
+    if not writer.is_file():
+        return
+    try:
+        # A short timeout (not 10s, like the writer itself — code review 31.08,
+        # High): recording a fault must not visibly hang on a slow network
+        # for the sake of a best-effort side report.
+        subprocess.run(
+            [sys.executable, str(writer), "--element", "M15", "--mode", "record", "--evidence", fault],
+            timeout=3,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Code review 31.08 (Critical): `str(TimeoutExpired)` includes the full
+        # cmd, and therefore `fault` (which may carry sensitive incident
+        # details) — log only the type and the timeout, not the exception text.
+        print("culture_element_practiced (M15): writer call timed out", file=sys.stderr)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"culture_element_practiced (M15): writer call failed: {type(e).__name__}", file=sys.stderr)
+
+
 def record_fault(paths: ProfilePaths, args: argparse.Namespace) -> None:
     fault = _join_words(args.fault, "fault", required=True)
     citation = _join_words(args.source_citation, "source-citation", required=False)
@@ -976,6 +1010,7 @@ def record_fault(paths: ProfilePaths, args: argparse.Namespace) -> None:
         raise
     finally:
         _close(connection, paths)
+    _post_m15_practiced_fact(paths, fault)
     print(f"OK: fault {action} ({subject_kind}:{subject_id}, n={count})")
 
 

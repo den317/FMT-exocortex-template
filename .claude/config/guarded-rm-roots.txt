@@ -1,0 +1,9 @@
+# Roots inside which .claude/bin/guarded-rm deletes (WP-023). The root itself is not deleted,
+# only what is inside. One entry per line; # is a comment. This is data, not shell.
+# Allowed: an absolute path (/… or C:/…), {TMP} — /tmp, {TMPDIR} — the TMPDIR variable,
+# if set, {WORKSPACE}/… — inside the IWE workspace root.
+# On Windows (Git Bash) /tmp is the user's temporary directory, where the scratchpad of
+# Claude Code sessions also lives.
+{TMP}
+{TMPDIR}
+{WORKSPACE}/.claude/worktrees

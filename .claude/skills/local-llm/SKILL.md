@@ -5,6 +5,7 @@ user_invocable: true
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/local-llm]
   phrases:
@@ -20,6 +21,7 @@ triggers:
 routing:
   executor: script+judgment
   deterministic: false
+  model_step: "разбор запроса на естественном языке в выбор скрипта и Шаг 4 — суждение об adopt по находкам монитора новых моделей; установка, запуск и переключение делают скрипты бандла"
   optimization_priority: 2
 agents: single
 interaction: multi-step
@@ -90,7 +92,8 @@ bash "$BUNDLE/iwe-local-llm.sh" archive <model-id># вывести в архив
 ### Шаг 4 — мониторинг новых моделей (суждение → LLM-работа)
 
 ```bash
-python3 "$BUNDLE/model-monitor.py"    # дайджест трендовых моделей, которых нет в каталоге
+BUNDLE="${IWE_LOCAL_LLM_DIR:-$HOME/IWE/extensions/local-llm}"
+PY3="$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh")" && "$PY3" "$BUNDLE/model-monitor.py"    # дайджест трендовых моделей, которых нет в каталоге
 ```
 
 Монитор только **находит** кандидатов. Решение об adopt — суждение агента (это и есть LLM-работа, ради которой скилл существует):

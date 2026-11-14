@@ -1,10 +1,10 @@
 #!/bin/bash
-# verify-manifest.sh — проверяет что update-manifest.json синхронизирован с git tree.
-# Использование: bash scripts/verify-manifest.sh
-# Exit 0 = манифест актуален. Exit 1 = рассинхрон (показывает diff).
+# verify-manifest.sh — checks that update-manifest.json is in sync with the git tree.
+# Usage: bash scripts/verify-manifest.sh
+# Exit 0 = manifest is current. Exit 1 = out of sync (shows diff).
 #
-# Запускает generate-manifest.sh во временный файл и сравнивает с текущим.
-# НЕ изменяет update-manifest.json (read-only, безопасен для CI).
+# Runs generate-manifest.sh into a temporary file and compares with the current one.
+# Does NOT modify update-manifest.json (read-only, safe for CI).
 
 set -euo pipefail
 
@@ -22,33 +22,33 @@ if [ ! -f "$MANIFEST" ]; then
     exit 2
 fi
 
-# Сохраняем текущий манифест (read-only backup)
+# Save the current manifest (read-only backup)
 BACKUP=$(mktemp)
 trap 'rm -f "$BACKUP"' EXIT
 cp "$MANIFEST" "$BACKUP"
 
-# Сохраняем версию из текущего манифеста (generate-manifest.sh берёт из CHANGELOG)
+# Save the version from the current manifest (generate-manifest.sh takes it from CHANGELOG)
 CURRENT_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['version'])")
 
-# Создаём временный манифест через generate-manifest.sh
+# Create a temporary manifest via generate-manifest.sh
 TMP_MANIFEST=$(mktemp)
 trap 'rm -f "$BACKUP" "$TMP_MANIFEST"' EXIT
 
-# Генерируем новый манифест во временный файл.
-# 2026-08-22 (Codex peer-review): было `|| true` — падение генератора
-# глоталось, и сравнение ниже могло пройти на СТАРОМ манифесте (fail-open в
-# проверке, заявленной fail-closed). Теперь любой отказ генератора = ошибка
-# проверки; оригинальный манифест восстанавливаем перед выходом.
+# Generate a new manifest into a temporary file.
+# 2026-08-22 (Codex peer-review): it used to be `|| true` — a generator failure
+# was swallowed, and the comparison below could pass against the OLD manifest (fail-open in
+# a check declared fail-closed). Now any generator failure = check error;
+# the original manifest is restored before exit.
 if ! bash "$GENERATOR" >/dev/null 2>&1; then
     cp "$BACKUP" "$MANIFEST"
     echo "❌ manifest-verify: generate-manifest.sh завершился с ошибкой — проверка невозможна (fail-closed)"
     exit 1
 fi
 
-# Копируем сгенерированный манифест во временный файл
+# Copy the generated manifest to a temporary file
 cp "$MANIFEST" "$TMP_MANIFEST"
 
-# Восстанавливаем версию в сгенерированном (CHANGELOG может быть "Unreleased")
+# Restore the version in the generated one (CHANGELOG may say "Unreleased")
 python3 -c "
 import json
 with open('$TMP_MANIFEST') as f:
@@ -59,25 +59,38 @@ with open('$TMP_MANIFEST', 'w') as f:
     f.write('\n')
 "
 
-# Восстанавливаем оригинальный манифест (generate-manifest.sh его перезаписал)
+# Restore the original manifest (generate-manifest.sh overwrote it)
 cp "$BACKUP" "$MANIFEST"
 
 # 2026-08-22 (external report, live 10-file deletion): deprecated_files must
 # never intersect the delivered set OR the git-tracked tree — update.sh would
 # delete files the canon still ships with every fresh clone. generate-manifest
 # filters this at write time; this check fails closed on a bad committed one.
-DEP_CONFLICTS=$(python3 - "$MANIFEST" <<'PYCHECK'
+DEP_CONFLICTS=$(python3 - "$MANIFEST" "$SCRIPT_DIR" <<'PYCHECK'
 import json, subprocess, sys
 m = json.load(open(sys.argv[1]))
+repo_root = sys.argv[2]
 delivered = {e['path'] for e in m.get('files', [])}
+excluded = set(m.get('excluded_paths', []))
 # 2026-08-22 (Codex peer-review): git ls-files без проверки кода возврата —
 # при сбое git множество tracked молча становилось пустым, и проверка
 # «deprecated ∩ дерево» деградировала fail-open. Теперь сбой git = сбой проверки.
-r = subprocess.run(['git', 'ls-files'], capture_output=True, text=True)
+# 2026-08-28: git ls-files without cwd=repo_root ran against the invoker's
+# ambient working directory — a caller invoking this script by absolute path
+# from outside the repo silently got a wrong (often empty or foreign) tracked
+# set, turning "deprecated ∩ tree" into either a false pass or a false conflict.
+r = subprocess.run(['git', 'ls-files'], capture_output=True, text=True, cwd=repo_root)
 if r.returncode != 0:
     sys.exit('git ls-files failed: ' + r.stderr.strip())
 tracked = set(r.stdout.splitlines())
-bad = [e['path'] for e in m.get('deprecated_files', []) if e.get('path') in delivered or e.get('path') in tracked]
+# WP-7 Ф92: mirrors generate-manifest.sh — a files[] → excluded_paths[] move
+# stays deprecated (cleanup for pilots who got it while still delivered) only
+# when the entry itself is marked excluded_confirmed, not just by being tracked.
+bad = [
+    e['path'] for e in m.get('deprecated_files', [])
+    if e.get('path') in delivered
+    or (e.get('path') in tracked and not (e.get('excluded_confirmed') and e.get('path') in excluded))
+]
 print('\n'.join(bad))
 PYCHECK
 )
@@ -89,16 +102,16 @@ if [ -n "$DEP_CONFLICTS" ]; then
     exit 1
 fi
 
-# 2026-08-23 (v0.38.7 матрица, находка 4): сторож, который доставляется без
-# своего обязательного файла данных, на установке из манифеста падает — CI
-# этого не видел, потому что работает в полном чекауте. Парные поставки
-# объявлены явно; каждая пара либо доставляется целиком, либо целиком нет.
+# 2026-08-23 (v0.38.7 matrix, finding 4): a watchdog that is delivered without
+# its required data file fails on an install from the manifest — CI
+# did not see this, because it runs in a full checkout. Paired deliveries
+# are declared explicitly; each pair is delivered either entirely or not at all.
 PAIRED_DELIVERY="scripts/check-python-resolver-contract.sh=scripts/tests/fixtures/python-resolver-baseline.txt"
 for pair in $PAIRED_DELIVERY; do
     tool="${pair%%=*}"; datafile="${pair#*=}"
-    # Обе стороны пары считаем по files[] (доставляемое), не по всему JSON:
-    # инструмент, осознанно выведенный из поставки, делает пару вакуумной,
-    # а не ложно-нарушенной.
+    # Both sides of the pair are counted by files[] (what is delivered), not by the whole JSON:
+    # a tool deliberately taken out of delivery makes the pair vacuous,
+    # not falsely violated.
     t=$(python3 - "$MANIFEST" "$tool" <<'PYCHK'
 import json, sys
 m = json.load(open(sys.argv[1]))
@@ -117,7 +130,7 @@ PYCHK
     fi
 done
 
-# Сравниваем backup с сгенерированным
+# Compare the backup with the generated one
 if diff -q "$BACKUP" "$TMP_MANIFEST" >/dev/null 2>&1; then
     echo "✅ manifest-verify: update-manifest.json синхронизирован с git tree"
     exit 0

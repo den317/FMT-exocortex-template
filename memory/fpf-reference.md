@@ -12,11 +12,11 @@ fpf_version: "646b41f84ffef4918ad9bdb34e7b450f0c4903ee"
 fpf_synced_at: 2026-08-14
 
 name: "fpf-reference"
-description: "Справочник FPF паттернов применимых в IWE: структура, ключевые Part C (C.11-C.28), трансляция терминов"
+description: "Справочник FPF паттернов применимых в IWE: состав экосистемы (Core + DPF-сьюты), ключевые Part C (C.11-C.28), трансляция терминов"
 ---
 # FPF (First Principles Framework) — справочник
 
-> Источник: `{{HOME_DIR}}/IWE/FPF/FPF-Spec.md`, ревизия закреплена полем `fpf_version` во frontmatter. Размер и число строк намеренно не дублируются.
+> Источник: репозиторий `ailev/FPF`, локальная копия `{{HOME_DIR}}/IWE/FPF/`, ревизия закреплена полем `fpf_version` во frontmatter. Размер и число строк намеренно не дублируются.
 
 ## Когда читать FPF
 
@@ -31,7 +31,35 @@ description: "Справочник FPF паттернов применимых �
 - Сначала найти заголовок нужной части: `grep -nE '^#{1,4} .*Part [A-G]' FPF-Spec.md`
 - Затем искать точный код/заголовок паттерна (например, `grep -n 'A\.7' FPF-Spec.md`) и читать ограниченный диапазон вокруг совпадения
 
-## Структура FPF
+## Состав репозитория FPF
+
+FPF — не один файл, а ядро + комплекты доменных фреймворков (DPF). Состав соответствует `fpf_version` из frontmatter:
+
+- **FPF Core** — `FPF-Spec.md`, части Part A–G (структура ниже)
+- Наборы DPF лежат в подпапке `FPF/DPFs/`, не в корне — на сегодня четыре:
+  - **Foundational Thinking DPF Suite** — `DPFs/Foundational Thinking DPF Suite/`: фундаментальные DPF (математическая практика, математическое моделирование, физическое, вычислительное и нотационное мышление) + `README.md` и `FOUNDATIONAL-THINKING-DPF-SUITE-REFERENCE.md`
+  - **Engineering DPF Suite** — `DPFs/Engineering DPF Suite/`: доменные фреймворки инженерии (системная инженерия и др.) + `README.md` и `ENGINEERING-DPF-SUITE-REFERENCE.md`
+  - **Management DPF Suite** — `DPFs/Management DPF Suite/`: доменные фреймворки управления и стратегирования + `README.md`
+  - **Human Capability Engineering DPF Suite** — `DPFs/Human Capability Engineering DPF Suite/`: развитие способностей человека, включая `HCD.*` (Human Capability Development) + `README.md`
+- **Narrativization DPF** — `DPFs/Narrativization-and-Narrative-Studies-Principles-Framework.md` (нарративизация)
+- Состав наборов меняется (автор переносит и добавляет их) — полный и актуальный список → `FPF/DPFs/README.md`, не этот файл
+
+### Точки входа в репозитории FPF
+
+- `Readme.md` — раздел «What is in this repository»: выбор публикации под задачу
+- `USING-FPF.md` — «Using FPF and its DPF Suites»: поиск паттернов по ID через rg, устройство секций паттерна, связывание методов через Suite Reference
+- В каждом сьюте: `README.md` (обзор) + `*-SUITE-REFERENCE.md` (связи между DPF сьюта)
+
+### Поиск знаний по DPF
+
+Ищи по ID паттерна по всему репозиторию, не только по Core:
+
+```bash
+rg -n 'HCD\.1' {{HOME_DIR}}/IWE/FPF        # паттерн из Human Capability Engineering DPF Suite
+rg -n 'A\.7' {{HOME_DIR}}/IWE/FPF/FPF-Spec.md  # паттерн Core
+```
+
+## Структура FPF Core (FPF-Spec.md)
 
 - **Part A** — Kernel: Holon, BoundedContext, Role-Method-Work, Signature Stack
 - **Part B** — Aggregation (Γ), Trust (F-G-R), Evolution Loop
@@ -130,7 +158,7 @@ description: "Справочник FPF паттернов применимых �
 |------------|----------------------|-----------------|
 | Holon | Компонент с определённой границей (часть и целое) | A.1 — декомпозиция систем |
 | Bounded Context (A.1.1) | Контекст с чётким scope: свой язык, свои правила | DDD, микросервисы |
-| F-G-R (Fact/Guess/Rumor) | Факт / предположение / слух — уровень доверия к данным | B.3 — оценка решений |
+| F-G-R (Formality / ClaimScope / Reliability) | Формальность, охват утверждения, надёжность — по каким осям оценивается обоснованность утверждения | C.2, C.2.2, C.2.3; применяется в B.3 |
 | Role ≠ Method ≠ Work (A.7) | Кто делает ≠ как делает ≠ конкретное выполнение | Проектирование процессов |
 | Role Assignment (A.2.1) | Система в роли: `система#роль:контекст` — функциональное участие системы; роль сама не работает | Pack-онтология ролей, distinctions.md HD #26 |
 | Service-word restoration (A.6.P §4.11a) | «Сервис» не задаёт один FPF-референт: восстановить обещание, роль/назначение, метод, работу, носитель, состояние, свидетельство или прямое отношение | DP сервисы MAP.002 vs точные FPF-объекты и отношения |
@@ -157,4 +185,4 @@ description: "Справочник FPF паттернов применимых �
 
 ## Обновление
 
-Периодически: `cd {{HOME_DIR}}/IWE/FPF && git pull`. FPF обновляется ~раз в 2 недели (апстрим). После pull — проверить `memory/fpf-term-map.yaml` на новые переименования (WP-481 Ф11).
+Периодически: `git -C {{HOME_DIR}}/IWE/FPF pull`. FPF обновляется ~раз в 2 недели (апстрим). После pull — проверить `memory/fpf-term-map.yaml` на новые переименования (WP-481 Ф11).

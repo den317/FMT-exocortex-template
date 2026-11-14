@@ -5,8 +5,8 @@
 # transitive closure over python imports and shell sources — not just the files
 # someone remembered to list. Spec: peer sessions 2026-08-20-42 (5-point fixture
 # spec) and 2026-08-21-17 (baseline->promote->green protocol, codex amendments:
-# dynamic call sites, +x/shebang, manifest duplicates, extension-graph strict
-# xfail until ArchGate Q1).
+# dynamic call sites, +x/shebang, manifest duplicates). Section 5 (extension
+# graph) implemented WP-529 F11 — see scripts/day-open-hooks-runner.sh.
 #
 # Bash 3.2 compatible on purpose (macOS /bin/bash): no declare -A, no mapfile.
 #
@@ -16,29 +16,35 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$SELF_DIR")"
 PIPELINE="$REPO_ROOT/scripts/day-open-pipeline.sh"
+DAY_OPEN_SCAFFOLD_SCRIPT="${DAY_OPEN_SCAFFOLD_SCRIPT:-$REPO_ROOT/scripts/day-open-scaffold.sh}"
 SEED_SCRIPTS="$REPO_ROOT/seed/strategy/scripts"
 MANIFEST="$REPO_ROOT/update-manifest.json"
 
 FAIL_COUNT=0
 PASS_COUNT=0
-XFAIL_COUNT=0
 fail() { echo "  ❌ FAIL: $*" >&2; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 pass() { echo "  ✅ PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
-xfail() { echo "  ⏸  XFAIL (expected until ArchGate): $*"; XFAIL_COUNT=$((XFAIL_COUNT + 1)); }
 
 [ -f "$PIPELINE" ] || { echo "FATAL: $PIPELINE not found" >&2; exit 2; }
 
-# --- 1. Closure of $DS_STRATEGY/scripts/ references in the pipeline ----------
+# --- 1. Closure of $SCRIPT_HOME/ references in the pipeline -------------------
 # Dynamic extraction (codex amendment: no hand-kept list): every literal
-# $DS_STRATEGY/scripts/<path> the pipeline mentions, in any call form (direct,
-# bash -c, heredoc) — the literal is what delivery must satisfy.
+# $SCRIPT_HOME/<path> the pipeline mentions, in any call form (direct, bash -c,
+# heredoc) — the literal is what delivery must satisfy. $SCRIPT_HOME is the
+# scripts/ directory the pipeline runs from (it used to be spelled
+# $DS_STRATEGY/scripts/ until issue #974: the template copy is not inside the
+# governance repo), so each reference maps to scripts/<path> of the template.
+# A parent-relative reference ($SCRIPT_HOME/.., e.g. the template-root marker
+# $SCRIPT_HOME/../update-manifest.json) is not a file delivered under scripts/
+# — skipped.
 echo "=== 1. Pipeline references resolve inside the delivery root ==="
-STRATEGY_REFS=$(grep -o '\$DS_STRATEGY/scripts/[a-zA-Z0-9._/-]*' "$PIPELINE" | sed 's|^\$DS_STRATEGY/||' | sort -u)
+# shellcheck disable=SC2016  # regex/sed literals: the $ must stay literal
+STRATEGY_REFS=$(grep -o '\$SCRIPT_HOME/[a-zA-Z0-9._/-]*' "$PIPELINE" | grep -v '^\$SCRIPT_HOME/\.\.' | sed 's|^\$SCRIPT_HOME/|scripts/|' | sort -u)
 # An empty extraction means the regex no longer matches the pipeline (variable
 # renamed, quoting changed) — every section below would loop zero times and the
 # test would pass while checking nothing (cold review 2026-08-21-17, High).
 if [ -z "$STRATEGY_REFS" ]; then
-  fail "no \$DS_STRATEGY/scripts/ references extracted from pipeline — extraction regex broken"
+  fail "no \$SCRIPT_HOME/ references extracted from pipeline — extraction regex broken"
 fi
 for rel in $STRATEGY_REFS; do
   f="$REPO_ROOT/$rel"
@@ -55,7 +61,7 @@ for rel in $STRATEGY_REFS; do
       ;;
   esac
   # Seed mirror: the pipeline itself ships in seed for fresh installs, so every
-  # $DS_STRATEGY-relative dependency must ship there too (2026-08-20-42, theme 4:
+  # $SCRIPT_HOME-relative dependency must ship there too (2026-08-20-42, theme 4:
   # update path and seed are two separate delivery axes).
   if [ -f "$SEED_SCRIPTS/$rel" ] || [ -f "$SEED_SCRIPTS/${rel#scripts/}" ]; then
     pass "seed mirror: $rel"
@@ -109,9 +115,9 @@ for rel in $STRATEGY_REFS; do
   esac
 done
 
-# --- 2b. Pipeline-own dependencies invisible to $DS_STRATEGY extraction -------
+# --- 2b. Pipeline-own dependencies invisible to $SCRIPT_HOME extraction -------
 # find-python3.sh is sourced via $(dirname BASH_SOURCE)/lib/ — not a
-# $DS_STRATEGY literal, so section 1 never sees it; without this check its
+# $SCRIPT_HOME literal, so section 1 never sees it; without this check its
 # deletion would go unnoticed (RESOLVED_PY silently falls back to python3).
 echo "=== 2b. Resolver delivery (BASH_SOURCE-relative dependency) ==="
 if [ -f "$REPO_ROOT/scripts/lib/find-python3.sh" ] && [ -x "$REPO_ROOT/scripts/lib/find-python3.sh" ]; then
@@ -155,7 +161,7 @@ SNAPSHOT_TEST_ROOT="/tmp/iwe-snapshot-path-test-$$"
 SNAPSHOT_PY=$("$REPO_ROOT/scripts/lib/find-python3.sh" 2>/dev/null) || SNAPSHOT_PY=""
 [ -n "$SNAPSHOT_PY" ] || SNAPSHOT_PY=python3
 SNAPSHOT_CONFIG_ROOT="$SNAPSHOT_TEST_ROOT/configured-workspace"
-SNAPSHOT_EXPECTED="$SNAPSHOT_CONFIG_ROOT/custom-governance/inbox/WP-425/cache/derived_snapshot.json"
+SNAPSHOT_EXPECTED="$SNAPSHOT_CONFIG_ROOT/custom-governance/.cache/derived_snapshot.json"
 
 SNAPSHOT_ACTUAL=$(IWE_ROOT="$SNAPSHOT_CONFIG_ROOT" IWE_GOVERNANCE_REPO=custom-governance \
   "$SNAPSHOT_PY" - "$SNAPSHOT_ROOT_SCRIPT" <<'PY'
@@ -179,7 +185,7 @@ mkdir -p "$SNAPSHOT_INSTALLED_REPO/scripts"
 cp "$SNAPSHOT_SEED_SCRIPT" "$SNAPSHOT_INSTALLED_REPO/scripts/update-derived-snapshot.py"
 cp "$REPO_ROOT/seed/strategy/REPO-TYPE.md" "$SNAPSHOT_INSTALLED_REPO/REPO-TYPE.md"
 SNAPSHOT_INSTALLED_REPO_PHYSICAL=$(cd "$SNAPSHOT_INSTALLED_REPO" && pwd -P)
-SNAPSHOT_INSTALLED_EXPECTED="$SNAPSHOT_INSTALLED_REPO_PHYSICAL/inbox/WP-425/cache/derived_snapshot.json"
+SNAPSHOT_INSTALLED_EXPECTED="$SNAPSHOT_INSTALLED_REPO_PHYSICAL/.cache/derived_snapshot.json"
 SNAPSHOT_INSTALLED_ACTUAL=$( \
   IWE_ROOT="$SNAPSHOT_TEST_ROOT/stale-workspace" \
   IWE_GOVERNANCE_REPO=stale-governance \
@@ -267,6 +273,78 @@ else
 fi
 rm -rf "$PIPELINE_ENV_FIXTURE"
 
+# --- 2f. Content-cleanup output excludes resolved archive sections -----------
+# Run the actual delivered function, with an override for checking the author
+# runtime source through the same fixture. Closed CC entries retain their
+# <summary> markup, so the section boundary—not a ✅ marker—is the contract.
+echo "=== 2f. Content-cleanup archive boundaries ==="
+CONTENT_CLEANUP_FIXTURE=$(mktemp -d)
+CONTENT_CLEANUP_GOV="$CONTENT_CLEANUP_FIXTURE/custom-governance"
+CONTENT_CLEANUP_FILE="$CONTENT_CLEANUP_GOV/current/content-cleanup-backlog.md"
+CONTENT_CLEANUP_DRIVER="$CONTENT_CLEANUP_FIXTURE/render-content-cleanup.sh"
+mkdir -p "$(dirname "$CONTENT_CLEANUP_FILE")"
+
+CONTENT_CLEANUP_START=$(grep -n '^render_content_cleanup()' "$DAY_OPEN_SCAFFOLD_SCRIPT" | head -1 | cut -d: -f1)
+CONTENT_CLEANUP_END=$(grep -n '^render_attention()' "$DAY_OPEN_SCAFFOLD_SCRIPT" | head -1 | cut -d: -f1)
+if [ -z "$CONTENT_CLEANUP_START" ] || [ -z "$CONTENT_CLEANUP_END" ] \
+    || [ "$CONTENT_CLEANUP_START" -ge "$CONTENT_CLEANUP_END" ]; then
+  fail "render_content_cleanup() extraction markers not found in $DAY_OPEN_SCAFFOLD_SCRIPT"
+else
+  pass "render_content_cleanup() extracted from the runtime script"
+  {
+    echo '#!/bin/bash'
+    echo "IWE=\"$CONTENT_CLEANUP_FIXTURE\""
+    echo 'IWE_GOVERNANCE_REPO="custom-governance"'
+    sed -n "${CONTENT_CLEANUP_START},$((CONTENT_CLEANUP_END - 2))p" "$DAY_OPEN_SCAFFOLD_SCRIPT"
+    echo 'render_content_cleanup'
+  } > "$CONTENT_CLEANUP_DRIVER"
+
+  check_content_cleanup_boundary() {
+    boundary="$1"
+    cat > "$CONTENT_CLEANUP_FILE" <<EOF
+<details><summary><strong>CC-201 — открытый сигнал</strong></summary></details>
+## $boundary
+<details><summary><strong>CC-202 — закрытый сигнал</strong></summary></details>
+EOF
+    output=$(bash "$CONTENT_CLEANUP_DRIVER")
+    if echo "$output" | grep -q 'CC-201 — открытый сигнал' \
+        && ! echo "$output" | grep -q 'CC-202 — закрытый сигнал' \
+        && echo "$output" | grep -q '\*\*1 на разбор\*\*'; then
+      pass "content cleanup stops at the first ## $boundary boundary"
+    else
+      fail "content cleanup leaked a resolved entry across ## $boundary: $output"
+    fi
+  }
+
+  check_content_cleanup_boundary "Архив"
+  check_content_cleanup_boundary "Разобрано"
+fi
+rm -rf "$CONTENT_CLEANUP_FIXTURE"
+
+# --- 2g. Fresh setup has no priorities.yaml yet -----------------------------
+# The priorities patch is non-blocking, but a missing optional input must leave
+# a visible fallback finding in the DayPlan rather than a swallowed traceback.
+echo "=== 2g. Missing priorities on a fresh install ==="
+PRIORITIES_FIXTURE=$(mktemp -d)
+cat > "$PRIORITIES_FIXTURE/DayPlan.md" <<'EOF'
+<details>
+<summary><b>Требует внимания</b></summary>
+</details>
+EOF
+# Reuse the interpreter selected by the shared resolver in section 2d.
+PRIORITIES_OUTPUT=$("$SNAPSHOT_PY" "$REPO_ROOT/scripts/day-open-priorities-patch.py" \
+  --dayplan "$PRIORITIES_FIXTURE/DayPlan.md" \
+  --priorities "$PRIORITIES_FIXTURE/priorities.yaml" 2>&1)
+PRIORITIES_STATUS=$?
+if [ "$PRIORITIES_STATUS" -eq 0 ] \
+    && grep -q 'phys_hours не задан в priorities.yaml' "$PRIORITIES_FIXTURE/DayPlan.md" \
+    && ! echo "$PRIORITIES_OUTPUT" | grep -q 'Traceback'; then
+  pass "missing priorities.yaml records a fallback finding without a traceback"
+else
+  fail "missing priorities.yaml did not record a clean fallback: $PRIORITIES_OUTPUT"
+fi
+rm -rf "$PRIORITIES_FIXTURE"
+
 # --- 3. Entry points run from a foreign cwd with a clean PYTHONPATH -----------
 echo "=== 3. Foreign-cwd smoke (clean PYTHONPATH) ==="
 RESOLVED_PY=""
@@ -307,22 +385,300 @@ else
   fail "update-manifest.json not found"
 fi
 
-# --- 5. Extension graph: strict xfail until ArchGate question 1 ---------------
-# The before/core/after/checks hook order is NOT implemented yet by design —
-# ArchGate question 1 (WP-529 F7, peer session 2026-08-20-42 §4). If a dispatcher
-# appears, this XPASS must fail loudly so the test is consciously updated with
-# the decided contract, never silently blessed (no unnoticed XPASS).
-echo "=== 5. Extension graph (ArchGate Q1) ==="
-if grep -qE 'load-extensions\.sh[[:space:]]+day-open|extension-graph' "$PIPELINE"; then
-  fail "XPASS: extension dispatcher appeared in pipeline — update this test per ArchGate Q1 decision before merging"
+# --- 5. Extension graph (WP-529 F11, ArchGate Q1 implemented) -----------------
+# before/after now dispatch through scripts/day-open-hooks-runner.sh (same
+# bash-block-in-Markdown mechanism "checks" already used, so it also runs
+# correctly unattended with no LLM present — see scripts/lib/day-open-hooks.sh
+# header comment). "core" is not a hook point — it is the built-in pipeline
+# body between before and after (same shape as day-close: before/checks/after,
+# no "core" call there either).
+echo "=== 5. Extension graph (WP-529 F11) ==="
+HOOKS_RUNNER="$REPO_ROOT/scripts/day-open-hooks-runner.sh"
+
+# Dynamic extraction, same defensive pattern as section 1: an empty match
+# means the pipeline no longer calls the dispatcher (renamed, refactored
+# away) and every check below would pass while testing nothing.
+DISPATCH_CALLS=$(grep -oE 'day-open-hooks-runner\.sh"[[:space:]]+(before|after)' "$PIPELINE" | grep -oE '(before|after)$' | sort -u)
+if [ -z "$DISPATCH_CALLS" ]; then
+  fail "day-open-pipeline.sh does not call day-open-hooks-runner.sh at all — extraction found nothing"
 else
-  xfail "extension-graph before/core/after/checks not dispatched by pipeline — ArchGate Q1 pending"
+  for hook in before after; do
+    if echo "$DISPATCH_CALLS" | grep -qx "$hook"; then
+      pass "pipeline dispatches the '$hook' hook"
+    else
+      fail "pipeline does not dispatch the '$hook' hook"
+    fi
+  done
 fi
+[ -f "$HOOKS_RUNNER" ] || fail "scripts/day-open-hooks-runner.sh not found"
+
+HOOKS_WORK=$(mktemp -d)
+trap 'rm -rf "$HOOKS_WORK"' EXIT
+mkdir -p "$HOOKS_WORK/extensions"
+
+# 5a. No hook files -> silent no-op (exit 0, no output).
+HOOKS_OUT=$(IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" before 2>&1)
+HOOKS_EXIT=$?
+if [ "$HOOKS_EXIT" -eq 0 ] && [ -z "$HOOKS_OUT" ]; then
+  pass "no hook files: silent no-op"
+else
+  fail "no hook files: expected silent exit 0, got exit=$HOOKS_EXIT output='$HOOKS_OUT'"
+fi
+
+# 5b. A passing hook runs and its bash block actually executes (not just
+# "didn't crash" — P1: assert the observable side effect).
+MARKER="$HOOKS_WORK/marker.txt"
+cat > "$HOOKS_WORK/extensions/day-open.before.md" <<EOF
+\`\`\`bash
+echo "ran" > "$MARKER"
+\`\`\`
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" before >/dev/null 2>&1
+if [ "$?" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "ran" ]; then
+  pass "passing before-hook: block executed, exit 0"
+else
+  fail "passing before-hook: expected marker file with 'ran', exit 0"
+fi
+rm -f "$MARKER" "$HOOKS_WORK/extensions/day-open.before.md"
+
+# 5c. A failing hook block makes the runner exit nonzero — this is what the
+# pipeline calls above use to decide whether to abort (a before/after hook
+# can mutate DS_STRATEGY state, so a silent WARN-and-continue would let a
+# half-failed mutation get committed — Codex review, 2026-08-28).
+cat > "$HOOKS_WORK/extensions/day-open.after.md" <<'EOF'
+```bash
+exit 1
+```
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" after >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  pass "failing after-hook: runner exits nonzero"
+else
+  fail "failing after-hook: runner exited 0, pipeline would commit past a failed hook"
+fi
+rm -f "$HOOKS_WORK/extensions/day-open.after.md"
+
+# 5c2. A failing command FOLLOWED by a successful one must still be caught —
+# not just a block whose only/last statement fails (Codex review, 2026-08-28,
+# High regression: `if ! ( set -e; eval "$block" ); then` suppresses errexit
+# for a subshell that is itself the condition of `if`/`!`, so `false` followed
+# by a successful command silently "passed" even with `set -e` re-declared
+# inside the subshell — a genuine footgun, not a hypothetical one).
+cat > "$HOOKS_WORK/extensions/day-open.after.md" <<'EOF'
+```bash
+false
+echo "survived"
+```
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" after >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  pass "failing command followed by a successful one is still caught (errexit-in-condition footgun)"
+else
+  fail "a failing command followed by a successful one was NOT caught — errexit-in-condition footgun"
+fi
+rm -f "$HOOKS_WORK/extensions/day-open.after.md"
+
+# 5d. Exact-name matching: day-open.beforeevil.md must NOT match the
+# "before" hook (the literal dot after the hook name is part of the glob).
+cat > "$HOOKS_WORK/extensions/day-open.beforeevil.md" <<'EOF'
+```bash
+exit 1
+```
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" before >/dev/null 2>&1
+if [ "$?" -eq 0 ]; then
+  pass "day-open.beforeevil.md does not false-match the 'before' hook"
+else
+  fail "day-open.beforeevil.md incorrectly matched the 'before' hook"
+fi
+rm -f "$HOOKS_WORK/extensions/day-open.beforeevil.md"
+
+# 5e. Split-file convention (day-open.<hook>.<suffix>.md) runs in LC_ALL=C
+# sorted order — same convention "checks" already documents.
+ORDER_FILE="$HOOKS_WORK/order.txt"
+cat > "$HOOKS_WORK/extensions/day-open.after.a-first.md" <<EOF
+\`\`\`bash
+echo "a" >> "$ORDER_FILE"
+\`\`\`
+EOF
+cat > "$HOOKS_WORK/extensions/day-open.after.b-second.md" <<EOF
+\`\`\`bash
+echo "b" >> "$ORDER_FILE"
+\`\`\`
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" after >/dev/null 2>&1
+if [ "$(tr '\n' ',' < "$ORDER_FILE" 2>/dev/null)" = "a,b," ]; then
+  pass "split hook files run in sorted (a-first, b-second) order"
+else
+  fail "split hook files did not run in sorted order: $(cat "$ORDER_FILE" 2>/dev/null | tr '\n' ',')"
+fi
+rm -f "$ORDER_FILE" "$HOOKS_WORK/extensions/day-open.after.a-first.md" "$HOOKS_WORK/extensions/day-open.after.b-second.md"
+
+# 5f. A hook file that contributes zero bash blocks is an error, not a
+# silent pass (same fencing-typo trap issue #466 fixed for "checks").
+cat > "$HOOKS_WORK/extensions/day-open.before.md" <<'EOF'
+No bash blocks here, just prose.
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" before >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  pass "hook file with zero bash blocks fails loudly (fencing-typo trap)"
+else
+  fail "hook file with zero bash blocks silently passed"
+fi
+rm -f "$HOOKS_WORK/extensions/day-open.before.md"
+
+# 5g. Bash 3.2 (macOS system bash) compatibility — the runner and the shared
+# lib must work under the same interpreter the macOS CI matrix pins to.
+if command -v /bin/bash >/dev/null 2>&1 && /bin/bash -c '[[ "${BASH_VERSINFO[0]}" -lt 4 ]]' 2>/dev/null; then
+  cat > "$HOOKS_WORK/extensions/day-open.before.md" <<EOF
+\`\`\`bash
+echo "ran" > "$MARKER"
+\`\`\`
+EOF
+  IWE_ROOT="$HOOKS_WORK" /bin/bash "$HOOKS_RUNNER" before >/dev/null 2>&1
+  if [ "$?" -eq 0 ] && [ -f "$MARKER" ]; then
+    pass "runs under /bin/bash 3.2"
+  else
+    fail "does not run under /bin/bash 3.2"
+  fi
+  rm -f "$MARKER" "$HOOKS_WORK/extensions/day-open.before.md"
+fi
+
+# 5h. A well-formed hook file must not mask a sibling with zero bash blocks
+# for the SAME hook (Codex review, 2026-08-28, High: a shared "any blocks
+# ran at all" check across the whole set let a fencing-typo file in a split
+# day-open.<hook>.<suffix>.md set pass silently as long as another file in
+# the set had valid blocks).
+cat > "$HOOKS_WORK/extensions/day-open.before.md" <<EOF
+\`\`\`bash
+echo "valid" > "$MARKER"
+\`\`\`
+EOF
+cat > "$HOOKS_WORK/extensions/day-open.before.custom.md" <<'EOF'
+prose, no fencing — oops
+EOF
+IWE_ROOT="$HOOKS_WORK" bash "$HOOKS_RUNNER" before >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  pass "zero-block sibling file is not masked by a valid one"
+else
+  fail "zero-block sibling file was silently masked by a valid one in the same hook"
+fi
+rm -f "$MARKER" "$HOOKS_WORK/extensions/day-open.before.md" "$HOOKS_WORK/extensions/day-open.before.custom.md"
+
+# 5i. A missing/unreadable extensions/ directory is a failure, not the same
+# "no hooks" no-op as a legitimately empty one (Codex review, 2026-08-28,
+# High: every install ships extensions/, so its absence means a broken
+# install, and find's stderr was being discarded either way).
+MISSING_EXT_ROOT=$(mktemp -d)
+rmdir "$MISSING_EXT_ROOT"
+IWE_ROOT="$MISSING_EXT_ROOT" bash "$HOOKS_RUNNER" before >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  pass "missing extensions/ directory fails, not treated as 'no hooks'"
+else
+  fail "missing extensions/ directory was silently treated as 'no hooks'"
+fi
+
+# 5j. Universal template checks still run when the user adds a split or
+# agent-only checks file. A one-line plan failed with no customization but
+# used to pass with either file; also prove that a user's bash block executes.
+echo "=== 5j. Template checks plus user checks ==="
+CHECKS_RUNNER="$REPO_ROOT/scripts/day-open-checks-runner.sh"
+CHECKS_PLAN="$HOOKS_WORK/DayPlan 2026-10-02.md"
+CUSTOM_CHECK="$HOOKS_WORK/extensions/day-open.checks.mine.md"
+printf '# DayPlan 2026-10-02\n' > "$CHECKS_PLAN"
+
+CHECKS_OUT=$(IWE_ROOT="$HOOKS_WORK" IWE_TEMPLATE="$REPO_ROOT" \
+  bash "$CHECKS_RUNNER" "$CHECKS_PLAN" 2>&1)
+CHECKS_STATUS=$?
+if [ "$CHECKS_STATUS" -ne 0 ] && echo "$CHECKS_OUT" | grep -q 'подозрительно короткий'; then
+  pass "bad DayPlan is blocked by template checks with no user file"
+else
+  fail "bad DayPlan passed without a user file: $CHECKS_OUT"
+fi
+
+cat > "$CUSTOM_CHECK" <<EOF
+\`\`\`bash
+echo ran > "$MARKER"
+\`\`\`
+EOF
+CHECKS_OUT=$(IWE_ROOT="$HOOKS_WORK" IWE_TEMPLATE="$REPO_ROOT" \
+  bash "$CHECKS_RUNNER" "$CHECKS_PLAN" 2>&1)
+CHECKS_STATUS=$?
+if [ "$CHECKS_STATUS" -ne 0 ] && echo "$CHECKS_OUT" | grep -q 'подозрительно короткий' \
+    && [ "$(cat "$MARKER" 2>/dev/null)" = ran ]; then
+  pass "bad DayPlan stays blocked and the user split check runs"
+else
+  fail "user split check bypassed template checks or did not run: $CHECKS_OUT"
+fi
+
+cat > "$CHECKS_PLAN" <<'EOF'
+# DayPlan 2026-10-02
+
+## Требует внимания
+
+- Нет срочных сигналов.
+
+EOF
+rm -f "$MARKER"
+CHECKS_OUT=$(IWE_ROOT="$HOOKS_WORK" IWE_TEMPLATE="$REPO_ROOT" \
+  bash "$CHECKS_RUNNER" "$CHECKS_PLAN" 2>&1)
+CHECKS_STATUS=$?
+if [ "$CHECKS_STATUS" -eq 0 ] && [ "$(cat "$MARKER" 2>/dev/null)" = ran ] \
+    && echo "$CHECKS_OUT" | grep -q 'all 4 check(s) passed'; then
+  pass "valid DayPlan passes three template checks plus the user split check"
+else
+  fail "valid DayPlan or user split check failed: $CHECKS_OUT"
+fi
+
+# An unpacked/self-contained checkout can designate its own root as both
+# workspace and template. Discovery then returns the same files twice.
+CHECKS_OUT=$(IWE_ROOT="$REPO_ROOT" IWE_TEMPLATE="$REPO_ROOT" \
+  bash "$CHECKS_RUNNER" "$CHECKS_PLAN" 2>&1)
+CHECKS_STATUS=$?
+if [ "$CHECKS_STATUS" -eq 0 ] && echo "$CHECKS_OUT" | grep -q 'all 3 check(s) passed'; then
+  pass "shared template/workspace directory runs each check only once"
+else
+  fail "shared template/workspace directory duplicated checks: $CHECKS_OUT"
+fi
+
+cat > "$CUSTOM_CHECK" <<'EOF'
+```bash
+printf 'broken\n' > "$FILE"
+```
+EOF
+CHECKS_OUT=$(IWE_ROOT="$HOOKS_WORK" IWE_TEMPLATE="$REPO_ROOT" \
+  bash "$CHECKS_RUNNER" "$CHECKS_PLAN" 2>&1)
+CHECKS_STATUS=$?
+if [ "$CHECKS_STATUS" -ne 0 ] && [ "$(cat "$CHECKS_PLAN")" = broken ] \
+    && echo "$CHECKS_OUT" | grep -q 'нет ни одного'; then
+  pass "template checks block a DayPlan damaged by a user check"
+else
+  fail "user check damaged the DayPlan after template validation: $CHECKS_OUT"
+fi
+
+printf '# DayPlan 2026-10-02\n' > "$CHECKS_PLAN"
+cat > "$CUSTOM_CHECK" <<'EOF'
+<!-- executor: agent -->
+Manual check for a later interactive session.
+EOF
+CHECKS_OUT=$(IWE_ROOT="$HOOKS_WORK" IWE_TEMPLATE="$REPO_ROOT" \
+  bash "$CHECKS_RUNNER" "$CHECKS_PLAN" 2>&1)
+CHECKS_STATUS=$?
+if [ "$CHECKS_STATUS" -ne 0 ] && echo "$CHECKS_OUT" | grep -q 'подозрительно короткий' \
+    && ! echo "$CHECKS_OUT" | grep -q 'all 0 check(s) passed'; then
+  pass "agent-only user file cannot replace the template checks"
+else
+  fail "agent-only user file bypassed template checks: $CHECKS_OUT"
+fi
+rm -f "$CHECKS_PLAN" "$CUSTOM_CHECK" "$MARKER"
+
+rm -rf "$HOOKS_WORK"
+trap - EXIT
 
 # --- 6. Workspace-root references: inventory only (ArchGate question 2) -------
 echo "=== 6. \$IWE-root references (out of contract until ArchGate Q2) ==="
 grep -o '\$IWE/scripts/[a-zA-Z0-9._/-]*' "$PIPELINE" | sort -u | sed 's/^/  ℹ️  /'
 
 echo
-echo "Result: $PASS_COUNT PASS, $FAIL_COUNT FAIL, $XFAIL_COUNT XFAIL"
+echo "Result: $PASS_COUNT PASS, $FAIL_COUNT FAIL"
 [ "$FAIL_COUNT" -eq 0 ] && exit 0 || exit 1

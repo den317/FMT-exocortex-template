@@ -26,6 +26,10 @@ import pytest
 
 HOOK = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "dry-run-gate.sh"
 STOP_HOOK = Path(__file__).parent.parent.parent / ".claude" / "hooks" / "protocol-stop-gate.sh"
+# The hook whitelists absolute paths under the IWE root it derives from its own
+# location (`$HOOK_DIR/../..`, `pwd -P`), not under $HOME/IWE. Derive the same
+# root here so the whitelist tests pass in any checkout, including CI.
+IWE_ROOT = HOOK.parent.parent.parent.resolve()
 SENTINEL = Path("/tmp/iwe-dry-run.flag")
 OWNER = Path("/tmp/iwe-dry-run-owner-pytest-session.token")
 
@@ -75,7 +79,7 @@ class TestSentinelActive:
 
     def test_whitelisted_absolute_path_allowed(self, sentinel):
         """Абсолютный путь разрешён только привязанный к workspace ($HOME/IWE)."""
-        r = _run_hook(f"bash {Path.home()}/IWE/.claude/scripts/load-extensions.sh day-open after")
+        r = _run_hook(f"bash {IWE_ROOT}/.claude/scripts/load-extensions.sh day-open after")
         assert r.returncode == 0, r.stderr
 
     def test_decoy_tmp_path_blocked(self, sentinel):
@@ -113,6 +117,42 @@ class TestSentinelActive:
         for cmd in ("git status --short", "git log --oneline -3", "git diff HEAD"):
             r = _run_hook(cmd)
             assert r.returncode == 0, cmd
+
+    def test_nice_wrapper_blocked(self, sentinel):
+        """issue #825: `nice` was missing from the wrapper-skip list, so
+        `nice rm -f ...` rode past the classifier unclassified. Cold-review
+        (second pass) found the fix only closed the bare `nice cmd` form —
+        `nice -n 19 cmd`/`nice -n19 cmd` (the common real-world form, an
+        adjustment value is normal usage) still bypassed because the
+        argument itself doesn't match any wrapper/VAR= pattern and stops the
+        loop on it. All of nice's argument forms plus the legacy `-N` form
+        must be skipped, not just the bare wrapper word."""
+        for cmd in (
+            "nice rm -f /tmp/iwe-drg-nice-test",
+            "nice -n 19 rm -f /tmp/iwe-drg-nice-test",
+            "nice -n19 rm -f /tmp/iwe-drg-nice-test",
+            "nice --adjustment=19 rm -f /tmp/iwe-drg-nice-test",
+            "nice -19 rm -f /tmp/iwe-drg-nice-test",
+        ):
+            assert _run_hook(cmd).returncode == 2, cmd
+        # read-only under the same wrapper still allowed
+        assert _run_hook("nice -n 19 git status").returncode == 0
+
+    def test_absolute_path_wrapper_and_command_blocked(self, sentinel):
+        """issue #825 part 2: the classifier matched the leading token
+        literally, so an absolute-path invocation of a wrapper (`/usr/bin/nice
+        ...`) or of the real command itself (`/usr/bin/git commit`, `/bin/rm`)
+        matched no case arm and fell through to the default allow at the end
+        of the file. Basename resolution (`${token##*/}`) closes this without
+        touching the WL_ABS*/whitelist literal-path comparisons, which stay
+        deliberately exact-match (review-01/02: glob or env-based resolution
+        there let a decoy path or IWE_ROOT injection through)."""
+        for cmd in (
+            "/usr/bin/nice rm -f /tmp/iwe-drg-nice-test",
+            "/usr/bin/git commit -am x",
+            "/bin/rm -f /tmp/iwe-drg-nice-test",
+        ):
+            assert _run_hook(cmd).returncode == 2, cmd
 
     def test_redirect_and_fs_mutation_blocked(self, sentinel):
         assert _run_hook("echo x > /tmp/iwe-drg-test-f").returncode == 2
@@ -155,7 +195,7 @@ class TestSentinelActive:
         first step, exactly the "❌ ритуал ломается рано" case the contract
         itself warns about. Confirmed no write paths in both scripts."""
         for script in ("memory-drift-scan.py", "check-index-health.py"):
-            cmd = f"python3 ${{IWE_TEMPLATE:-{Path.home()}/IWE/FMT-exocortex-template}}/.claude/scripts/{script}"
+            cmd = f"python3 ${{IWE_TEMPLATE:-{IWE_ROOT}/FMT-exocortex-template}}/.claude/scripts/{script}"
             r = _run_hook(cmd)
             assert r.returncode == 0, f"{script}: {r.stderr}"
 
@@ -176,6 +216,113 @@ class TestSentinelActive:
         cmd = 'SCRIPT="$HOME/IWE/.claude/scripts/rule-classifier.py"; [ -f "$SCRIPT" ] && python3 "$SCRIPT"'
         r = _run_hook(cmd)
         assert r.returncode == 2, r.stderr
+
+
+class TestIwePathsChainWhitelist:
+    """issue #1238: #1233's new .iwe-paths fallback-chain resolver
+    (day-close/SKILL.md, dry-run-contract.md) is whitelisted as one exact
+    text block in dry-run-gate.sh, not per-segment -- see the comment above
+    the sed pipeline in the hook for why. The exact text here MUST match
+    what's actually deployed in day-close/SKILL.md byte-for-byte; if either
+    one changes without the other, these tests (or a live Day Close
+    rehearsal) catch the drift."""
+
+    CHAIN = (
+        'IWE_PATHS="${IWE_PATHS_FILE:-}"; if [ -z "$IWE_PATHS" ]; then '
+        'for _c in "$PWD/.iwe-paths" "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-paths" '
+        '"$HOME/.iwe-paths"; do [ -r "$_c" ] && { IWE_PATHS="$_c"; break; }; '
+        'done; fi; [ -n "$IWE_PATHS" ] && . "$IWE_PATHS"'
+    )
+
+    def test_exact_chain_allowed(self, sentinel):
+        r = _run_hook(self.CHAIN)
+        assert r.returncode == 0, r.stderr
+
+    def test_chain_with_trailing_command_allowed(self, sentinel):
+        """Deployed form: chain followed by the actual Day Close step command."""
+        cmd = f'{self.CHAIN} 2>/dev/null; bash "$IWE_SCRIPTS/day-close-prepare.sh"'
+        r = _run_hook(cmd)
+        assert r.returncode == 0, r.stderr
+
+    def test_extra_space_blocked(self, sentinel):
+        """A single added space anywhere breaks the exact-text match --
+        fail-closed by design, not a false positive to relax."""
+        tampered = self.CHAIN.replace("; if ", ";  if ", 1)
+        assert tampered != self.CHAIN
+        r = _run_hook(tampered)
+        assert r.returncode == 2, r.stderr
+
+    def test_home_reassigned_before_chain_blocked(self):
+        """The chain's own HOME fallback is only as trustworthy as the real
+        $HOME; a command that reassigns HOME earlier (same attack class as
+        the pre-existing #784/#785 HOME_OR_IWE_PATHS_TAMPERED check) must
+        still be rejected even though the chain text itself matches
+        verbatim -- this is a different sentinel per-test to avoid clashing
+        with the fixture's shared /tmp/iwe-dry-run.flag mid-assertion."""
+        if SENTINEL.exists():
+            pytest.skip("живой dry-run sentinel активен — не трогаем чужой")
+        OWNER.write_text("pytest-capability", encoding="utf-8")
+        SENTINEL.write_text(
+            json.dumps(
+                {
+                    "initiator": "pytest",
+                    "created_at": "test",
+                    "session_id": "pytest-session",
+                    "owner_token": "pytest-capability",
+                    "owner_file": str(OWNER),
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            cmd = f'HOME=/tmp/evil; {self.CHAIN}'
+            r = _run_hook(cmd)
+            assert r.returncode == 2, r.stderr
+        finally:
+            SENTINEL.unlink(missing_ok=True)
+            OWNER.unlink(missing_ok=True)
+
+    def test_bare_dollar_iwe_paths_source_blocked(self, sentinel):
+        """Without the preceding resolver chain, a bare `. "$IWE_PATHS"`
+        (e.g. an attacker pre-setting IWE_PATHS some other way) is not a
+        recognized whitelist target -- same fail-closed default as any
+        other unrecognized source|. argument."""
+        r = _run_hook('IWE_PATHS=/tmp/evil; . "$IWE_PATHS"')
+        assert r.returncode == 2, r.stderr
+
+    def test_cd_before_chain_blocked(self, sentinel):
+        """Cold-review finding (Agent tool, 2026-10-15): the chain's first
+        fallback is "$PWD/.iwe-paths", and `cd` -- the ordinary way $PWD
+        actually changes in a running shell -- was not in the tamper regex
+        at all (only VAR= assignment forms were). Live PoC before this test
+        existed: `cd /tmp/evil-poc; <chain>` passed the gate (exit 0) and
+        the real shell sourced an attacker-planted /tmp/evil-poc/.iwe-paths."""
+        for cmd in (
+            f'cd /tmp; {self.CHAIN}',
+            f'cd -P /tmp; {self.CHAIN}',
+            f'builtin cd /tmp; {self.CHAIN}',
+            f'pushd /tmp; {self.CHAIN}',
+        ):
+            r = _run_hook(cmd)
+            assert r.returncode == 2, f"{cmd!r}: {r.stderr}"
+
+    def test_disguised_cd_before_chain_blocked(self, sentinel):
+        """issue #1258 (independent red-team audit, 2026-10-17): the fix
+        above only matched the literal bytes "cd"/"pushd" with real
+        whitespace around them -- exactly the #1238 PoC's own shape. \\cd,
+        "cd", 'cd' and $'cd' all strip down to the plain word "cd" once bash
+        parses them and invoke the identical builtin -- confirmed live with
+        `bash -c '\\cd /tmp/x && pwd'` actually changing directory -- so they
+        bypassed the regex while working exactly like the PoC #1238 closed."""
+        for cmd in (
+            f'\\cd /tmp; {self.CHAIN}',
+            f'"cd" /tmp; {self.CHAIN}',
+            f"'cd' /tmp; {self.CHAIN}",
+            f"$'cd' /tmp; {self.CHAIN}",
+            f'\\pushd /tmp; {self.CHAIN}',
+        ):
+            r = _run_hook(cmd)
+            assert r.returncode == 2, f"{cmd!r}: {r.stderr}"
 
 
 class TestSentinelInactive:
@@ -305,3 +452,38 @@ class TestStopOwnership:
             assert not OWNER.exists(), "sentinel уже снят явно — owner-файл residue, чистится"
         finally:
             OWNER.unlink(missing_ok=True)
+
+    def test_ordinary_stop_survives_leftover_dry_dir(self, tmp_path):
+        """issue #818: `complete_dry_run_on_stop` arms a RETURN trap that
+        references its own locals (lock_dir/nonce) and never clears it. bash
+        does not scope a RETURN trap to the function that set it — it stays
+        armed for the next `source` in the same process. This hook sources
+        iwe-env-bootstrap.sh right after calling this function (line ~167),
+        so an ordinary Stop with a leftover (no active gate) dry-run state
+        directory used to crash with "unbound variable" under `set -u`, even
+        with zero active rehearsal. Reproduces the exact trigger: a real
+        dry_dir that exists (matching test-mode override contract used by
+        dry-run-gate.sh) but no matching active gate-*.state for this
+        session_id — exercises the code past the trap-arming line, not just
+        the earlier no-op return paths."""
+        dry_dir = tmp_path / "dry-dir"
+        dry_dir.mkdir()
+        (dry_dir / ".iwe-dry-run-test-mode").write_text("1", encoding="utf-8")
+        # transcript_path must exist and be readable: the hook short-circuits
+        # (exits before sourcing iwe-env-bootstrap.sh, the actual trap
+        # trigger) on a missing/empty path — an empty JSONL file is enough,
+        # only its existence matters for reaching the source line.
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("", encoding="utf-8")
+        env = dict(os.environ, IWE_DRY_RUN_DIR=str(dry_dir), IWE_DRY_RUN_SENTINEL=str(dry_dir / "sentinel.flag"))
+        payload = json.dumps({"session_id": "no-active-gate-session", "transcript_path": str(transcript)})
+        result = subprocess.run(
+            ["bash", str(STOP_HOOK)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "unbound variable" not in result.stderr

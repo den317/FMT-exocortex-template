@@ -30,7 +30,7 @@
 
 - **Личное знание:** `~/IWE/PACK-personal/` (Lifework, ценности, миссия)
 - **Платформенное знание:** `~/IWE/PACK-digital-platform/` (общая онтология)
-- **Командные планы:** `~/IWE/DS-ecosystem-development/inbox/WP-*.md` + WP-REGISTRY.md
+- **Командные планы:** `inbox/WP-*.md` + WP-REGISTRY.md в своём ecosystem-development репозитории, если он есть
 
 ## Принципы (из CLAUDE.md)
 

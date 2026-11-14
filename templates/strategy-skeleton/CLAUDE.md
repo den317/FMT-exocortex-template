@@ -93,7 +93,7 @@ done
 
 - **Личное знание (миссия, ценности):** `~/IWE/PACK-personal/`
 - **Описание роли Стратега:** `~/IWE/PACK-digital-platform/.../DP.ROLE.012-strategist/`
-- **Командное планирование:** `~/IWE/DS-ecosystem-development/inbox/WP-*.md` + WP-REGISTRY.md
+- **Командное планирование:** `inbox/WP-*.md` + WP-REGISTRY.md в своём ecosystem-development репозитории, если он есть
 
 ---
 

@@ -1,15 +1,15 @@
 #!/bin/bash
-# Destructive MCP Guard (WP-544 Ф1, пир-сессия с Codex 20.08)
+# Destructive MCP Guard (WP-544 Phase 1, peer-session with Codex 20.08)
 # Event: PreToolUse (matcher: mcp__.*)
-# Блокирует разрушительные MCP-вызовы (удаление облачных ресурсов), для которых
-# сейчас нет вообще никакой проверки — интерактивный вопрос выключен (bypassPermissions),
-# а до этого хука ни один matcher не смотрел на конкретное имя MCP-инструмента.
+# Blocks destructive MCP calls (deleting cloud resources), for which
+# there is currently no check at all — the interactive question is disabled (bypassPermissions),
+# and before this hook no matcher looked at the specific MCP tool name.
 #
-# Bypass: CC_ALLOW_DESTRUCTIVE_INPUT=1 (тот же контракт, что destructive-guard.sh —
-# хук читает свой процессный env, агент не может выставить это сам себе через
-# ещё не выполненный tool call).
+# Bypass: CC_ALLOW_DESTRUCTIVE_INPUT=1 (the same contract as destructive-guard.sh —
+# the hook reads its own process env, the agent cannot set this for itself via
+# a tool call that has not been executed yet).
 #
-# Лог: ~/IWE/.claude/logs/destructive-mcp-guard.jsonl
+# Log: ~/IWE/.claude/logs/destructive-mcp-guard.jsonl
 
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
@@ -26,8 +26,32 @@ log_decision() {
     >> "$LOG_FILE" 2>/dev/null || true
 }
 
-input=$(cat)
-tool_name=$(echo "$input" | jq -r '.tool_name // empty' 2>/dev/null)
+input=$(cat 2>/dev/null || true)
+
+# Fail-closed on a malformed/schema-invalid envelope (WP-544 D22, peer session
+# 2026-09-08-25-wp544-continue-f7, Codex). The old `jq -r '.tool_name //
+# empty'` turned any jq parse error or wrong-typed field into an empty
+# string, which then missed every `mcp__*` case below and fell through to
+# `exit 0` — the same fail-open destructive-guard.sh had. The deny output
+# below is a literal JSON string, not built with jq, so an absent/broken jq
+# still denies instead of silently passing.
+#
+# No `timeout` wrapper here on purpose (unlike destructive-guard.sh):
+# `timeout cmd` execs `cmd` directly, which does not consult bash's function
+# table — an exported bash function used to simulate "jq absent" for a test
+# is invisible to it, and it always finds the real jq on this script's own
+# hardened PATH (line 15) instead. destructive-guard.sh has a second,
+# unwrapped jq call downstream that still catches that case and keeps it
+# testable; this hook's single combined call has no such second call, so
+# wrapping it would make "jq missing" permanently unverifiable by test
+# (confirmed live, cold review WP-544 D22, 08.09) for a payload class (MCP
+# tool-call metadata) much smaller than the Bash-guard's command strings —
+# not worth trading away test coverage for.
+if ! tool_name=$(printf '%s' "$input" | jq -er '.tool_name | select(type == "string" and length > 0)' 2>/dev/null); then
+  log_decision "deny-malformed-input" ""
+  printf '%s\n' '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Не удалось разобрать вход хука или tool_name отсутствует/пустой/неверного типа — блокирую как неопределённо опасный MCP-вызов."}}'
+  exit 0
+fi
 
 case "$tool_name" in mcp__*) ;; *) exit 0 ;; esac
 
@@ -35,7 +59,7 @@ tn=$(printf '%s' "$tool_name" | tr 'A-Z' 'a-z')
 case "$tn" in
   *remove_service*|*remove_volume*|*remove_tcp_proxy*|*remove_bucket*|*delete_domain*)
     ;;
-  *) exit 0 ;;  # не разрушительный вызов — пропускаем
+  *) exit 0 ;;  # not a destructive call — let it through
 esac
 
 if [ "${CC_ALLOW_DESTRUCTIVE_INPUT:-}" = "1" ]; then

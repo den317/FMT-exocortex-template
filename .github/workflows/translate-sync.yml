@@ -14,16 +14,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - "README.md"
-      - "docs/**"
-      - "CODE_OF_CONDUCT.md"
-      - "SECURITY.md"
-      - "PRIVACY.md"
-      - "LICENSE"
-      - "CODEOWNERS"
-      - "CITATION.cff"
-      - "CHANGELOG.md"
 
 concurrency:
   group: translate-sync-${{ github.ref }}
@@ -48,12 +38,12 @@ jobs:
       author_email: ${{ steps.source_author.outputs.email }}
     steps:
       - name: Checkout main (full history for delta diff)
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -64,7 +54,9 @@ jobs:
         run: |
           pytest scripts/tests/test_delivery_formal.py \
                  scripts/tests/test_delivery_content.py \
-                 scripts/tests/test_translate_delta.py -q
+                 scripts/tests/test_translate_delta.py \
+                 scripts/tests/test_normalize_en_phase_labels.py \
+                 scripts/tests/test_assemble_distribution.py -q
 
       - name: Fetch or create en-draft staging branch
         id: en_draft
@@ -142,6 +134,20 @@ jobs:
             mkdir -p "../en-draft/docs/assets"
             cp "docs/assets/orz-cycle.svg" "../en-draft/docs/assets/orz-cycle.svg"
           fi
+
+      - name: Assemble the English distribution set (EN_DISTRIBUTION_ASSEMBLE)
+        # Pilot decision 2026-11-02 (WP-610): the English version ships only what
+        # installation and use need = the update manifest minus guide-kit/. Code is
+        # copied verbatim, markdown keeps its translation, everything else is
+        # removed. Switched on by the repository variable once the shipped code is
+        # free of Cyrillic; until then the step is skipped and the old behaviour
+        # stays. Exit 2 (untranslated markdown or Cyrillic left) fails the job so
+        # that publish-to-iwesys never runs on a tree the gate would reject.
+        if: always() && steps.en_draft.outcome == 'success' && vars.EN_DISTRIBUTION_ASSEMBLE == 'true'
+        run: |
+          python3 scripts/assemble_distribution.py . ../en-draft
+          mkdir -p ../en-draft/.github/workflows
+          cp templates/en-distribution/no-cyrillic-gate.yml ../en-draft/.github/workflows/no-cyrillic-gate.yml
 
       - name: Strip RU-source references from the EN-side README
         # Pilot decision (WP-401 Ф5, 2026-07-10): the EN distribution must
@@ -226,6 +232,58 @@ jobs:
                   print(f"stripped Cyrillic anchors: {path}")
           PYEOF
 
+      - name: Normalize Cyrillic subsection letters (§2б → §2b)
+        # Pack/DP references use a trailing Cyrillic letter as a subsection
+        # label (`DP.ARCH.002 §2б`, meaning "part b of section 2") in plain
+        # prose, not inside a link — the anchor-stripper above only touches
+        # markdown link syntax, so this pattern reaches en-draft untouched
+        # and trips the hard Cyrillic gate below (issue #752/#749; root
+        # cause tracked in WP-7). Translit only the single trailing letter
+        # right after "§<digits>", not general prose — a blanket scrub would
+        # risk mangling text the LLM translator was supposed to handle.
+        if: always() && steps.en_draft.outcome == 'success'
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          import re
+
+          # Full alphabet, not just the letters seen in issue #752 — a
+          # partial table closes today's report but not the class (cold
+          # review flagged this: the codebase already has a "§3р" elsewhere,
+          # letter outside the first 10).
+          TRANSLIT = {
+              "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e",
+              "ё": "e", "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k",
+              "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+              "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
+              "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "",
+              "э": "e", "ю": "yu", "я": "ya",
+          }
+          subsection = re.compile(r"(§\d+)([" + "".join(TRANSLIT) + r"])\b")
+
+          def fix(match):
+              return match.group(1) + TRANSLIT[match.group(2)]
+
+          for path in pathlib.Path("../en-draft").rglob("*.md"):
+              content = path.read_text(encoding="utf-8")
+              cleaned = subsection.sub(fix, content)
+              if cleaned != content:
+                  path.write_text(cleaned, encoding="utf-8")
+                  print(f"normalized subsection letters: {path}")
+          PYEOF
+
+      - name: Normalize Cyrillic phase labels (Ф21 → F21)
+        # Phase labels are identifiers: the translator keeps "Ф21" as written
+        # and the hard Cyrillic gate below then fails on the single letter Ф
+        # (found 2026-10-27: Translate Sync red on main after
+        # docs/BRANCH-PROTECTION-EMERGENCY.md entered the tree with three
+        # such lines). Same reason as the subsection step above: the fix has
+        # to live in the pipeline, because a manual fix on en-draft does not
+        # survive the next delta run. The rewrite is limited to "Ф" directly
+        # before a digit; see scripts/normalize_en_phase_labels.py.
+        if: always() && steps.en_draft.outcome == 'success'
+        run: python3 scripts/normalize_en_phase_labels.py ../en-draft
+
       - name: Write EN-side community files to en-draft
         # Feedback lives on iwesys/IWE itself (pilot decision 2026-07-10):
         # Issues and Discussions are enabled on the EN repo, no references
@@ -274,6 +332,59 @@ jobs:
           [issue]($EN/issues) describing the change instead.
           EOF
 
+      - name: Normalize English paths and refresh the update manifest
+        if: always() && steps.en_draft.outcome == 'success'
+        run: |
+          python3 - <<'PYEOF'
+          from pathlib import Path
+          import hashlib
+          import json
+
+          root = Path('../en-draft')
+          replacements = (
+              ('https://github.com/TserenTserenov/FMT-exocortex-template', 'https://github.com/iwesys/IWE'),
+              ('TserenTserenov/FMT-exocortex-template', 'iwesys/IWE'),
+              ('FMT-exocortex-template', 'IWE'),
+          )
+          for path in root.rglob('*'):
+              if not path.is_file() or path.is_symlink() or path.name in {'.git', '.translation-state.yaml', 'badge-data.json'}:
+                  continue
+              try:
+                  original = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              normalized = original
+              for old, new in replacements:
+                  normalized = normalized.replace(old, new)
+              if normalized != original:
+                  path.write_text(normalized, encoding='utf-8')
+
+          ignored = {'.git', '.translation-state.yaml', 'badge-data.json', 'update-manifest.json'}
+          files = []
+          for path in sorted(root.rglob('*')):
+              if not path.is_file() or path.is_symlink():
+                  continue
+              relative = str(path.relative_to(root))
+              if relative in ignored:
+                  continue
+              files.append({'path': relative, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+          # The English distribution ships the same release as the Russian one;
+          # a literal here stayed at 0.41.9 after 0.41.10 (WP-529 Ф241).
+          ru_version = json.loads(Path('update-manifest.json').read_text(encoding='utf-8'))['version']
+          manifest = {
+              'schema_version': 2,
+              'version': ru_version,
+              'description': 'Manifest of files in the standalone English IWE distribution. Used by update.sh.',
+              'files': files,
+              'excluded_paths': [],
+              'deprecated_files': [],
+          }
+          (root / 'update-manifest.json').write_text(
+              json.dumps(manifest, indent=2, ensure_ascii=False) + '\n', encoding='utf-8'
+          )
+          print(f'English update manifest: {len(files)} files')
+          PYEOF
+
       - name: Cyrillic gate for en-draft
         id: staging_cyrillic
         # Publish has the same hard gate, but stopping here prevents an LLM
@@ -281,7 +392,11 @@ jobs:
         # every later delta run.
         if: always() && steps.en_draft.outcome == 'success'
         run: |
-          if git -C ../en-draft grep -nP '[А-Яа-яЁё]' -- .; then
+          # --untracked: plain `git grep` reads only tracked files, so a file the
+          # translator has just created (not yet `git add`-ed) slipped through
+          # this gate, was committed by `git add -A` below, and only the publish
+          # gate caught it (found 2026-10-27, run of 26.10 16:08).
+          if git -C ../en-draft grep --untracked -nP '[А-Яа-яЁё]' -- .; then
             echo '::error::Cyrillic remains in en-draft; fix the translation before staging it.'
             exit 1
           fi
@@ -426,14 +541,14 @@ jobs:
     steps:
       - name: Generate iwesys installation token
         id: iwesys_token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ vars.CANON_SYNC_APP_ID }}
           private-key: ${{ secrets.CANON_SYNC_APP_KEY }}
           owner: iwesys
 
       - name: Checkout en-draft
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: en-draft
           fetch-depth: 0

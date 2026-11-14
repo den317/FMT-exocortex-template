@@ -1,10 +1,10 @@
 #!/bin/bash
 # check-secret skill backend (B7.7c, WP-212)
-# Принимает: путь к файлу или inline текст.
-# Возвращает: exit 0 + "OK" или exit 1 + список найденных паттернов.
+# Accepts: a file path or inline text.
+# Returns: exit 0 + "OK" or exit 1 + a list of found patterns.
 #
-# Использует те же regex что pre-commit-secret-scan.sh + secret-leak-block.sh
-# (single source of truth — хочется синхронизации; пока копия, future: shared lib).
+# Uses the same regexes as pre-commit-secret-scan.sh + secret-leak-block.sh
+# (single source of truth — synchronization is desired; for now a copy, future: shared lib).
 
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
@@ -25,7 +25,7 @@ if [ -z "$input" ]; then
   exit 2
 fi
 
-# Если -, читаем из stdin
+# If -, read from stdin
 if [ "$input" = "-" ]; then
   text=$(cat)
 elif [ -f "$input" ]; then
@@ -39,7 +39,7 @@ if [ -z "$text" ]; then
   exit 0
 fi
 
-# Паттерны (label|regex)
+# Patterns (label|regex)
 declare -a patterns=(
   "Better Stack API token|ust_[A-Za-z0-9]{20,}"
   "Telegram bot token|[0-9]{8,10}:[A-Za-z0-9_-]{35}"
@@ -49,7 +49,8 @@ declare -a patterns=(
   "Anthropic API key|sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{30,}"
   "GitHub token|gh[poshru]_[A-Za-z0-9]{30,}"
   "AWS access key|AKIA[0-9A-Z]{16}"
-  "Generic 40+ char API token|(_API_KEY|_TOKEN|_KEY)[[:space:]]*=[[:space:]]*\"?[A-Za-z0-9_-]{40,}\"?"
+  "AWS secret key|[Aa][Ww][Ss].{0,24}([Ss]ecret|[Pp]rivate).{0,24}[=:][[:space:]]*[\"']?[A-Za-z0-9/+=]{40}"
+  "Generic 40+ char API token|(_API_KEY|_TOKEN|_KEY)[[:space:]]*=[[:space:]]*\"?[A-Za-z0-9_/+=-]{40,}\"?"
 )
 
 violations=""
@@ -96,7 +97,7 @@ echo "$violations"
 echo ""
 echo "Действия:"
 echo "  - Если плейсхолдер/тест — заменить на [REDACTED] или добавить '# secret-ok' маркер в строку."
-echo "  - Если реальный секрет — НЕ публиковать. Cascade rotation: ~/IWE/DS-ecosystem-development/.../Runbooks/DP.RUNBOOK.003-cascade-secret-rotation.md"
-echo "  - Правило поведения: ~/IWE/memory/feedback_behaviour.md Правило 25."
+echo "  - Если реальный секрет — НЕ публиковать. Cascade rotation: DP.RUNBOOK.003-cascade-secret-rotation.md"
+echo "  - Правило поведения: secrets никогда не публикуются в чат как плейнтекст."
 echo ""
 exit 1

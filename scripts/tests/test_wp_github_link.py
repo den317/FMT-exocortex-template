@@ -286,7 +286,7 @@ class LinkTests(unittest.TestCase):
             report = MODULE.reconcile(Path(directory), config)
             self.assertEqual(report, {"status": "OK", "disabled": True, "created": []})
 
-    def test_all_rituals_run_reconciliation_before_reasoning(self) -> None:
+    def test_rituals_do_not_require_github_reconciliation(self) -> None:
         template = SCRIPT.parents[1]
         ritual_paths = [
             template / ".claude/skills/day-open/SKILL.md",
@@ -296,12 +296,7 @@ class LinkTests(unittest.TestCase):
         ]
         for path in ritual_paths:
             text = path.read_text(encoding="utf-8")
-            self.assertIn('wp-github-link.py" reconcile', text, path)
-            self.assertLess(
-                text.index("reconcile --governance"),
-                text.index("Extensions (before)"),
-                path,
-            )
+            self.assertNotIn("wp-github-link.py", text, path)
 
     def test_create_reuses_exact_wp_issue_and_writes_url(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

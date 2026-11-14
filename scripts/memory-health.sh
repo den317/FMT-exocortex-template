@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # routing: helper  skill=audit-installation  called-by=haiku
 # see DP.SC.159, DP.ROLE.059
-# memory-health.sh — метрики здоровья memory/ (WP-217 Ф10.2)
+# memory-health.sh — memory/ health metrics (WP-217 Phase 10.2)
 #
-# Показывает: распределение по горизонтам, HOT-лимит, orphans, age-distribution.
-# Вывод: markdown-таблица для вставки в DayPlan/Week Report.
+# Shows: distribution by horizon, HOT limit, orphans, age distribution.
+# Output: a markdown table to paste into DayPlan/Week Report.
 #
 # Usage:
-#   bash scripts/memory-health.sh             # полный отчёт
-#   bash scripts/memory-health.sh --summary   # только ключевые метрики
-#   bash scripts/memory-health.sh --dir PATH  # другая директория
+#   bash scripts/memory-health.sh             # full report
+#   bash scripts/memory-health.sh --summary   # key metrics only
+#   bash scripts/memory-health.sh --dir PATH  # another directory
 #
-# Spec: memory/memory-lifecycle-spec.md §2 (WP-217 Ф10.1)
+# Spec: memory/memory-lifecycle-spec.md §2 (WP-217 Phase 10.1)
 
 set -eu
 
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
+# NOTE: iwe-env-bootstrap.sh reassigns SCRIPT_DIR to its OWN location (via its
+# BASH_SOURCE[0]) as a side effect of being sourced — save ours first so the
+# frontmatter.sh source below still resolves relative to THIS script (issue #229).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_MEMORY_HEALTH_DIR="$SCRIPT_DIR"
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
+# issue #658: was a private get_field() unaware of the `metadata:`-nested
+# frontmatter dialect (issue #281) — memory-validate.sh/memory-bleed.sh
+# already source the shared reader; this closes the gap for the two scripts
+# that still had their own copy.
+source "$_MEMORY_HEALTH_DIR/../.claude/lib/frontmatter.sh" || exit 1
 MEMORY_DIR="$IWE_ROOT/memory"
 HOT_LIMIT=150
 MODE="full"
@@ -35,16 +44,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-get_field() {
-    local file="$1" field="$2"
-    awk '/^---/{f++} f==1 && /^'"$field"':/{gsub(/^[^:]+: */,""); gsub(/^["'"'"']|["'"'"']$/,""); print; exit}' "$file"
-}
-
 has_frontmatter() {
     head -1 "$1" | grep -q '^---$'
 }
 
-# Счётчики
+# Counters
 total=0; orphans=0
 hot_files=0; warm_files=0; cold_files=0; archive_files=0
 hot_lines=0
@@ -68,7 +72,7 @@ for f in $(find "$MEMORY_DIR/" -maxdepth 1 -name "*.md" | sort); do
     status=$(get_field "$f" "status")
     valid_from=$(get_field "$f" "valid_from")
 
-    # Подсчёт строк файла без frontmatter (убрать блок ---)
+    # Count file lines without frontmatter (strip the --- block)
     file_lines=$(awk '/^---/{f++; next} f>=2{print}' "$f" | wc -l | tr -d ' ')
 
     case "$horizon" in
@@ -98,7 +102,7 @@ for f in $(find "$MEMORY_DIR/" -maxdepth 1 -name "*.md" | sort); do
     fi
 done
 
-# HOT-статус
+# HOT status
 if [ $hot_lines -le $HOT_LIMIT ]; then
     hot_status="✅ ${hot_lines}/${HOT_LIMIT} строк"
 else
@@ -144,6 +148,22 @@ echo ""
 if [ $orphans -gt 0 ]; then
     echo "⚠️  $orphans файлов без frontmatter — запустить \`memory-validate.sh\` для деталей"
 fi
+
+# issue #735: memory-validate.sh existed and worked, but was not called from
+# any working path — it was only mentioned in the text of this warning.
+# Fail-soft (WARN, not a block): memory-health.sh itself is used in several
+# places (day-close, audit-installation), it must not fail because of a missing/
+# non-executable validate script on someone else's install.
+_VALIDATE_SCRIPT="$_MEMORY_HEALTH_DIR/memory-validate.sh"
+if [ -x "$_VALIDATE_SCRIPT" ]; then
+    _validate_fails=$(bash "$_VALIDATE_SCRIPT" --quiet --dir "$MEMORY_DIR" 2>/dev/null | grep -c '^FAIL' || true)
+    if [ "$_validate_fails" -gt 0 ]; then
+        echo "❌ memory-validate.sh: $_validate_fails нарушений frontmatter — запустить \`memory-validate.sh\` для деталей"
+    fi
+else
+    echo "⚠️  memory-validate.sh недоступен ($_VALIDATE_SCRIPT) — валидация frontmatter пропущена"
+fi
+
 if [ $hot_lines -gt $HOT_LIMIT ]; then
     echo "❌ HOT-лимит превышен на $((hot_lines - HOT_LIMIT)) строк — перевести файлы в WARM"
 fi

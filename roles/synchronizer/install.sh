@@ -1,6 +1,6 @@
 #!/bin/bash
-# Synchronizer: установка центрального диспетчера (launchd)
-# Заменяет отдельные launchd-агенты Стратега единым scheduler
+# Synchronizer: installation of the central dispatcher (launchd)
+# Replaces the separate Strategist launchd agents with a single scheduler
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,7 +8,7 @@ ROLE_NAME="$(basename "$SCRIPT_DIR")"
 PLIST_DST="$HOME/Library/LaunchAgents/com.exocortex.scheduler.plist"
 
 # Resolve PLIST source (Generated runtime → workspace fallback → FMT legacy).
-# WP-273 Этап 2: substituted plists и runtime-скрипты живут в $IWE_RUNTIME.
+# WP-273 Stage 2: substituted plists and runtime scripts live in $IWE_RUNTIME.
 if [ -n "${IWE_RUNTIME:-}" ] && [ -d "$IWE_RUNTIME/roles/$ROLE_NAME/scripts/launchd" ]; then
     PLIST_SRC="$IWE_RUNTIME/roles/$ROLE_NAME/scripts/launchd/com.exocortex.scheduler.plist"
     SCRIPTS_DIR_RUNTIME="$IWE_RUNTIME/roles/$ROLE_NAME/scripts"
@@ -29,7 +29,7 @@ if [ ! -f "$PLIST_SRC" ]; then
     exit 1
 fi
 
-# WP-273 R5 fix: fail-fast если plist содержит literal {{...}}
+# WP-273 R5 fix: fail-fast if the plist contains a literal {{...}}
 if grep -qE '\{\{[A-Z_]+\}\}' "$PLIST_SRC" 2>/dev/null; then
     echo "ERROR: $PLIST_SRC содержит незаменённые плейсхолдеры:" >&2
     grep -oE '\{\{[A-Z_]+\}\}' "$PLIST_SRC" | sort -u | sed 's/^/  /' >&2
@@ -41,14 +41,14 @@ if grep -qE '\{\{[A-Z_]+\}\}' "$PLIST_SRC" 2>/dev/null; then
     exit 2
 fi
 
-# Делаем скрипты исполняемыми (runtime path)
+# Make scripts executable (runtime path)
 if [ -d "$SCRIPTS_DIR_RUNTIME" ]; then
     chmod +x "$SCRIPTS_DIR_RUNTIME/"*.sh 2>/dev/null || true
     chmod +x "$SCRIPTS_DIR_RUNTIME/templates/"*.sh 2>/dev/null || true
 fi
 
-# Skip on non-macOS or headless CI without launchctl
-if ! command -v launchctl >/dev/null 2>&1; then
+# Linux uses systemd/cron even if a launchctl binary is present on PATH.
+if [[ "$(uname -s)" == "Linux" ]] || ! command -v launchctl >/dev/null 2>&1; then
     if [[ "$(uname -s)" == "Linux" ]]; then
         if [ -n "${SETUP_CI:-}" ]; then
             echo "  ⊠ SETUP_CI: systemd activation skipped for $ROLE_NAME"
@@ -83,16 +83,13 @@ if ! command -v launchctl >/dev/null 2>&1; then
         if ! iwe_systemd_user_bus_ok; then
             echo "  ⚠ systemd --user недоступен (нет пользовательской сессионной шины — типично для WSL2/контейнера/сервера без активного логина)"
             echo "  Installing $ROLE_NAME via cron fallback (issue #454)..."
-            # WP-529 Ф9 (Evgenii 20.08): mapfile is bash4-only — this branch is
-            # exactly the one macOS (stock /bin/bash 3.2, no systemd) takes,
-            # so the previous line silently crashed the cron-fallback install
-            # on the platform it exists to serve.
-            cron_lines=()
-            while IFS= read -r cron_line; do
-                cron_lines+=("$cron_line")
-            done < <(iwe_timer_to_cron_lines "$SYSTEMD_SRC/iwe-exocortex-scheduler.timer" \
-                "$(iwe_cron_env_prefix) $SCRIPTS_DIR_RUNTIME/scheduler.sh dispatch >> $HOME/logs/synchronizer/cron-scheduler.log 2>&1")
-            iwe_install_cron_fallback "synchronizer" "${cron_lines[@]}"
+            if ! cron_lines=$(iwe_timer_to_cron_lines \
+                "$SYSTEMD_SRC/iwe-exocortex-scheduler.timer" \
+                "$(iwe_cron_env_prefix) $SCRIPTS_DIR_RUNTIME/scheduler.sh dispatch >> $HOME/logs/synchronizer/cron-scheduler.log 2>&1"); then
+                echo "ERROR: cron-расписание Синхронизатора не собрано; crontab не изменён" >&2
+                exit 2
+            fi
+            iwe_install_cron_fallback "synchronizer" "$cron_lines"
             echo "  ✓ Installed via crontab. Verify: crontab -l | grep scheduler.sh"
             echo "  ✓ Logs: ~/logs/synchronizer/cron-scheduler.log"
             exit 0
@@ -127,22 +124,30 @@ fi
 
 mkdir -p "$(dirname "$PLIST_DST")"
 
-# Выгружаем старые агенты
-launchctl unload "$PLIST_DST" 2>/dev/null || true
-# Выгружаем также legacy Стратег-агенты (если были)
-launchctl unload "$HOME/Library/LaunchAgents/com.strategist.morning.plist" 2>/dev/null || true
-launchctl unload "$HOME/Library/LaunchAgents/com.strategist.weekreview.plist" 2>/dev/null || true
+# SETUP_CI installs files only: unloading a host agent is still a global write.
+if [ -z "${SETUP_CI:-}" ]; then
+    # Unload old agents and legacy Strategist agents (if any)
+    launchctl unload "$PLIST_DST" 2>/dev/null || true
+    launchctl unload "$HOME/Library/LaunchAgents/com.strategist.morning.plist" 2>/dev/null || true
+    launchctl unload "$HOME/Library/LaunchAgents/com.strategist.weekreview.plist" 2>/dev/null || true
+fi
 
-# Создаём директории состояния
+# Create state directories
 mkdir -p "$HOME/.local/state/exocortex"
 mkdir -p "$HOME/logs/synchronizer"
 
-# Копируем и загружаем
+# Copy and load
 cp "$PLIST_SRC" "$PLIST_DST"
-if [ -z "${SETUP_CI:-}" ]; then
-    launchctl load "$PLIST_DST"
-else
+if [ -n "${SETUP_CI:-}" ]; then
     echo "  ⊠ SETUP_CI: plist copied, launchctl activation skipped"
+elif [ -n "${IWE_SKIP_LOAD:-}" ]; then
+    # issue #1143: caller (update.sh) already knows this role was
+    # deliberately unloaded by the user and will restore that state
+    # itself — `load` here would fire RunAtLoad once before that
+    # restore runs, dispatching a job the user turned off.
+    echo "  ⊠ IWE_SKIP_LOAD: plist copied, launchctl load skipped (state the user set earlier is preserved, not loaded)"
+else
+    launchctl load "$PLIST_DST"
 fi
 
 echo "  ✓ Installed: com.exocortex.scheduler"

@@ -1,13 +1,13 @@
 #!/bin/bash
-# day-open-smoke-extended.sh — extended smoke для Day Open (запускается hourly cron, кэш)
-# see: peer-сессия 2026-05-30-07-gap-list-day-open подэтап 2
+# day-open-smoke-extended.sh — extended smoke for Day Open (runs on hourly cron, cached)
+# see: peer session 2026-05-30-07-gap-list-day-open sub-stage 2
 # see: WP-356 «Pipeline Day Open: auto-run checks»
 #
-# Назначение: проверки, занимающие >2с (dt-collect dry-run, projection cursor age, FPF upstream).
-# Запускается hourly cron, результат — в cache-файле.
-# Day Open читает cache, не вызывает этот скрипт напрямую.
+# Purpose: checks that take >2s (dt-collect dry-run, projection cursor age, FPF upstream).
+# Runs on hourly cron, the result goes to a cache file.
+# Day Open reads the cache, does not call this script directly.
 #
-# Вывод: JSON в файл `~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/current/.smoke-cache.json`
+# Output: JSON into the file `~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/current/.smoke-cache.json`
 #   {
 #     "timestamp": "ISO-8601",
 #     "ttl_min": 90,
@@ -17,13 +17,15 @@
 #     "elapsed_sec": <float>
 #   }
 #
-# Использование:
-#   bash day-open-smoke-extended.sh         # обычный запуск
-#   bash day-open-smoke-extended.sh --force # игнорировать TTL, всегда запускать
+# Usage:
+#   bash day-open-smoke-extended.sh         # normal run
+#   bash day-open-smoke-extended.sh --force # ignore the TTL, always run
 #
-# Failure mode: индивидуальные секции могут возвращать "fail:<reason>", скрипт не падает.
+# Failure mode: individual sections may return "fail:<reason>", the script does not crash.
 
 set -uo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 START_TS=$(date +%s)
 FORCE=false
@@ -34,9 +36,9 @@ DS_STRATEGY="$IWE_BASE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 CACHE_FILE="$DS_STRATEGY/current/.smoke-cache.json"
 TTL_MIN=90
 
-# Проверить TTL — если cache свежий, не запускаться (если не --force)
+# Check the TTL — if the cache is fresh, do not run (unless --force)
 if [ "$FORCE" = "false" ] && [ -f "$CACHE_FILE" ]; then
-  cache_ts=$(stat -f %m "$CACHE_FILE" 2>/dev/null || stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+  cache_ts=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
   now_ts=$(date +%s)
   age_min=$(( (now_ts - cache_ts) / 60 ))
   if [ "$age_min" -lt "$TTL_MIN" ]; then
@@ -52,18 +54,21 @@ check_dt_collect() {
     echo "fail:script-missing"
     return
   fi
-  # Запустить dry-run с timeout 30с
-  if timeout 30 bash "$script" --dry-run 2>/dev/null >/dev/null; then
+  # Run dry-run with a 30s timeout. iwe_timeout (lib/common.sh) — issue #1108:
+  # a bare `timeout` here is GNU/Homebrew-only and "command not found" (exit
+  # 127) on stock macOS with no Homebrew, making every single check in this
+  # script fail:exit-127 with no indication the real cause was a missing tool.
+  if iwe_timeout 30 bash "$script" --dry-run 2>/dev/null >/dev/null; then
     echo "ok"
   else
     echo "fail:exit-$?"
   fi
 }
 
-# === 2. Projection cursor age (через Neon) ===
+# === 2. Projection cursor age (via Neon) ===
 check_projection_cursor() {
-  # Без БД-доступа в этом контексте — отметить как unknown
-  # TODO: при подключении psql + secrets — прочитать MAX(updated_at) из projection_cursors
+  # No DB access in this context — mark as unknown
+  # TODO: when psql + secrets are connected — read MAX(updated_at) from projection_cursors
   echo "-1"
 }
 
@@ -96,5 +101,16 @@ cat > "$CACHE_FILE" <<EOF
   "elapsed_sec": $ELAPSED
 }
 EOF
+
+# The cache is a regenerable runtime file, not a work product (issue #1146):
+# keep it out of `git status` of installs whose seed .gitignore predates the entry.
+EXCLUDE_FILE=$(git -C "$DS_STRATEGY" rev-parse --git-path info/exclude 2>/dev/null || true)
+if [ -n "$EXCLUDE_FILE" ]; then
+  case "$EXCLUDE_FILE" in /*) ;; *) EXCLUDE_FILE="$DS_STRATEGY/$EXCLUDE_FILE" ;; esac
+  if ! grep -qxF 'current/.smoke-cache.json' "$EXCLUDE_FILE" 2>/dev/null; then
+    mkdir -p "$(dirname "$EXCLUDE_FILE")" 2>/dev/null \
+      && printf '%s\n' 'current/.smoke-cache.json' >> "$EXCLUDE_FILE" 2>/dev/null || true
+  fi
+fi
 
 echo "extended smoke cached → $CACHE_FILE (elapsed ${ELAPSED}s)" >&2

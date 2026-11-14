@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-updated_at: 2026-08-06T15:31:57Z
+updated_at: 2026-10-16T11:38:04Z
 ---
 # promotion-status.yaml — журнал промоций артефактов из author IWE в FMT
 # see WP-7/PZ-6 (peer-session 2026-05-29-20)
@@ -326,4 +326,34 @@ promotions:
     source_sha: "58a429c99"
     fmt_sha: "1af1c2a"
     promoted_at: 2026-08-06T15:31:57Z
+    verified_in_clean_env: true
+  - artifact_path: .claude/skills/artifactor
+    type: skill
+    source_sha: "aefdaffc688d77a0fe7bb590b74916f15d3c2840"
+    fmt_sha: ""
+    promoted_at: 2026-09-25T20:00:17Z
+    verified_in_clean_env: na
+  - artifact_path: .claude/skills/wp-new
+    type: skill
+    source_sha: "aefdaffc688d77a0fe7bb590b74916f15d3c2840"
+    fmt_sha: ""
+    promoted_at: 2026-09-25T20:00:17Z
+    verified_in_clean_env: na
+  - artifact_path: .claude/styles/genre-template/guide.md
+    type: style
+    source_sha: "dd813be"
+    fmt_sha: ""
+    promoted_at: 2026-10-16T11:38:04Z
+    verified_in_clean_env: true
+  - artifact_path: .claude/styles/genre-template/post.md
+    type: style
+    source_sha: "dd813be"
+    fmt_sha: ""
+    promoted_at: 2026-10-16T11:38:04Z
+    verified_in_clean_env: true
+  - artifact_path: docs/response-clarity-catalog.md
+    type: catalog
+    source_sha: ""
+    fmt_sha: ""
+    promoted_at: 2026-10-16T11:38:04Z
     verified_in_clean_env: true

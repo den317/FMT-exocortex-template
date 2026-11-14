@@ -43,22 +43,22 @@ try:
 except ImportError:
     sys.exit("pyyaml не найден. Установите: pip3 install --user pyyaml")
 
-# Строка таблицы РП: `| 1 | Название | Бюджет | Статус | ... |` — берём
-# первую числовую ячейку (номер РП) и ячейку под заголовком «Статус».
+# WP table row: `| 1 | Название | Бюджет | Статус | ... |` -- we take
+# the first numeric cell (the WP number) and the cell under the "Статус" header.
 _TABLE_ROW = re.compile(r"^\|\s*(\d+)\s*\|(.+)\|\s*$")
 
-# Заголовок колонки статуса: дефолтный шаблон использует полное слово
-# «Статус» с текстовыми значениями (pending/in_progress/done); наблюдалась
-# и сокращённая пользовательская колонка «ст» с эмодзи-значениями —
-# оба варианта распознаём по алиасу заголовка.
+# Status column header: the default template uses the full word
+# "Статус" with text values (pending/in_progress/done); a shortened
+# user column "ст" with emoji values was also observed --
+# we recognize both variants by the header alias.
 _STATUS_HEADER_ALIASES = {"Статус", "ст"}
 
-# Эмодзи → канонический текстовый статус (см. .claude/rules/formatting.md
-# «Эмодзи-статусы»). Список best-effort по наблюдаемому употреблению в
-# MEMORY.md пользователей, не закрытый — расширять по мере встречи новых
-# значений. Эмодзи без записи в маппинге сравниваются как есть (буквально)
-# и, скорее всего, не совпадут ни с одним текстовым `status:` — это то же
-# поведение, что было бы без маппинга вообще, не регрессия.
+# Emoji → canonical text status (see .claude/rules/formatting.md
+# "Emoji statuses"). A best-effort list based on observed usage in
+# users' MEMORY.md, not closed -- extend as new values
+# are met. An emoji with no entry in the mapping is compared as is (literally)
+# and most likely will not match any text `status:` -- this is the same
+# behavior as without a mapping at all, not a regression.
 _EMOJI_TO_STATUS = {
     "🔄": "in_progress",
     "⏳": "pending",
@@ -88,9 +88,9 @@ _TEXT_STATUS_PATTERNS = (
     ("pending", re.compile(r"\b(?:ожидает|не[ _-]?начат)\b", re.IGNORECASE)),
 )
 
-# «ждёт» само по себе описывает и активную работу (🔄 ждёт ревью), и блокировку
-# (⏸ ждёт внешнего решения). Используем его только если явный статус и значок
-# отсутствуют; иначе он подменяет более точное свидетельство.
+# "ждёт" on its own describes both active work (🔄 ждёт ревью) and a block
+# (⏸ ждёт внешнего решения). We use it only if the explicit status and icon
+# are absent; otherwise it overrides more precise evidence.
 _FALLBACK_TEXT_STATUS_PATTERNS = (
     ("pending", re.compile(r"\bждёт\b", re.IGNORECASE)),
 )
@@ -155,7 +155,7 @@ def parse_memory_table(memory_path: Path) -> dict[int, str]:
             continue
         m = _TABLE_ROW.match(line)
         if not m:
-            # Пустая строка или конец таблицы — сбрасываем колонку, ищем следующую таблицу.
+            # Empty line or end of table -- reset the column, look for the next table.
             if not line.strip().startswith("|"):
                 status_col = None
             continue
@@ -168,13 +168,25 @@ def parse_memory_table(memory_path: Path) -> dict[int, str]:
 
 
 def find_wp_context(governance_repo: Path, wp_num: int) -> Path | None:
-    """Ищет inbox/WP-N/WP-N.md, fallback archive/wp-contexts/WP-N*.md."""
+    """Ищет inbox/WP-N/WP-N.md, fallback archive/wp-contexts/WP-N*.md.
+
+    Номер может быть записан с ведущими нулями (WP-038): issue #1154.
+    """
     active = governance_repo / "inbox" / f"WP-{wp_num}" / f"WP-{wp_num}.md"
     if active.is_file():
         return active
+    padded = re.compile(rf"WP-0*{wp_num}")
+    inbox_dir = governance_repo / "inbox"
+    if inbox_dir.is_dir():
+        for folder in sorted(inbox_dir.iterdir()):
+            if folder.is_dir() and padded.fullmatch(folder.name):
+                card = folder / f"{folder.name}.md"
+                if card.is_file():
+                    return card
     archive_dir = governance_repo / "archive" / "wp-contexts"
     if archive_dir.is_dir():
-        matches = sorted(archive_dir.glob(f"WP-{wp_num}-*.md"))
+        padded_archive = re.compile(rf"WP-0*{wp_num}-.*\.md")
+        matches = sorted(f for f in archive_dir.iterdir() if padded_archive.fullmatch(f.name))
         if matches:
             return matches[0]
     return None
@@ -199,13 +211,23 @@ def read_context_status(context_path: Path) -> str | None:
     return str(status) if status is not None else None
 
 
-def scan(memory_path: Path, governance_repo: Path) -> list[str]:
-    """Возвращает список markdown-строк с найденными дрейфами."""
+def scan(
+    memory_path: Path,
+    governance_repo: Path,
+    unresolved: list[int] | None = None,
+) -> list[str]:
+    """Возвращает список markdown-строк с найденными дрейфами.
+
+    РП, чью карточку не нашли, дописываются в `unresolved` (если список передан):
+    «не удалось проверить» не то же самое, что «расхождений нет» (issue #1154).
+    """
     memory_statuses = parse_memory_table(memory_path)
     drifts: list[str] = []
     for wp_num, memory_status in sorted(memory_statuses.items()):
         context_path = find_wp_context(governance_repo, wp_num)
         if context_path is None:
+            if unresolved is not None:
+                unresolved.append(wp_num)
             continue
         context_status = read_context_status(context_path)
         if context_status is None:
@@ -220,17 +242,30 @@ def scan(memory_path: Path, governance_repo: Path) -> list[str]:
     return drifts
 
 
+def _default_workspace() -> Path:
+    """Resolve the workspace root the same way the shell tooling does
+    (iwe-env-bootstrap.sh): explicit env var wins, ~/IWE is only a last
+    resort. Without this, an install at a non-default path always fails
+    with "MEMORY.md не найден" (issue #638)."""
+    for var in ("IWE_WORKSPACE", "IWE_ROOT", "WORKSPACE_DIR"):
+        value = os.environ.get(var)
+        if value:
+            return Path(value)
+    return Path.home() / "IWE"
+
+
 def main() -> int:
+    workspace = _default_workspace()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--memory",
         type=Path,
-        default=Path.home() / "IWE" / "memory" / "MEMORY.md",
+        default=workspace / "memory" / "MEMORY.md",
     )
     parser.add_argument(
         "--governance-repo",
         type=Path,
-        default=Path.home() / "IWE" / os.environ.get("IWE_GOVERNANCE_REPO", "DS-strategy"),
+        default=workspace / os.environ.get("IWE_GOVERNANCE_REPO", "DS-strategy"),
     )
     args = parser.parse_args()
 
@@ -238,9 +273,18 @@ def main() -> int:
         print(f"FAIL: MEMORY.md не найден: {args.memory}", file=sys.stderr)
         return 2
 
-    drifts = scan(args.memory, args.governance_repo)
+    unresolved: list[int] = []
+    drifts = scan(args.memory, args.governance_repo, unresolved)
+    if unresolved:
+        total = len(parse_memory_table(args.memory))
+        names = ", ".join(f"РП-{n}" for n in unresolved)
+        print(
+            f"Drift-scan: не удалось проверить {len(unresolved)} из {total} РП "
+            f"(WP-context не найден): {names}"
+        )
     if not drifts:
-        print("Drift-scan (структурный): 0 расхождений")
+        suffix = " среди проверенных" if unresolved else ""
+        print(f"Drift-scan (структурный): 0 расхождений{suffix}")
         return 0
 
     print(f"Drift-scan (структурный): {len(drifts)} расхождений")

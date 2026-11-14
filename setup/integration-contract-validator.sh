@@ -66,7 +66,7 @@ log "[1/11] manifest_paths — пути из update-manifest.json в дерев�
 if [ -f update-manifest.json ] && command -v python3 >/dev/null 2>&1; then
     MISSING=$(python3 -c "
 import json, os
-with open('update-manifest.json') as f:
+with open('update-manifest.json', encoding='utf-8') as f:
     data = json.load(f)
 for entry in data.get('files', []):
     p = entry.get('path') if isinstance(entry, dict) else entry
@@ -116,7 +116,9 @@ log "[3/11] extension_table — extensions/README.md table ↔ EXTENSION POINT �
 EXT_VIOLATIONS=0
 if [ -f extensions/README.md ]; then
     # Parse extension table from README.md: lines like "| protocol-close | checks | ..."
-    declare_table=$(grep -E '^\|\s*`?[a-z][a-z-]*`?\s*\|\s*`?[a-z]+`?\s*\|' extensions/README.md 2>/dev/null | head -20 || true)
+    # Whole table: a `head -20` cap silently skipped every row past the 20th
+    # (issue #1010 F13, the table has more than 20 rows).
+    declare_table=$(grep -E '^\|\s*`?[a-z][a-z-]*`?\s*\|\s*`?[a-z]+`?\s*\|' extensions/README.md 2>/dev/null || true)
 
     # Find actual EXTENSION POINT references in protocols/skills.
     # WP-273 R6 fix (Round 5 sub-agent assessment): regex терминировался на первом
@@ -227,44 +229,84 @@ log ""
 # === Detector 7: prompts + python + shell coverage (R6.1* regression — мой smoke test пропустил) ===
 log "[7/11] prompts_python_shell_coverage — нет hardcoded DS-strategy в prompts/.py/.sh..."
 COVERAGE_VIOLATIONS=0
-# Python scripts: должны читать GOVERNANCE_REPO из env, не хардкодить
-while IFS= read -r py; do
-    [ -f "$py" ] || continue
-    # Антипаттерн: Path с literal "DS-strategy" без чтения env
-    if grep -qE '"DS-strategy"|/DS-strategy[/"]' "$py" 2>/dev/null; then
-        # Допустимо если читает GOVERNANCE_REPO из env (значит fallback default)
-        if ! grep -qE 'IWE_GOVERNANCE_REPO|GOVERNANCE_REPO' "$py" 2>/dev/null; then
-            log "  ⚠ $py: hardcoded DS-strategy без чтения GOVERNANCE_REPO env"
-            COVERAGE_VIOLATIONS=$((COVERAGE_VIOLATIONS + 1))
-        fi
-    fi
-done < <(find roles -name '*.py' -type f 2>/dev/null)
 
-# Shell scripts (12 мая, WP-291 follow-up): дополнение к Python-проверке.
-# Bug 1 (b24639f) — в dt-collect.sh:238 был hardcode /DS-strategy/ который detector
-# не ловил, потому что .sh файлы не сканировались. SESSION_LOG="$WORKSPACE/DS-strategy/..."
-# игнорировал параметризованный $GOVERNANCE_DIR на line 34.
+# Shared scan for Python + Shell (issue #1106): раньше .py и .sh несли две
+# почти идентичные копии regex+whitelist — DRY-нарушение, из-за которого
+# .py-ветка так и не получила escape-hatch'и, добавленные в .sh-ветку
+# (12 мая, WP-291 follow-up). Вынесено в одну функцию.
 #
-# Scope: roles/ + scripts/. Whitelist parameter-expansion fallback и комментарии.
-while IFS= read -r sh; do
-    [ -f "$sh" ] || continue
-    # Antipattern: `/DS-strategy/` или `"DS-strategy"` literal без use $GOVERNANCE_DIR
-    if grep -qE '"DS-strategy"|/DS-strategy[/"]' "$sh" 2>/dev/null; then
-        # Допустимо если читает GOVERNANCE_REPO из env (значит fallback default — паттерн Python detector выше)
-        if grep -qE 'IWE_GOVERNANCE_REPO|GOVERNANCE_REPO' "$sh" 2>/dev/null; then
-            continue
-        fi
-        # Фильтр fallback `${VAR:-...DS-strategy...}` (`:-` должен быть внутри parameter-expansion с DS-strategy)
-        # и комментариев (строка вида `path:NN:   # ...`).
-        HITS=$(grep -nE '"DS-strategy"|/DS-strategy[/"]' "$sh" 2>/dev/null \
-            | grep -vE '\$\{[^}]*:-[^}]*DS-strategy|^[^:]+:[[:space:]]*#' || true)
-        if [ -n "$HITS" ]; then
-            log "  ⚠ $sh: hardcoded DS-strategy без \$GOVERNANCE_DIR / GOVERNANCE_REPO env:"
-            echo "$HITS" | while IFS= read -r line; do log "      $line"; done
-            COVERAGE_VIOLATIONS=$((COVERAGE_VIOLATIONS + 1))
-        fi
+# Слои (в порядке применения), все — унаследованы от дотеперешнего контракта
+# detector'а, не изобретены заново:
+#   1. $DETECTOR_07_REGEX (setup/detector-regex.sh) — настоящая граница слова,
+#      ловит произвольную пунктуацию по обе стороны токена (issue #1106: было
+#      только `"..."` и `/..[/"]`-перечисление форм — mutation testing нашло
+#      5, затем ~16 пропущенных форм).
+#   2. Комментарии (`# ...`) — документация, не исполняется. Раньше был
+#      только в .sh-ветке; .py теперь получил ту же защиту (нужна для
+#      scripts/artifactor.py:52, где "DS-strategy" упомянут в комментарии-
+#      пояснении про соседний репозиторий).
+#   3. `${(IWE_)?GOVERNANCE_REPO:-...DS-strategy...}` — bash parameter-
+#      expansion fallback. ВАЖНО (issue #1106): имя переменной перед `:-`
+#      теперь обязано быть (IWE_)?GOVERNANCE_REPO — раньше фильтр принимал
+#      ЛЮБОЕ имя (`\$\{[^}]*:-...`), поэтому `${GOVERNANCE_DIR:-$WORKSPACE/
+#      DS-strategy}` (реальный баг в dt-collect.sh, самоссылающаяся
+#      переменная без связи с IWE_GOVERNANCE_REPO) тоже проходил бы как
+#      «легитимный fallback», если бы вообще дошёл до этого фильтра.
+#   4. Whole-file amnesty: если файл ГДЕ-ТО ещё упоминает
+#      IWE_GOVERNANCE_REPO/GOVERNANCE_REPO — не флагуем. Грубее слоя 3, но
+#      покрывает идиомы, которые этот detector не разбирает по отдельности
+#      (`os.environ.get(...)`, `_selected_env(...)`, GOV_REPO_TMPL=...) —
+#      полный, statement-scoped вариант той же проверки живёт в
+#      scripts/validate-fmt-scripts.sh (проверка 2, issues #275/#446/#450/
+#      #665/#759/#1038); detector 7 сознательно остаётся проще.
+#
+# Scope: roles/ + scripts/ + guide-kit/ (issue #1106 — раньше .py видел
+# только roles/, .sh не видел guide-kit/ вовсе). tests/ исключены: это
+# каталог тестовых фикстур по конвенции всего репозитория (тот же принцип,
+# что scripts/tests/* в validate-fmt-scripts.sh) — литерал там представляет
+# тестовое значение, а не утечку личного репозитория (подтверждено:
+# scripts/tests/test_issue_954_wp_list_keys.py, test_day_close_prepare.py,
+# test_create_wp_number_padding.py и ~29 *.sh используют "DS-strategy" как
+# sample-данные, ни один не читает GOVERNANCE_REPO).
+_detector07_scan_file() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    grep -qE "$DETECTOR_07_REGEX" "$file" 2>/dev/null || return 0
+    if grep -qE 'IWE_GOVERNANCE_REPO|GOVERNANCE_REPO' "$file" 2>/dev/null; then
+        return 0
     fi
-done < <(find roles scripts -name '*.sh' -type f 2>/dev/null)
+    grep -nE "$DETECTOR_07_REGEX" "$file" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' \
+        | grep -vE '\$\{(IWE_)?GOVERNANCE_REPO:-[^}]*DS-strategy' || true
+}
+
+# Python scripts: должны читать GOVERNANCE_REPO из env, не хардкодить
+# issue #1006: .claude/skills добавлен в область сканирования — раньше
+# скиллы-хелперы (.py рядом с SKILL.md) не покрывались вовсе.
+while IFS= read -r py; do
+    HITS=$(_detector07_scan_file "$py")
+    if [ -n "$HITS" ]; then
+        log "  ⚠ $py: hardcoded DS-strategy без чтения GOVERNANCE_REPO env:"
+        echo "$HITS" | while IFS= read -r line; do log "      $line"; done
+        COVERAGE_VIOLATIONS=$((COVERAGE_VIOLATIONS + 1))
+    fi
+done < <(find roles scripts guide-kit .claude/skills -name '*.py' -type f ! -path '*/tests/*' 2>/dev/null | sort)
+
+# Shell scripts (12 мая, WP-291 follow-up; guide-kit добавлен issue #1106):
+# Bug 1 (b24639f) — в dt-collect.sh:238 (старая нумерация) был hardcode
+# /DS-strategy/ который detector не ловил, потому что .sh файлы не
+# сканировались. issue #1106 нашёл РЕЦИДИВ того же класса бага на line 37
+# текущей версии (GOVERNANCE_DIR="${GOVERNANCE_DIR:-$WORKSPACE/DS-strategy}"
+# игнорировал IWE_GOVERNANCE_REPO) — .sh сканировался, но regex не покрывал
+# эту форму (нет символа после "DS-strategy" кроме "}").
+while IFS= read -r sh; do
+    HITS=$(_detector07_scan_file "$sh")
+    if [ -n "$HITS" ]; then
+        log "  ⚠ $sh: hardcoded DS-strategy без \$GOVERNANCE_DIR / GOVERNANCE_REPO env:"
+        echo "$HITS" | while IFS= read -r line; do log "      $line"; done
+        COVERAGE_VIOLATIONS=$((COVERAGE_VIOLATIONS + 1))
+    fi
+done < <(find roles scripts guide-kit .claude/skills -name '*.sh' -type f ! -path '*/tests/*' 2>/dev/null | sort)
 
 # Prompts: не должны иметь bare DS-strategy/, должны использовать {{GOVERNANCE_REPO}}
 while IFS= read -r prompt; do
@@ -278,6 +320,21 @@ while IFS= read -r prompt; do
         COVERAGE_VIOLATIONS=$((COVERAGE_VIOLATIONS + 1))
     fi
 done < <(find roles -name 'prompts' -type d 2>/dev/null | xargs -I{} find {} -name '*.md' -type f 2>/dev/null)
+
+# Skills + memory/ (issue #1006): не сканировались вовсе — SKILL.md и
+# memory/*.md доставляются пользователю так же, как prompts, и так же могут
+# утечь личный репозиторий автора. Richer _detector07_scan_file (комментарии,
+# parameter-expansion fallback, whole-file amnesty) — не упрощённая версия
+# из блока prompts выше, т.к. проза скиллов/памяти чаще легитимно обсуждает
+# переменную окружения рядом с примером значения.
+while IFS= read -r doc; do
+    HITS=$(_detector07_scan_file "$doc")
+    if [ -n "$HITS" ]; then
+        log "  ⚠ $doc: hardcoded DS-strategy без {{GOVERNANCE_REPO}} / GOVERNANCE_REPO env:"
+        echo "$HITS" | while IFS= read -r line; do log "      $line"; done
+        COVERAGE_VIOLATIONS=$((COVERAGE_VIOLATIONS + 1))
+    fi
+done < <(find .claude/skills memory -name '*.md' -type f 2>/dev/null | sort)
 
 if [ "$COVERAGE_VIOLATIONS" -eq 0 ]; then
     log "  ✅ PASS"
@@ -297,13 +354,18 @@ while IFS= read -r path; do
     [ -f "$path" ] || continue
     case "$path" in *.sh)
         # Ищем sed -e "s|{{X}}|...|" — это bare placeholder в substituted-файле = регрессия R6.1**.
-        if grep -qE 'sed.*-e.*"s\|\{\{[A-Z_]+\}\}\|' "$path" 2>/dev/null; then
+        # Any sed form: `sed -e "s|{{X}}|..."`, `sed "s|{{X}}|..."`, single quotes
+        # (issue #1010 F13: only the -e form was caught).
+        if grep -qE "sed[^|]*[\"']s\|\{\{[A-Z_]+\}\}\|" "$path" 2>/dev/null; then
             log "  ⚠ $path: bare {{X}} в sed-выражении (R6.1** antipattern, build-runtime подменит литерал)"
             SED_VIOLATIONS=$((SED_VIOLATIONS + 1))
         fi
         ;;
     esac
-done < <(awk '/^substituted:/,/^[a-z_]+:/' .claude/runtime-overlay.yaml 2>/dev/null | grep -oE '^\s+- .*' | sed 's/^[[:space:]]*-[[:space:]]*//' | sed 's/[[:space:]]*#.*//')
+# The section header itself matches the end pattern, so an awk range
+# `/^substituted:/,/^[a-z_]+:/` ended on its first line and fed no file at all
+# (issue #1010 F13): track the section with a flag instead.
+done < <(awk '/^substituted:/ {f=1; next} /^[a-z_]+:/ {f=0} f' .claude/runtime-overlay.yaml 2>/dev/null | grep -oE '^\s+- .*' | sed 's/^[[:space:]]*-[[:space:]]*//' | sed 's/[[:space:]]*#.*//')
 
 if [ "$SED_VIOLATIONS" -eq 0 ]; then
     log "  ✅ PASS"
@@ -316,7 +378,7 @@ log ""
 # === Detector 9: manifest version matches CHANGELOG ===
 log "[9/11] manifest_version — update-manifest.json version == CHANGELOG.md version..."
 if [ -f update-manifest.json ] && [ -f CHANGELOG.md ] && command -v python3 >/dev/null 2>&1; then
-    MANIFEST_VERSION=$(python3 -c "import json; print(json.load(open('update-manifest.json')).get('version',''))" 2>/dev/null || echo "")
+    MANIFEST_VERSION=$(python3 -c "import json; print(json.load(open('update-manifest.json', encoding='utf-8')).get('version',''))" 2>/dev/null || echo "")
     CHANGELOG_VERSION=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | sed 's/^## \[//;s/\]$//' 2>/dev/null || echo "")
     if [ -z "$MANIFEST_VERSION" ] || [ -z "$CHANGELOG_VERSION" ]; then
         log "  ⊘ SKIP (не удалось прочитать версии)"
@@ -345,7 +407,7 @@ if [ -f update-manifest.json ] && [ -f "$RUNNER" ] && command -v python3 >/dev/n
     DEPRECATED_PROMPTS=$(python3 -c "
 import json, sys
 try:
-    m = json.load(open('update-manifest.json'))
+    m = json.load(open('update-manifest.json', encoding='utf-8'))
     paths = [e['path'] for e in m.get('deprecated_files', []) if '/strategist/prompts/' in e.get('path', '')]
     print('\n'.join(paths))
 except Exception:
@@ -386,8 +448,17 @@ if command -v grep >/dev/null 2>&1; then
             PROMPT_SCRIPT_VIOLATIONS=$((PROMPT_SCRIPT_VIOLATIONS + 1))
         fi
     done < <(
+        # issue #884 cold-review: the old extraction (`grep -oE 'scripts/[^[:space:]/]+\.sh'`)
+        # matched "scripts/x.sh" as a SUBSTRING anywhere, so a perfectly valid
+        # ".claude/scripts/x.sh" or "roles/foo/scripts/x.sh" reference was reported as
+        # a missing root scripts/x.sh. Capture the whole shell token first (back to the
+        # nearest whitespace/quote), then only flag it if that token's path genuinely
+        # STARTS at scripts/ (optionally through a leading "./") -- a nested scripts/
+        # dir never reaches the root-scripts/ existence check below.
         grep -rh 'bash[[:space:]]\+.*scripts/[^[:space:]"'\'']*\.sh' roles/*/prompts/*.md 2>/dev/null \
-            | grep -oE 'scripts/[^[:space:]/]+\.sh' \
+            | grep -oE '[^[:space:]"'\'']*scripts/[^[:space:]"'\'']*\.sh' \
+            | sed -E 's#^\./##' \
+            | grep -E '^scripts/' \
             | sed 's|scripts/||' \
             | sort -u
     )

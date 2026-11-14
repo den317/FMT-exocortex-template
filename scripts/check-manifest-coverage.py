@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# check-manifest-coverage.py — проверяет что все файлы репо покрыты update-manifest.json
-# Использование: git ls-files | python3 scripts/check-manifest-coverage.py update-manifest.json
-# Exit 0 = всё покрыто. Exit 1 = файлы без покрытия (B2 gap). Exit 2 = ошибка вызова.
+# check-manifest-coverage.py — checks that all repo files are covered by update-manifest.json
+# Usage: git ls-files | python3 scripts/check-manifest-coverage.py update-manifest.json
+# Exit 0 = everything covered. Exit 1 = files without coverage (B2 gap). Exit 2 = call error.
 #
-# Файлы без покрытия = в git, но не в manifest["files"] и не в exclusions.
-# Исправление: добавить в manifest["files"] или manifest["excluded_paths"].
-# excluded_paths принимает список строк: ["path/to/file.md", ...]
+# Files without coverage = in git, but not in manifest["files"] and not in exclusions.
+# Fix: add to manifest["files"] or manifest["excluded_paths"].
+# excluded_paths accepts a list of strings: ["path/to/file.md", ...]
 #
 # issue #247: update.sh (step 6e) replaces update-manifest.json wholesale on
 # every update, so user edits to excluded_paths do not survive. Fork-local
@@ -19,23 +19,23 @@ import json
 from pathlib import Path
 
 
-# Файлы/папки, намеренно не включаемые в manifest:
-# - .github/ и setup/ не исключаются целиком: пользовательские workflow и
-#   bootstrap-скрипты обязаны быть перечислены в манифесте. Исключения ниже
-#   перечисляют только maintainer/test-only поддеревья и файлы.
-# - seed/           — scaffold-шаблоны (только при первом install)
-# - templates/      — scaffold-шаблоны (только при первом install)
-# - extensions/     — пользовательские кастомизации, не перезаписываются
-# - params.yaml     — пользовательский конфиг (авторский)
-# - generate-manifest.sh / update-manifest.json — инструментарий манифеста
+# Files/folders intentionally not included in the manifest:
+# - .github/ and setup/ are not excluded entirely: user workflows and
+#   bootstrap scripts must be listed in the manifest. The exclusions below
+#   list only maintainer/test-only subtrees and files.
+# - seed/           — scaffold templates (only on first install)
+# - templates/      — scaffold templates (only on first install)
+# - extensions/     — user customizations, not overwritten
+# - params.yaml     — user config (the author's)
+# - generate-manifest.sh / update-manifest.json — manifest tooling
 # - README.md / LICENSE / CONTRIBUTING.md / CHANGELOG.md / CODE_OF_CONDUCT.md /
-#   SECURITY.md / PRIVACY.md / CODEOWNERS / CITATION.cff — мета репо (только корень)
-# - .gitkeep        — маркеры пустых папок
-# - .DS_Store       — мусор macOS
+#   SECURITY.md / PRIVACY.md / CODEOWNERS / CITATION.cff / .gitattributes — repo meta (root only)
+# - .gitkeep        — empty-folder markers
+# - .DS_Store       — macOS junk
 
-# Имена файлов, исключаемые ТОЛЬКО когда они в корне репо (len(parts)==1).
-# Платформенные README.md, CHANGELOG.md в подпапках (roles/*/README.md) — в манифесте,
-# и если новый добавить, не забыть добавить в манифест → CI должен это поймать.
+# File names excluded ONLY when they are in the repo root (len(parts)==1).
+# Platform README.md, CHANGELOG.md in subfolders (roles/*/README.md) are in the manifest,
+# and if a new one is added, do not forget to add it to the manifest → CI should catch this.
 _ROOT_ONLY_EXCLUDED_NAMES = frozenset({
     "README.md",
     "README.en.md",
@@ -47,23 +47,24 @@ _ROOT_ONLY_EXCLUDED_NAMES = frozenset({
     "PRIVACY.md",
     "CODEOWNERS",
     "CITATION.cff",
+    ".gitattributes",
 })
 
-# Имена файлов, исключаемые везде независимо от папки.
+# File names excluded everywhere regardless of folder.
 _ALWAYS_EXCLUDED_NAMES = frozenset({
     ".DS_Store",
     ".gitkeep",
     "params.yaml",
-    # issue #348: рабочий params.yaml больше не трекается шаблоном, в репозитории
-    # лежит образец. Оба имени — пользовательское пространство, ни то ни другое
-    # не доставляется через манифест: рабочий файл засевает build-runtime.sh.
+    # issue #348: the working params.yaml is no longer tracked by the template, the repository
+    # holds a sample. Both names are user space, neither
+    # is delivered via the manifest: the working file is seeded by build-runtime.sh.
     "params.yaml.example",
     "generate-manifest.sh",
     "update-manifest.json",
     "update-manifest.local.json",
 })
 
-# Точные пути для исключения.
+# Exact paths to exclude.
 _EXCLUDED_EXACT_PATHS = frozenset({
     ".claude/settings.local.json",
     ".github/PULL_REQUEST_TEMPLATE.md",
@@ -73,6 +74,18 @@ _EXCLUDED_EXACT_PATHS = frozenset({
     ".github/workflows/translate-sync.yml",
     ".github/workflows/validate-template.yml",
     ".github/workflows/weekly-release.yml",
+    # WP-529 (29.09.2026): release-pipeline guards of this repo (stale release
+    # PR notice, CHANGELOG entry gate) - maintainer-only, same category as
+    # weekly-release.yml above.
+    ".github/workflows/changelog-gate.yml",
+    ".github/workflows/release-watchdog.yml",
+    # WP-529 Phase 21: this repo's own red-team attestation pipeline (compute
+    # digest + sign via GitHub Attestations API) — references THIS repo's
+    # specific red-team-auditors environment and policy file, same
+    # maintainer-only category as release.yml/weekly-release.yml above, not
+    # something a fork should get delivered via update.sh.
+    ".github/workflows/attestation-compute.yml",
+    ".github/workflows/attestation-sign.yml",
     "setup/detector-regex.sh",
     "setup/integration-contract-validator.sh",
     "setup/optional/COVER-IMAGES.md",
@@ -97,7 +110,7 @@ _EXCLUDED_PREFIXES = frozenset({
     "setup/promote-fixtures/",
 })
 
-# Верхнеуровневые папки: весь контент исключается.
+# Top-level folders: all content is excluded.
 _EXCLUDED_TOP_DIRS = frozenset({
     "seed",
     "templates",
@@ -112,7 +125,7 @@ def _is_excluded(path: str, extra: list[str]) -> bool:
     if p.name in _ALWAYS_EXCLUDED_NAMES:
         return True
 
-    # Корневые мета-файлы: исключать только если они прямо в корне репо
+    # Root meta files: exclude only if they are directly in the repo root
     if len(parts) == 1 and p.name in _ROOT_ONLY_EXCLUDED_NAMES:
         return True
 
@@ -149,7 +162,22 @@ def _parse_excluded_paths(raw: object) -> list[str]:
     return result
 
 
+def _force_utf8_streams() -> None:
+    """Emit the report as UTF-8 whatever the console code page is.
+
+    On Windows (cp1251/cp866 consoles) printing the status emoji raises
+    UnicodeEncodeError -- on the success path, which turned a passed check
+    into a blocked commit (issue #927). reconfigure() exists on text streams
+    from Python 3.7; skip silently where a stream lacks it (e.g. replaced).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def main() -> None:
+    _force_utf8_streams()
     if len(sys.argv) < 2:
         print("Usage: git ls-files | python3 check-manifest-coverage.py <manifest.json>",
               file=sys.stderr)

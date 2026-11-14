@@ -31,9 +31,9 @@ import re
 import sys
 from pathlib import Path
 
-# Governance-репо (где живёт WP-REGISTRY.md) резолвится через IWE_GOVERNANCE_REPO,
-# не от расположения скрипта — на пользовательской установке скрипт остаётся внутри
-# FMT-exocortex-template/scripts/, а реестр живёт в отдельном governance-репо (#293).
+# The governance repo (where WP-REGISTRY.md lives) is resolved via IWE_GOVERNANCE_REPO,
+# not from the script location -- on a user installation the script stays inside
+# FMT-exocortex-template/scripts/, while the registry lives in a separate governance repo (#293).
 IWE_ROOT = Path(os.environ.get("IWE_ROOT", Path.home() / "IWE"))
 GOV_REPO = os.environ.get("IWE_GOVERNANCE_REPO", "DS-strategy")
 ROOT = IWE_ROOT / GOV_REPO
@@ -42,9 +42,36 @@ OUTPUT = ROOT / "current" / "active-wp.md"
 INBOX_DIR = ROOT / "inbox"
 ARCHIVE_DIR = ROOT / "archive" / "wp-contexts"
 
-# Статусы храним без U+FE0F (emoji variation selector): "стрелка с VS16" и без него - один статус.
-# ⏹ (снят) и 🔁 (свёрнут в спринт) - issue #473: реестр их уже использует,
-# парсер их не знал, обе строки проваливались в PARSE-WARN как "неизвестный статус".
+
+def _script_invocation_hint() -> str:
+    """How to tell a user to re-run this script (issue #905).
+
+    The script's OWN location is not ROOT (see the comment above): on a
+    stock install it stays inside FMT-exocortex-template/scripts/, ROOT is
+    a separate governance repo that never receives a copy. A hardcoded
+    "python3 scripts/build-active-wp.py" printed a path that only resolves
+    from ROOT and nowhere else -- exit code 0, message ignored, active-wp.md
+    silently stale. Report the actual runtime location instead, the same
+    two-place FMT-exocortex-template/governance-repo resolution
+    create-wp.sh already uses (scripts/create-wp.sh:872-875), just inverted:
+    that one searches for the script from a known root, this one searches
+    for a known root from the script.
+    """
+    self_path = Path(__file__).resolve()
+    for root in (ROOT, IWE_ROOT / "FMT-exocortex-template"):
+        try:
+            # Both sides must go through the same symlink resolution (e.g.
+            # macOS /var -> /private/var) or an unresolved root never
+            # prefix-matches a resolved self_path.
+            resolved_root = root.resolve()
+            return f"python3 {(Path(root.name) / self_path.relative_to(resolved_root)).as_posix()}"
+        except (ValueError, OSError):
+            continue
+    return f"python3 {self_path}"
+
+# We store statuses without U+FE0F (emoji variation selector): "an arrow with VS16" and without it are one status.
+# ⏹ (removed) and 🔁 (folded into a sprint) - issue #473: the registry already uses them,
+# the parser did not know them, and both lines fell into PARSE-WARN as an "unknown status".
 ACTIVE_STATUSES = {"🔄", "⏳", "🧪", "🚧", "⏸"}
 CLOSED_STATUSES = {"✅", "📦", "↗", "❌", "⏹", "🔁"}
 ALL_STATUSES = ACTIVE_STATUSES | CLOSED_STATUSES
@@ -53,21 +80,22 @@ ALL_STATUSES = ACTIVE_STATUSES | CLOSED_STATUSES
 def norm_status(token: str) -> str:
     return token.replace("\ufe0f", "")
 
-# Строка-РП: `| 312 | P2 | **Название** | 🔄 | repo | 8h |`
-# Done-вариант: `| ~~306~~ | ~~P3~~ | ~~Название~~ | ✅ | ~~repo~~ | ~~4h~~ |`
+# WP row: `| 312 | P2 | **Название** | 🔄 | repo | 8h |`
+# Done variant: `| ~~306~~ | ~~P3~~ | ~~Название~~ | ✅ | ~~repo~~ | ~~4h~~ |`
 ROW_RE = re.compile(r"^\|\s*(?:~~)?(?:\*\*)?(?:WP-)?(\d{1,4})(?:\*\*)?(?:~~)?\s*\|")
 
-# Имя файла WP в inbox/archive: WP-NNN-... .md или WP-NNN.md или папка WP-NNN/
+# WP file name in inbox/archive: WP-NNN-... .md or WP-NNN.md or a WP-NNN/ folder
 WP_NAME_RE = re.compile(r"^WP-(\d{1,4})(?:[-.].*|/)?$")
 
-# issue #473: колонки реестра читались по жёсткой позиции (cols[3] = статус и
-# т.д.), схема таблицы `| # | P | Название | Ст | Репо | Бюджет |`. Реальные
-# реестры расходятся и по числу, и по порядку колонок (одна установка добавила
-# "Ставка" между Репо и Бюджет, другая использует "Статус | Цель | Создан | P"
-# в другом порядке) - жёсткая позиция читала не ту колонку молча. Индекс
-# теперь определяется по имени колонки из строки-заголовка.
+# issue #473: the registry columns were read by a rigid position (cols[3] = status and
+# so on), the table schema `| # | P | Название | Ст | Репо | Бюджет |`. Real
+# registries differ in both the number and the order of columns (one installation added
+# "Ставка" between Репо and Бюджет, another uses "Статус | Цель | Создан | P"
+# in a different order) - the rigid position silently read the wrong column. The index
+# is now determined by the column name from the header row.
 HEADER_RE = re.compile(r"^\|\s*#\s*\|")
 _COLUMN_ALIASES = {
+    "wp": {"#", "№"},
     "name": {"название"},
     "status": {"статус", "ст"},
     "repo": {"репо"},
@@ -138,8 +166,8 @@ def parse_registry(text: str) -> tuple[list[dict], list[str]]:
             i = columns.get(role)
             return cols[i].strip() if i is not None and i < len(cols) else ""
 
-        # Очистка от ~~ и пробелов; берём только первый токен, чтобы
-        # принять варианты вида "🔄 Ф4" (статус + пометка фазы).
+        # Strip ~~ and spaces; take only the first token, so as to
+        # accept variants like "🔄 Phase 4" (status + phase note).
         status_raw = cell("status").replace("~~", "").strip()
         token = status_raw.split()[0] if status_raw else ""
         status = norm_status(token)
@@ -160,6 +188,23 @@ def parse_registry(text: str) -> tuple[list[dict], list[str]]:
             "status_display": token,
             "repo": repo,
             "budget": budget,
+            "raw": line,
+            "_status_col": columns.get("status"),
+            # Original cell text (markup intact) for re-rendering exactly the
+            # header's six roles in active-wp.md (#558) — the raw line carries
+            # ALL registry columns and overflowed the 6-column header,
+            # spilling everything right of "Бюджет" outside the table. The
+            # "wp" role falls back to the numeric id when the registry header
+            # names its first column something un-aliased.
+            "_view_cells": {
+                role: (
+                    cols[0] if role == "wp" else
+                    project if role == "project" else
+                    repo if role == "repo" else
+                    budget if role == "budget" else cell(role)
+                )
+                for role in ("wp", "project", "name", "repo", "budget")
+            },
         })
     return rows, problems
 
@@ -179,12 +224,18 @@ def render(rows: list[dict]) -> str:
     def table(items: list[dict]) -> str:
         if not items:
             return "_нет_\n"
+        # Rows are built from exactly the six roles the header declares (#558):
+        # printing the raw registry line spilled every column right of
+        # "Бюджет" (the registry has 10) outside the table as plain text.
+        # find_header_columns() already reads the registry schema dynamically —
+        # a schema change now affects cell PICKING, not the rendered width.
         out = ["| # | P | Название | Ст | Репо | Бюджет |",
                "|---:|---|------------------|:--:|------------------|------:|"]
         for r in items:
+            v = r["_view_cells"]
             out.append(
-                f"| {r['id_display']} | {r['project']} | {r['name']} | "
-                f"{r['status_display']} | {r['repo']} | {r['budget']} |"
+                f"| {v['wp']} | {v['project']} | {v['name']} "
+                f"| {r['status_display']} | {v['repo']} | {v['budget']} |"
             )
         return "\n".join(out) + "\n"
 
@@ -195,7 +246,7 @@ def render(rows: list[dict]) -> str:
         "# Активные РП — вид на WP-REGISTRY",
         "",
         f"> Открытые ({len(active)}) сверху, закрытые ({len(closed)}) ниже. Обе секции по убыванию номера.",
-        "> Source-of-truth — `docs/WP-REGISTRY.md`. Регенерация: `python3 scripts/build-active-wp.py`.",
+        f"> Source-of-truth — `docs/WP-REGISTRY.md`. Регенерация: `{_script_invocation_hint()}`.",
         "",
         "<details>",
         "<summary><b>Обозначения статусов (Ст)</b></summary>",
@@ -322,7 +373,7 @@ def semantic_check(rows: list[dict]) -> list[str]:
         in_inbox = bool(wf["inbox"])
         in_archive = bool(wf["archive"])
         if not in_inbox and not in_archive:
-            continue  # покрывается deep_check
+            continue  # covered by deep_check
         is_active = r["status"] in ACTIVE_STATUSES
         is_closed = r["status"] in CLOSED_STATUSES
         if is_active and not in_inbox and in_archive:
@@ -396,12 +447,12 @@ def main() -> int:
     if check_mode:
         if new_content != current:
             print(f"build-active-wp: {OUTPUT.relative_to(ROOT)} расходится с REGISTRY.", file=sys.stderr)
-            print("Пересобрать: python3 scripts/build-active-wp.py", file=sys.stderr)
+            print(f"Пересобрать: {_script_invocation_hint()}", file=sys.stderr)
             return 1
         return 0
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(new_content, encoding="utf-8")
+    OUTPUT.write_text(new_content, encoding="utf-8", newline="\n")
     print(f"build-active-wp: {OUTPUT.relative_to(ROOT)} обновлён ({len(rows)} РП)")
     return 0
 

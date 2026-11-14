@@ -40,9 +40,15 @@ def _installed_governance_root() -> Optional[pathlib.Path]:
 
 def _resolve_snapshot_path() -> pathlib.Path:
     """Resolve cache location, preferring an installed copy's physical repo."""
+    # issue #1132: this cache used to live under inbox/WP-425/ — the platform
+    # author's own RP number, with no meaning for anyone else's governance
+    # repo. A fresh install got an unexplained inbox/WP-425/ folder, visible
+    # and untracked in `git status`, indistinguishable by look from a real
+    # work-product folder. `.cache/` carries no RP numbering, so it can never
+    # collide with one.
     installed_root = _installed_governance_root()
     if installed_root is not None:
-        return installed_root / "inbox/WP-425/cache/derived_snapshot.json"
+        return installed_root / ".cache/derived_snapshot.json"
 
     configured_root = os.environ.get("IWE_ROOT") or os.environ.get("IWE_WORKSPACE")
     iwe_root = (
@@ -51,10 +57,31 @@ def _resolve_snapshot_path() -> pathlib.Path:
         else pathlib.Path.home() / "IWE"
     )
     governance_repo = os.environ.get("IWE_GOVERNANCE_REPO", "DS-strategy")
-    return iwe_root / governance_repo / "inbox/WP-425/cache/derived_snapshot.json"
+    return iwe_root / governance_repo / ".cache/derived_snapshot.json"
 
 
 SNAPSHOT_PATH = _resolve_snapshot_path()
+
+
+def _migrate_stray_old_snapshot() -> None:
+    """One-time cleanup for installs caught by #1132 before its fix landed
+    (issue #1171). The old cache path, inbox/WP-425/derived_snapshot.json,
+    kept getting recreated nightly and is never removed by the #1132 fix
+    itself, which only changed the path for new writes. Removes exactly that
+    one file -- never the inbox/WP-425/ directory, in case a real WP-425
+    work-product folder happens to live there under the same RP number.
+    """
+    root = SNAPSHOT_PATH.parent.parent
+    old_path = root / "inbox" / "WP-425" / "derived_snapshot.json"
+    if not old_path.exists():
+        return
+    if not SNAPSHOT_PATH.exists() or old_path.stat().st_mtime > SNAPSHOT_PATH.stat().st_mtime:
+        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        old_path.replace(SNAPSHOT_PATH)
+        logging.info("Migrated stray snapshot from %s to %s", old_path, SNAPSHOT_PATH)
+    else:
+        old_path.unlink()
+        logging.info("Removed stray old snapshot at %s (current copy is newer)", old_path)
 
 # Maps stage_id strings from 3_4_qualification to integer stage levels.
 # Source: render-pilot-guides.py _STAGE_ID_TO_INT (OwnerIntegrity: single mapping table).
@@ -73,6 +100,12 @@ _STAGE_INT_TO_LABEL = {
 
 # RCS slots tracked in rcs_indices (M3/IT/A are rarely bottlenecks but included for completeness).
 _RCS_SLOTS = ["W", "M1", "M2", "M3", "M4", "IT", "A"]
+
+# Claude Code registers MCP tools as mcp__<server>__<tool>; the short tool name
+# alone never matches --allowedTools, so a headless call is silently denied at
+# the permission gate (no TTY to prompt) and every retry fails the same way.
+# See bug-2026-07-12-digital-twin-fetch-fails-headless.md.
+_ALLOWED_TOOL_DT_READ = "mcp__claude_ai_IWE__dt_read_digital_twin"
 
 
 def _is_stale(stale_days: int) -> bool:
@@ -101,7 +134,7 @@ def _fetch_derived_via_headless_claude() -> dict:
     )
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--allowedTools", "dt_read_digital_twin",
+            ["claude", "-p", prompt, "--allowedTools", _ALLOWED_TOOL_DT_READ,
              "--output-format", "text"],
             capture_output=True, text=True, timeout=120,
         )
@@ -144,8 +177,13 @@ def _parse_qualification(response: dict) -> dict:
         if isinstance(data, dict) and key in data and isinstance(data[key], dict):
             data = data[key]
 
-    # Locate 3_4_qualification — may be nested or top-level.
-    qual = data.get("3_4_qualification") or data.get("3_derived", {}).get("3_4_qualification") or data
+    # Locate 3_4_qualification — may be nested or top-level, under either the
+    # current key or the pre-WP-462 name (render-pilot-guides.py:_rcs_from_digital_twin
+    # hit the same profiler rename and checks both; mirrored here).
+    def _find_qual(d: dict):
+        return d.get("3_4_qualification_estimate") or d.get("3_4_qualification")
+
+    qual = _find_qual(data) or _find_qual(data.get("3_derived", {})) or data
     if not isinstance(qual, dict):
         raise RuntimeError(f"Cannot locate 3_4_qualification in response: {str(response)[:300]}")
 
@@ -158,18 +196,36 @@ def _parse_qualification(response: dict) -> dict:
         raise RuntimeError(f"Unknown stage_id '{stage_id}' and no fallback stage in response")
 
     rcs = qual.get("rcs_indices", {})
-    slot_vals = {s: rcs.get(s, 0) for s in _RCS_SLOTS if rcs.get(s) is not None}
+    if isinstance(rcs, str):
+        rcs = json.loads(rcs)
+    if not isinstance(rcs, dict):
+        raise RuntimeError(f"rcs_indices has unexpected type {type(rcs).__name__}")
+    # Each slot is {"idx": N, ...metadata} (calibrated/streak/events), not a bare
+    # number — same shape render-pilot-guides.py:_rcs_from_digital_twin already
+    # unwraps. Surfaced only once the fetch itself started working (bug-2026-07-12):
+    # the old `rcs.get(s, 0)` returned the dict itself, TypeError on min() below.
+    slot_vals = {
+        s: rcs[s]["idx"] for s in _RCS_SLOTS
+        if isinstance(rcs.get(s), dict) and "idx" in rcs[s]
+    }
     if not slot_vals:
         raise RuntimeError("rcs_indices missing or empty in qualification data")
 
     # Bottleneck = slot with minimum value; M1 preferred on ties.
     bottleneck = min(slot_vals, key=lambda k: (slot_vals[k], k != "M1"))
 
+    # bottleneck can land on a rare slot (M3/IT/A, kept in _RCS_SLOTS "for
+    # completeness") not among the 4 always shown — keep it in rcs too, so
+    # bottleneck_slot never names a key absent from the snapshot's own rcs.
+    rcs_keys = ["W", "M1", "M2", "M4"]
+    if bottleneck not in rcs_keys:
+        rcs_keys.append(bottleneck)
+
     return {
         "stage_raw": stage,
         "stage_label": _STAGE_INT_TO_LABEL.get(stage, f"Ступень {stage}"),
         "bottleneck_slot": bottleneck,
-        "rcs": {s: slot_vals[s] for s in ["W", "M1", "M2", "M4"] if s in slot_vals},
+        "rcs": {s: slot_vals[s] for s in rcs_keys if s in slot_vals},
     }
 
 
@@ -207,6 +263,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(levelname)s %(message)s")
 
+    if not args.dry_run:
+        _migrate_stray_old_snapshot()
+
     if args.if_stale_days > 0 and not _is_stale(args.if_stale_days):
         logging.info("Snapshot is fresh (< %d days old) — skipping update", args.if_stale_days)
         return 0
@@ -214,14 +273,17 @@ def main() -> int:
     logging.info("Fetching 3_derived via headless claude...")
     try:
         response = _fetch_derived_via_headless_claude()
-    except RuntimeError as exc:
+    except Exception as exc:
+        # Broad on purpose: this is a cron/launchd entry point — any unexpected
+        # failure (incl. shapes we didn't anticipate) must log one clean line,
+        # not a raw traceback, so the cron log stays scannable.
         logging.error("Fetch failed: %s", exc)
         return 1
 
     logging.info("Parsing 3_4_qualification...")
     try:
         parsed = _parse_qualification(response)
-    except RuntimeError as exc:
+    except Exception as exc:
         logging.error("Parse failed: %s", exc)
         return 1
 

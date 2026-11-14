@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # routing: helper  skill=day-open  called-by=haiku  deterministic=true
 # see DP.SC.159, DP.ROLE.059
-# day-open-preflight.sh — pre-flight healthcheck для Day Open
-# WP-7 ФDay-Open-Hardening (DOC6 3-состояния: peer-session 2026-07-14-07)
-# Возвращает единый JSON: {"calendar":"ok|fail|pending","scout":"ok|fail|disabled|pending","scout_reason":"...",
+# day-open-preflight.sh — pre-flight healthcheck for Day Open
+# WP-7 Phase Day-Open-Hardening (DOC6 3 states: peer-session 2026-07-14-07)
+# Returns a single JSON: {"calendar":"ok|fail|pending|disabled","scout":"ok|fail|disabled|pending","scout_reason":"...",
 #   "triage":"ok|fail|disabled|pending","triage_reason":"...","memory":"ok|stale|missing"}
-# "disabled" = источник намеренно не настроен на этой машине (Scout/triage репо отсутствуют).
-# "fail" = источник настроен, но данные не собрались (диагностика нужна).
+# "disabled" = the source is intentionally not configured on this machine (Scout/triage repos are absent;
+#   calendar: params.yaml → calendar_source: none, issue #942).
+# "fail" = the source is configured, but the data was not collected (diagnostics needed).
 
 set -uo pipefail
 
@@ -19,7 +20,7 @@ portable_date_offset() {
   date -v-"${days}"d +"$fmt" 2>/dev/null || date -d "$days days ago" +"$fmt" 2>/dev/null
 }
 
-# Загрузка Telegram credentials (если доступны)
+# Load Telegram credentials (if available)
 AIST_ENV="$HOME/.config/aist/env"
 if [ -f "$AIST_ENV" ]; then
   set -a
@@ -33,10 +34,17 @@ GOV_REPO="$(iwe_resolve_governance_repo)"
 CONFIG="${2:-$IWE/$GOV_REPO/exocortex/day-rhythm-config.yaml}"
 
 # --- Calendar: server-calendar.sh ---
+# issue #942: calendar_source: none in params.yaml = the calendar is not used;
+# report "disabled" (like Scout) and do not call the script at all.
 CALENDAR_STATUS="unknown"
-CALENDAR_OUT=$(bash "$SCRIPT_DIR/server-calendar.sh" "$DATE" "$CONFIG" 2>/dev/null || echo "")
-if [ -n "$CALENDAR_OUT" ]; then
-  if echo "$CALENDAR_OUT" | grep -q "PENDING"; then
+CALENDAR_SOURCE=$(iwe_calendar_source "$IWE/params.yaml")
+if [ "$CALENDAR_SOURCE" = "none" ]; then
+  CALENDAR_STATUS="disabled"
+else
+  CALENDAR_OUT=$(bash "$SCRIPT_DIR/server-calendar.sh" "$DATE" "$CONFIG" 2>/dev/null || echo "")
+  if [ -z "$CALENDAR_OUT" ]; then
+    CALENDAR_STATUS="fail"
+  elif echo "$CALENDAR_OUT" | grep -q "PENDING"; then
     CALENDAR_STATUS="pending"
   elif echo "$CALENDAR_OUT" | grep -qE '(\| [0-9]{2}:[0-9]{2} \||✅)'; then
     # "✅" covers successful responses with 0 events (no | HH:MM | rows)
@@ -44,17 +52,20 @@ if [ -n "$CALENDAR_OUT" ]; then
   else
     CALENDAR_STATUS="fail"
   fi
-else
-  CALENDAR_STATUS="fail"
 fi
 
 # --- Scout: check backlog + latest log ---
 SCOUT_STATUS="unknown"
 SCOUT_REASON=""
 BACKLOG_FILE="$IWE/DS-agent-workspace/scout/backlog.yaml"
-if [ ! -d "$IWE/DS-agent-workspace" ]; then
+# issue #827: DS-agent-workspace can exist for an unrelated subsystem
+# (e.g. feedback-triage) while Scout itself was never set up — check
+# Scout's own scout/ subdirectory, not just the parent repo's presence,
+# or a host without Scout falls through into the ok/fail branches below
+# and shows a misleading 🟡 instead of "not installed".
+if [ ! -d "$IWE/DS-agent-workspace/scout" ]; then
   SCOUT_STATUS="disabled"
-  SCOUT_REASON="DS-agent-workspace repo not present — Scout subsystem not installed"
+  SCOUT_REASON="DS-agent-workspace/scout not present — Scout subsystem not installed"
 fi
 HAS_PENDING=false
 if [ -f "$BACKLOG_FILE" ] && grep -q "status: pending" "$BACKLOG_FILE" 2>/dev/null; then
@@ -69,7 +80,7 @@ elif [ -n "$SCOUT_LOG" ]; then
   if [ "$LOG_DATE" = "$DATE" ]; then
     SCOUT_STATUS="ok"
   elif [ "$HAS_PENDING" = "false" ]; then
-    # Нет заданий в backlog — отсутствие лога = норма (Scout вышел с NO_TASKS)
+    # No tasks in the backlog — absence of a log is normal (Scout exited with NO_TASKS)
     SCOUT_STATUS="ok"
   else
     SCOUT_STATUS="fail"
@@ -89,10 +100,15 @@ fi
 # --- Triage: check file ---
 TRIAGE_STATUS="unknown"
 TRIAGE_REASON=""
-TRIAGE_FILE="$IWE/DS-agent-workspace/scheduler/feedback-triage/$DATE.md"
-if [ ! -d "$IWE/DS-agent-workspace/scheduler" ]; then
+TRIAGE_DIR="$IWE/DS-agent-workspace/scheduler/feedback-triage"
+TRIAGE_FILE="$TRIAGE_DIR/$DATE.md"
+# installed = directory exists AND at least one .md report was ever generated (not scaffold-only)
+_triage_installed() {
+  [ -d "$TRIAGE_DIR" ] && find "$TRIAGE_DIR" -maxdepth 1 -name "*.md" | grep -q .
+}
+if ! _triage_installed; then
   TRIAGE_STATUS="disabled"
-  TRIAGE_REASON="DS-agent-workspace/scheduler not present — feedback-triage subsystem not installed"
+  TRIAGE_REASON="feedback-triage not installed — directory absent or scaffold-only (.gitkeep only)"
 elif [ -f "$TRIAGE_FILE" ]; then
   TRIAGE_STATUS="ok"
 else

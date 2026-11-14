@@ -1,42 +1,57 @@
 name: Weekly Release
 
-# Еженедельно (Вс 20:00 UTC = Пн 00:00 MSK+1) проверяет CHANGELOG.md:
-# если секция [Unreleased] непустая — бампает patch-версию в
-# update-manifest.json и коммитит.
+# Еженедельно (Вс 20:00 MSK = 17:00 UTC) проверяет CHANGELOG.md:
+# если секция [Unreleased] непустая — по расписанию бампает patch-версию
+# в update-manifest.json и открывает PR. Ручной запуск позволяет явно
+# выбрать patch или minor; тип выпуска не выводится из сообщений коммитов.
 #
-# WP-7 Ф62 (10.08.2026): раньше отсюда явно звали release.yml напрямую —
-# тег и релиз создавались БЕЗ единой проверки CI на этом коммите (сам бамп
-# нигде не тестировался). Теперь этот job явно зовёт validate-template.yml
-# (workflow_dispatch — коммит идёт от github-actions[bot] через стандартный
-# GITHUB_TOKEN, а такие коммиты по anti-recursion policy GitHub не
-# каскадируют в push-триггеры сами по себе) и на этом останавливается —
-# release.yml подписан на завершение Validate Template (workflow_run) и
-# сам создаст тег/релиз, если та проверка прошла зелёной. Раньше здесь же
-# был polling + gh run watch, чтобы дождаться результата и явно вызвать
-# release.yml — убрано (пир-ревью 2026-08-10-13-wp7-f62-release-gate-review):
-# опасная гонка (какой конкретно run соответствует какому push) была в
-# самом сопоставлении по SHA/времени, а не в том, что job не ждёт результата.
-# release.yml сам берёт SHA из события workflow_run — гонки нет по построению.
+# WP-529 (31.08.2026): прямой `git push origin main` от бота не проходит
+# (`GH006: Protected branch update failed`, main защищён), поэтому job
+# открывает PR с бампом, а не пушит в main.
 #
-# Причина: раньше версия бампалась только вручную — паузы между
-# выпусками доходили до 2-3 недель, хотя коммиты в [Unreleased]
-# шли почти ежедневно (см. docs/RELEASE-PROCESS.md).
+# WP-529 Ф-релиз: main требует `release-receipt`. PR, открытый через
+# GITHUB_TOKEN, создаёт pull_request-запуски с ожиданием одобрения. Запуск
+# validate-template.yml через workflow_dispatch возможен, но его jobs не
+# удовлетворяют обязательную проверку PR даже на том же head-коммите.
+# Владелец с правом записи одобряет PR workflows, затем ждёт успешного
+# pull_request Validate Template с release-receipt для проверяемого PR-коммита.
+# После слияния обычный push в main запускает проверку и release.yml.
+#
+# WP-7 Ф62 (10.08.2026): исходная причина вообще звать validate перед
+# релизом — раньше бамп версии никак не тестировался перед тем, как
+# release.yml создавал тег. Это по-прежнему так: PR проходит все
+# обязательные проверки (включая release-receipt) прежде чем его можно
+# смерджить.
+#
+# Причина автоматизации в целом: раньше версия бампалась только вручную —
+# паузы между выпусками доходили до 2-3 недель, хотя коммиты в
+# [Unreleased] шли почти ежедневно (см. docs/RELEASE-PROCESS.md). Теперь
+# ручные шаги — допуск PR workflows, проверка и слияние готового PR,
+# а не сборка бампа с нуля.
 
 on:
   schedule:
-    - cron: '0 20 * * 0'  # Вс 20:00 UTC
-  workflow_dispatch:        # ручной запуск для тестирования
+    - cron: '0 17 * * 0'  # Вс 20:00 MSK
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Тип выпуска: patch для исправлений, minor для новой функции'
+        required: true
+        type: choice
+        options: [patch, minor]
+        default: patch
 
 permissions:
   contents: write
-  actions: write
+  pull-requests: write
+  issues: write     # signal a skipped release (see last step)
 
 jobs:
   weekly-bump:
     runs-on: ubuntu-latest
     if: github.repository == 'TserenTserenov/FMT-exocortex-template'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -53,16 +68,24 @@ jobs:
             echo "[Unreleased] содержит изменения — бампаем версию."
           fi
 
-      - name: Bump patch version in manifest
+      - name: Bump selected version in manifest
         if: steps.check.outputs.has_content == 'true'
         id: bump
+        env:
+          RELEASE_TYPE: ${{ github.event.inputs.release_type || 'patch' }}
         run: |
           CURRENT=$(grep -m1 '"version"' update-manifest.json \
             | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//;s/".*//')
-          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-          MINOR=$(echo "$CURRENT" | cut -d. -f2)
-          PATCH=$(echo "$CURRENT" | cut -d. -f3)
-          NEW="$MAJOR.$MINOR.$((PATCH + 1))"
+          if [[ ! "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid manifest version: $CURRENT" >&2
+            exit 1
+          fi
+          IFS=. read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "$RELEASE_TYPE" in
+            patch) NEW="$MAJOR.$MINOR.$((10#$PATCH + 1))" ;;
+            minor) NEW="$MAJOR.$((10#$MINOR + 1)).0" ;;
+            *) echo "Unsupported release_type: $RELEASE_TYPE" >&2; exit 1 ;;
+          esac
           python3 - "$NEW" <<'EOF'
           import json, sys
           with open('update-manifest.json', encoding='utf-8') as f:
@@ -73,7 +96,7 @@ jobs:
               f.write('\n')
           EOF
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          echo "Version bumped: $CURRENT -> $NEW"
+          echo "Version bumped ($RELEASE_TYPE): $CURRENT -> $NEW"
 
       - name: Flush Unreleased section to new version
         if: steps.check.outputs.has_content == 'true'
@@ -91,42 +114,97 @@ jobs:
           bash scripts/sync-version-badge.sh --fix
           bash generate-manifest.sh
 
-      - name: Commit and push
+      - name: Commit to a release branch
         if: steps.check.outputs.has_content == 'true'
+        id: commit
         run: |
+          BRANCH="release/v${{ steps.bump.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add update-manifest.json CHANGELOG.md README.md
           git commit -m "chore(release): weekly auto-bump to v${{ steps.bump.outputs.version }}"
-          git push origin main
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Validate the bump commit and close the release chain
-        # 2026-08-22, live half-release v0.38.7: a Validate run dispatched
-        # with GITHUB_TOKEN completes WITHOUT emitting workflow_run events
-        # (GitHub anti-recursion), so release.yml never fired for the bump
-        # commit — the version bumped, the tag never appeared, and the daily
-        # notify announced a release that did not exist. Fire-and-forget is
-        # not an option with the default token: wait for that exact Validate
-        # run and dispatch release.yml explicitly (API dispatches DO run).
+      - name: Tag the release candidate (WP-529 Ф239)
+        # Тестировщики ставят каналом IWE_UPDATE_CHANNEL=rc ровно тот снимок,
+        # который проверяется перед релизом. Тег неизменяемый, на bump-коммите
+        # релизной ветки. Нумерация — по УДАЛЁННЫМ тегам (локальный git tag -l
+        # не видит параллельный запуск); при гонке push — пересчёт и повтор.
+        # Новый коммит в релизной ветке = новый rc.N+1 (старый кандидат не
+        # переиспользуется). Тождество кандидата и релиза — по дереву, не по
+        # SHA коммита: сверку делает release.yml перед созданием релизного тега.
+        if: steps.check.outputs.has_content == 'true'
+        id: rc
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          RC_TAG=""
+          for attempt in 1 2 3; do
+            RC_TAG=$(bash scripts/next-rc-tag.sh "$VERSION" origin)
+            git tag -a "$RC_TAG" -m "Release candidate $RC_TAG" HEAD
+            if git push origin "refs/tags/${RC_TAG}"; then
+              break
+            fi
+            git tag -d "$RC_TAG" >/dev/null
+            RC_TAG=""
+          done
+          if [ -z "$RC_TAG" ]; then
+            echo "FAIL: не удалось опубликовать rc-тег после 3 попыток (гонка запусков?)"
+            exit 1
+          fi
+          echo "rc_tag=$RC_TAG" >> "$GITHUB_OUTPUT"
+          echo "rc_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "rc_tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          echo "Кандидат $RC_TAG опубликован."
+
+      - name: Open release PR
+        # Смердженный PR даёт обычный push-коммит, который штатно запускает
+        # validate-template.yml → release.yml. До слияния владелец одобряет
+        # pull_request workflows и проверяет release-receipt (см. шапку).
         if: steps.check.outputs.has_content == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          BUMP_SHA=$(git rev-parse HEAD)
-          gh workflow run validate-template.yml --ref main
-          sleep 20
-          RUN_ID=""
-          for i in $(seq 1 30); do
-            RUN_ID=$(gh run list --workflow validate-template.yml --branch main               --json databaseId,headSha,event               --jq ".[] | select(.headSha==\"$BUMP_SHA\" and .event==\"workflow_dispatch\") | .databaseId" | head -1)
-            [ -n "$RUN_ID" ] && break
-            sleep 10
-          done
-          [ -n "$RUN_ID" ] || { echo "Validate run for bump commit $BUMP_SHA never appeared"; exit 1; }
-          gh run watch "$RUN_ID" --exit-status
-          # 2026-08-22 (Codex peer-review of the v0.38.7 post-mortem): pass the
-          # validated SHA explicitly — a bare `--ref main` dispatch would tag
-          # whatever main's tip is when release.yml starts, so a commit landing
-          # between the green Validate and the dispatch would ride into the
-          # release unvalidated. release.yml pins checkout (and therefore the
-          # tag) to this SHA.
-          gh workflow run release.yml --ref main -f version="${{ steps.bump.outputs.version }}" -f sha="$BUMP_SHA"
+          BODY="Еженедельный автобамп версии. Для PR от GITHUB_TOKEN владелец одобряет запуск workflows (Approve workflows to run), затем проверяет успешный pull_request Validate Template и release-receipt на актуальном PR-коммите. Только после этого слияние запускает обычный релизный конвейер (validate → release) через push в main."
+          BODY="$BODY"$'\n\n'"Кандидат в выпуск (WP-529 Ф239): ${{ steps.rc.outputs.rc_tag }}"
+          BODY="$BODY"$'\n'"commit: ${{ steps.rc.outputs.rc_commit }}"
+          BODY="$BODY"$'\n'"tree: ${{ steps.rc.outputs.rc_tree }}"
+          BODY="$BODY"$'\n'"Проверка тестировщиком: IWE_UPDATE_CHANNEL=rc bash update.sh --check"
+          BODY="$BODY"$'\n'"Релизный конвейер остановится, если дерево релиза разойдётся с деревом кандидата."
+          gh pr create \
+            --title "chore(release): weekly auto-bump to v${{ steps.bump.outputs.version }}" \
+            --body "$BODY" \
+            --base main \
+            --head "${{ steps.commit.outputs.branch }}"
+
+      - name: Signal a skipped release
+        # 20.09.2026: [Unreleased] был пуст при 10 коммитах с прошлого тега —
+        # workflow молча ничего не выпустил. Пустой [Unreleased] при заметном
+        # числе коммитов — это пропущенные заметки, а не «нечего выпускать».
+        if: steps.check.outputs.has_content == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIN_COMMITS: "5"
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-rc*' 2>/dev/null || true)
+          if [ -z "$LAST_TAG" ]; then
+            echo "Нет тегов v* — сигнал не нужен."
+            exit 0
+          fi
+          COUNT=$(git rev-list --count "$LAST_TAG"..HEAD)
+          if [ "$COUNT" -lt "$MIN_COMMITS" ]; then
+            echo "С $LAST_TAG всего $COUNT коммитов (< $MIN_COMMITS) — сигнал не нужен."
+            exit 0
+          fi
+          OPEN=$(gh issue list --label release-skipped --state open --json number --jq 'length')
+          if [ "$OPEN" -gt 0 ]; then
+            echo "Открытое обращение release-skipped уже есть — дубль не создаём."
+            exit 0
+          fi
+          gh label create release-skipped --description "Weekly release skipped: empty [Unreleased]" --color B60205 2>/dev/null || true
+          gh issue create --label release-skipped \
+            --title "Недельный релиз пропущен: $COUNT коммитов с $LAST_TAG, [Unreleased] пуст" \
+            --body "Weekly Release запустился, но секция [Unreleased] в CHANGELOG.md пуста, хотя с $LAST_TAG накопилось $COUNT коммитов. Выпуск не создан. Допишите заметки в [Unreleased] (или запустите scripts/changelog-append.sh) и перезапустите workflow Weekly Release вручную."

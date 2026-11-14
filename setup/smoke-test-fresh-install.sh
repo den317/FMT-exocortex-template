@@ -35,6 +35,49 @@ TEST_WS="${SMOKE_WORKSPACE:-/tmp/iwe-smoke-test-$$}"
 # DS-pilot-strategy и пр. Закрывает gap «hardcode виден только при non-default».
 SMOKE_GOVERNANCE_REPO="${SMOKE_GOVERNANCE_REPO:-DS-strategy}"
 
+# issue #748 (post-release audit): a hardcoded PATH=/usr/bin:/bin isolates
+# these subprocesses from a personal dev-machine's git wrapper (correct
+# intent), but on NixOS coreutils (dirname, basename, ...) live under
+# /run/current-system/sw/bin, not /usr/bin or /bin — install.sh then died on
+# "dirname: command not found" instead of exercising the fail-fast check it
+# was meant to test. Add the Nix system profile as a known-standard extra
+# location; still excludes any personal ~/.iwe-runtime-style PATH entry.
+SMOKE_CLEAN_PATH="/usr/bin:/bin"
+[ -d /run/current-system/sw/bin ] && SMOKE_CLEAN_PATH="$SMOKE_CLEAN_PATH:/run/current-system/sw/bin"
+
+# boundary-guard.sh owns a private deny prefix for service-manager calls. Keep
+# it first when this smoke deliberately resets PATH (including its env -i
+# subprocesses); otherwise the smoke could reach the host manager directly.
+if [ -n "${IWE_REDTEAM_SERVICE_BIN:-}" ]; then
+    case "$IWE_REDTEAM_SERVICE_BIN" in
+        "${IWE_REDTEAM_FIXTURE_ROOT:-}/.iwe-redteam-service-bin."*) ;;
+        *) echo "ERROR: invalid Red Team service-manager deny prefix" >&2; exit 1 ;;
+    esac
+    [ -d "$IWE_REDTEAM_SERVICE_BIN" ] || {
+        echo "ERROR: Red Team service-manager deny prefix missing" >&2
+        exit 1
+    }
+    # The smoke normally chooses a sibling /tmp directory. Under the guard,
+    # keep all generated installation files inside the declared fixture.
+    TEST_WS="$IWE_REDTEAM_FIXTURE_ROOT/smoke-$$"
+    SMOKE_CLEAN_PATH="$IWE_REDTEAM_SERVICE_BIN:$SMOKE_CLEAN_PATH"
+    for manager in launchctl systemctl crontab; do
+        resolved=$(PATH="$SMOKE_CLEAN_PATH" command -v "$manager" 2>/dev/null || true)
+        case "$resolved" in
+            ""|"$IWE_REDTEAM_SERVICE_BIN/$manager") ;;
+            *) echo "ERROR: smoke PATH bypasses the $manager deny shim" >&2; exit 1 ;;
+        esac
+    done
+fi
+
+# Calibration probes this exact PATH construction without running setup. A
+# nonzero status prevents a path-only probe from being mistaken for smoke PASS.
+if [ "${SMOKE_GUARD_PATH_PROBE:-}" = "1" ]; then
+    printf 'SMOKE_GUARDED_PATH=%s\n' "$SMOKE_CLEAN_PATH"
+    printf 'SMOKE_GUARDED_WORKSPACE=%s\n' "$TEST_WS"
+    exit 77
+fi
+
 # E2E sections replace HOME so setup cannot touch the caller's real dotfiles.
 # On macOS CI, PyYAML can live in the original HOME's user-site; changing HOME
 # would otherwise make the already-verified dependency disappear mid-test and
@@ -92,7 +135,7 @@ WORKSPACE_DIR=$TEST_WS
 CLAUDE_PATH=/usr/local/bin/claude
 CLAUDE_PROJECT_SLUG=smoke-test
 TIMEZONE_HOUR=4
-TIMEZONE_DESC=4:00 UTC
+TIMEZONE_DESC="4:00 UTC"
 HOME_DIR=$TEST_WS
 USER_NAME=smoke-test
 GOVERNANCE_REPO=$SMOKE_GOVERNANCE_REPO
@@ -151,7 +194,7 @@ fi
 echo "[5/6] install.sh fail-fast без env (R5.2 regression)..."
 # Запускаем install.sh с очищенным окружением — IWE_RUNTIME / IWE_WORKSPACE не определены.
 # Должен сработать fail-fast: detect literal {{...}} в plist → exit 2 + понятная ошибка.
-INSTALL_OUT=$(env -i HOME="$TEST_WS" PATH=/usr/bin:/bin \
+INSTALL_OUT=$(env -i HOME="$TEST_WS" PATH="$SMOKE_CLEAN_PATH" \
     bash "$TEMPLATE_DIR/roles/strategist/install.sh" 2>&1 || true)
 INSTALL_RC=$?
 if echo "$INSTALL_OUT" | grep -qE 'содержит незаменённые плейсхолдеры'; then
@@ -169,7 +212,7 @@ WORKSPACE_DIR=$TEST_WS
 CLAUDE_PATH=/usr/local/bin/claude
 CLAUDE_PROJECT_SLUG=smoke-test
 TIMEZONE_HOUR=4
-TIMEZONE_DESC=4:00 UTC
+TIMEZONE_DESC="4:00 UTC"
 HOME_DIR=$TEST_WS
 USER_NAME=smoke-test
 GOVERNANCE_REPO=DS-pilot-strategy
@@ -310,8 +353,8 @@ echo "[6/7] install.sh с env проходит fail-fast (positive case)..."
 # главное — НЕ упасть на fail-fast check.
 # WP-293: HOME isolation обязателен — install.sh пишет plist в $HOME/Library/LaunchAgents
 # и делает launchctl load. Без env -i HOME=$TEST_WS test перезатрёт реальный launchd автора.
-INSTALL_OK_OUT=$(env -i HOME="$TEST_WS" PATH=/usr/bin:/bin \
-    IWE_RUNTIME="$TEST_WS/.iwe-runtime" IWE_WORKSPACE="$TEST_WS" \
+INSTALL_OK_OUT=$(env -i HOME="$TEST_WS" PATH="$SMOKE_CLEAN_PATH" \
+    IWE_RUNTIME="$TEST_WS/.iwe-runtime" IWE_WORKSPACE="$TEST_WS" SETUP_CI=1 \
     bash "$TEMPLATE_DIR/roles/strategist/install.sh" 2>&1 || true)
 if echo "$INSTALL_OK_OUT" | grep -qE 'содержит незаменённые плейсхолдеры'; then
     fail "install.sh даёт fail-fast С env (не должен): $INSTALL_OK_OUT"
@@ -390,7 +433,7 @@ E2E_HOME="/tmp/iwe-smoke-e2e-home-$$"
 E2E_MEM="$E2E_HOME/.claude/projects/$(echo "$E2E_WS" | tr '/' '-')/memory"
 mkdir -p "$E2E_WS" "$E2E_HOME"
 E2E_RC=0
-E2E_OUT=$(HOME="$E2E_HOME" SETUP_CI=1 GITHUB_USER=smoke-e2e WORKSPACE_DIR="$E2E_WS" \
+E2E_OUT=$(HOME="$E2E_HOME" PATH="$SMOKE_CLEAN_PATH" SETUP_CI=1 GITHUB_USER=smoke-e2e WORKSPACE_DIR="$E2E_WS" \
     GOVERNANCE_REPO="$SMOKE_GOVERNANCE_REPO" \
     GIT_AUTHOR_NAME="smoke-e2e" GIT_AUTHOR_EMAIL="smoke@test.local" \
     GIT_COMMITTER_NAME="smoke-e2e" GIT_COMMITTER_EMAIL="smoke@test.local" \
@@ -443,6 +486,45 @@ else
         pass "e2e config: канал обновления закреплён за origin шаблона"
     else
         fail "e2e config: канал обновления отсутствует или не совпадает с origin шаблона"
+    fi
+    # issue #1105: setup.sh copied only a flat "$TEMPLATE_DIR/memory/"*.md/*.yaml/*.yml glob,
+    # so a nested manifest path (memory/reference/agent-core.md) silently never reached a fresh
+    # install — 15 dead "→ memory/reference/agent-core.md" links in the delivered CLAUDE.md/
+    # AGENTS.md until the pilot's first update.sh happened to pull it in. Check every memory/*
+    # path the manifest declares, not just one hardcoded file, so a future nested addition that
+    # setup.sh fails to recurse into is caught the same way.
+    E2E_MANIFEST_MEMORY_PATHS=$(python3 -c "
+import json
+with open('$TEMPLATE_DIR/update-manifest.json') as f:
+    data = json.load(f)
+for entry in data.get('files', []):
+    p = entry.get('path', '')
+    if p.startswith('memory/'):
+        print(p)
+" 2>&1)
+    if [ -z "$E2E_MANIFEST_MEMORY_PATHS" ]; then
+        fail "e2e memory: update-manifest.json memory/* записи не прочитаны: $E2E_MANIFEST_MEMORY_PATHS"
+    else
+        E2E_MEM_MISSING=0
+        while IFS= read -r mpath; do
+            [ -z "$mpath" ] && continue
+            if [ ! -f "$E2E_MEM/${mpath#memory/}" ]; then
+                fail "e2e memory: $mpath ОТСУТСТВУЕТ в $E2E_MEM (manifest-driven, issue #1105)"
+                E2E_MEM_MISSING=$((E2E_MEM_MISSING + 1))
+            fi
+        done <<EOF
+$E2E_MANIFEST_MEMORY_PATHS
+EOF
+        if [ "$E2E_MEM_MISSING" -eq 0 ]; then
+            pass "e2e memory: все memory/* пути манифеста доставлены, включая вложенные"
+        fi
+    fi
+    # Minimum regression assertion the issue asked for, kept even if the manifest-driven
+    # check above is ever removed or the manifest temporarily loses its one nested entry.
+    if [ -f "$E2E_MEM/reference/agent-core.md" ]; then
+        pass "e2e memory: memory/reference/agent-core.md (вложенный путь) доставлен"
+    else
+        fail "e2e memory: memory/reference/agent-core.md ОТСУТСТВУЕТ в $E2E_MEM (issue #1105 regression)"
     fi
     E2E_GATE_SKILL="$E2E_WS/.claude/skills/smoke-residency-policy"
     mkdir -p "$E2E_GATE_SKILL"
@@ -501,14 +583,14 @@ RERUN_HOME="$RERUN_WS/home"
 RERUN_GOV="pilot-governance"
 mkdir -p "$RERUN_WS" "$RERUN_HOME"
 RERUN_FIRST_RC=0
-HOME="$RERUN_HOME" SETUP_CI=1 GITHUB_USER=smoke-rerun \
+HOME="$RERUN_HOME" PATH="$SMOKE_CLEAN_PATH" SETUP_CI=1 GITHUB_USER=smoke-rerun \
     WORKSPACE_DIR="$RERUN_WS" GOVERNANCE_REPO="$RERUN_GOV" \
     GIT_AUTHOR_NAME="smoke-rerun" GIT_AUTHOR_EMAIL="smoke@test.local" \
     GIT_COMMITTER_NAME="smoke-rerun" GIT_COMMITTER_EMAIL="smoke@test.local" \
     bash "$TEMPLATE_DIR/setup.sh" --core >/dev/null 2>&1 || RERUN_FIRST_RC=$?
 RERUN_SECOND_RC=0
 env -u GOVERNANCE_REPO -u IWE_GOVERNANCE_REPO \
-    HOME="$RERUN_HOME" SETUP_CI=1 GITHUB_USER=smoke-rerun \
+    HOME="$RERUN_HOME" PATH="$SMOKE_CLEAN_PATH" SETUP_CI=1 GITHUB_USER=smoke-rerun \
     WORKSPACE_DIR="$RERUN_WS" \
     GIT_AUTHOR_NAME="smoke-rerun" GIT_AUTHOR_EMAIL="smoke@test.local" \
     GIT_COMMITTER_NAME="smoke-rerun" GIT_COMMITTER_EMAIL="smoke@test.local" \
@@ -521,6 +603,15 @@ if [ "$RERUN_FIRST_RC" -eq 0 ] && [ "$RERUN_SECOND_RC" -eq 0 ] && \
 else
     fail "e2e rerun: rc=$RERUN_FIRST_RC/$RERUN_SECOND_RC or DS-strategy escaped from configured governance"
 fi
+RERUN_NAV="$RERUN_HOME/.claude/projects/$(echo "$RERUN_WS" | tr '/' '-')/memory/navigation.md"
+if [ -f "$RERUN_NAV" ] && \
+   grep -Fq '{{GOVERNANCE_REPO}}/docs/Strategy.md' "$RERUN_NAV" && \
+   grep -Fq '.exocortex.env' "$RERUN_NAV" && \
+   ! grep -Fq 'DS-strategy/' "$RERUN_NAV"; then
+    pass "e2e rerun: installed navigation keeps the explained governance marker, not the default path"
+else
+    fail "e2e rerun: installed navigation is missing, lacks the marker, or still names the default path"
+fi
 rm -rf "$RERUN_WS" 2>/dev/null || true
 
 # === Test 9c: governance-root symlink is rejected before external writes ===
@@ -532,8 +623,10 @@ mkdir -p "$SYMLINK_WS" "$SYMLINK_HOME" "$SYMLINK_OUTSIDE"
 printf 'sentinel-before\n' > "$SYMLINK_OUTSIDE/sentinel.txt"
 ln -s "$SYMLINK_OUTSIDE" "$SYMLINK_WS/custom-governance"
 SYMLINK_RC=0
-SYMLINK_OUT=$(HOME="$SYMLINK_HOME" SETUP_CI=1 GITHUB_USER=smoke-symlink \
+SYMLINK_OUT=$(HOME="$SYMLINK_HOME" PATH="$SMOKE_CLEAN_PATH" SETUP_CI=1 GITHUB_USER=smoke-symlink \
     WORKSPACE_DIR="$SYMLINK_WS" GOVERNANCE_REPO=custom-governance \
+    GIT_AUTHOR_NAME="smoke-symlink" GIT_AUTHOR_EMAIL="smoke@test.local" \
+    GIT_COMMITTER_NAME="smoke-symlink" GIT_COMMITTER_EMAIL="smoke@test.local" \
     bash "$TEMPLATE_DIR/setup.sh" --core 2>&1) || SYMLINK_RC=$?
 SYMLINK_FILE_COUNT=$(find "$SYMLINK_OUTSIDE" -type f | wc -l | tr -d ' ')
 if [ "$SYMLINK_RC" -ne 0 ] && \
@@ -554,7 +647,7 @@ E2E_WS10="/tmp/iwe-smoke-full-$$"
 E2E_HOME10="$E2E_WS10/home"
 mkdir -p "$E2E_WS10" "$E2E_HOME10"
 E2E10_RC=0
-E2E10_OUT=$(HOME="$E2E_HOME10" SETUP_CI=1 GITHUB_USER=smoke-full WORKSPACE_DIR="$E2E_WS10" \
+E2E10_OUT=$(HOME="$E2E_HOME10" PATH="$SMOKE_CLEAN_PATH" SETUP_CI=1 GITHUB_USER=smoke-full WORKSPACE_DIR="$E2E_WS10" \
     GOVERNANCE_REPO="$SMOKE_GOVERNANCE_REPO" \
     GIT_AUTHOR_NAME="smoke-full" GIT_AUTHOR_EMAIL="smoke@test.local" \
     GIT_COMMITTER_NAME="smoke-full" GIT_COMMITTER_EMAIL="smoke@test.local" \
@@ -579,6 +672,21 @@ else
         else
             pass "e2e full mode: все plist'ы без placeholders"
         fi
+        # WP-529 Ф94 (peer-session 2026-09-08-32): an empty substitution
+        # (missing key in .exocortex.env, env_get returns "") leaves no
+        # literal {{PLACEHOLDER}} behind, so the check above alone would not
+        # have caught setup.sh's heredoc missing IWE_SCRIPTS — assert the
+        # rendered value directly, on the real setup.sh output.
+        E2E_MORNING_PLIST=$(find "$E2E_LAUNCHDIR" -name 'com.strategist.morning.plist' 2>/dev/null | head -1)
+        if [ -n "$E2E_MORNING_PLIST" ]; then
+            if grep -A1 '<key>IWE_SCRIPTS</key>' "$E2E_MORNING_PLIST" | grep -q '<string>.\+</string>'; then
+                pass "e2e full mode: IWE_SCRIPTS renders non-empty in com.strategist.morning.plist"
+            else
+                fail "e2e full mode: IWE_SCRIPTS is missing or empty in com.strategist.morning.plist"
+            fi
+        else
+            warn "e2e full mode: com.strategist.morning.plist not found under $E2E_LAUNCHDIR"
+        fi
     else
         warn "e2e full mode: LaunchAgents dir не создан (возможно, ни одна auto-role не установлена)"
     fi
@@ -600,7 +708,37 @@ else
     else
         fail "e2e full mode: executor catalog is absent or untracked"
     fi
-    E2E_ROUTE_OUT=$(IWE_EXECUTOR_CATALOG="$E2E_GOV10/scripts/executor-catalog.yaml" \
+    if git -C "$E2E_GOV10" ls-files --error-unmatch -- \
+            scripts/generate-executor-catalog.py >/dev/null 2>&1 \
+        && cmp -s "$TEMPLATE_DIR/scripts/generate-executor-catalog.py" \
+            "$E2E_GOV10/scripts/generate-executor-catalog.py"; then
+        pass "e2e full mode: installed catalog generator matches the template source"
+    else
+        fail "e2e full mode: installed catalog generator is absent, untracked, or drifted"
+    fi
+    if [ -n "${SMOKE_PYTHON:-}" ] && \
+        "$SMOKE_PYTHON" - "$E2E_GOV10/scripts/executor-catalog.yaml" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    catalog = yaml.safe_load(stream)
+assert catalog["reflexes"] == []
+assert catalog["skipped_no_routing"] == len(catalog["skipped"])
+assert all(
+    set(item) == {"name", "skip_reason"}
+    and isinstance(item["name"], str)
+    and isinstance(item["skip_reason"], str)
+    for item in catalog["skipped"]
+)
+PY
+    then
+        pass "e2e full mode: fresh catalog has detailed skips and empty reflexes"
+    else
+        fail "e2e full mode: fresh catalog state schema is incomplete"
+    fi
+    E2E_ROUTE_OUT=$(IWE_WORKSPACE="$E2E_WS10" IWE_TEMPLATE="$TEMPLATE_DIR" \
+        IWE_EXECUTOR_CATALOG="$E2E_GOV10/scripts/executor-catalog.yaml" \
         bash "$TEMPLATE_DIR/scripts/route-task.sh" --validate 2>&1) || E2E_ROUTE_RC=$?
     E2E_ROUTE_RC="${E2E_ROUTE_RC:-0}"
     if [ "$E2E_ROUTE_RC" -eq 0 ]; then
@@ -636,7 +774,13 @@ else
 fi
 
 echo "[8b] setup.sh step 3 копирует memory/*.yaml и *.yml..."
-if grep -A5 'cp.*memory/.*\.md' "$SETUP_SH" | grep -qE '\.yaml|\.yml'; then
+# issue #1105: step 3 moved from a flat `cp "...memory/"*.md ...` glob (the shape the old
+# `grep -A5 'cp.*memory/.*\.md'` heuristic below expected) to a single find-driven loop that
+# also recurses into memory/** — the .md/.yaml/.yml extensions no longer sit a fixed number of
+# lines after a line matching "cp...memory...md". Extract the whole step-3 block (between its
+# own banner and the next step's) instead of anchoring on one line, same approach as Test 8c/8d.
+STEP3_BLOCK=$(awk '/\[3\/6\] Installing memory/{flag=1} flag; flag && /\[4\/6\]/{exit}' "$SETUP_SH")
+if echo "$STEP3_BLOCK" | grep -q '\.md' && echo "$STEP3_BLOCK" | grep -qE '\.yaml|\.yml'; then
     pass "setup.sh step 3: memory/*.yaml/.yml копируются"
 else
     fail "setup.sh step 3: memory/*.yaml/.yml НЕ копируются (day-rhythm-config.yaml не доставляется)"
