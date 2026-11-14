@@ -1,13 +1,13 @@
 #!/bin/bash
-# Генерирует update-manifest.json из текущего содержимого репо.
-# Запускать перед релизом: bash generate-manifest.sh
+# Generates update-manifest.json from the current repo contents.
+# Run before a release: bash generate-manifest.sh
 #
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST="$SCRIPT_DIR/update-manifest.json"
 
-# Версия из CHANGELOG.md (первый ## [X.Y.Z])
+# Version from CHANGELOG.md (the first ## [X.Y.Z])
 VERSION=$(grep -m1 '^\#\# \[[0-9]' "$SCRIPT_DIR/CHANGELOG.md" | sed 's/.*\[\(.*\)\].*/\1/')
 
 # Bind the generated manifest to this reviewed distribution and attest the
@@ -19,8 +19,8 @@ ORIGIN_REPO=$(printf '%s' "$ORIGIN_URL" | sed -E \
     -e 's#\.git$##')
 SOURCE_REPO="${IWE_UPDATE_REPO:-$ORIGIN_REPO}"
 SOURCE_BRANCH="${IWE_UPDATE_BRANCH:-main}"
-ACCEPTED_UPSTREAM_TAG="v0.38.11"
-ACCEPTED_UPSTREAM_SHA="7f635a94242aa13841cf6fc40c018f21da27d37a"
+ACCEPTED_UPSTREAM_TAG="v0.41.11"
+ACCEPTED_UPSTREAM_SHA="46a864ee30075de5ce4ad4722285683e674abe09"
 
 if ! printf '%s' "$SOURCE_REPO" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' ||
    ! printf '%s' "$ACCEPTED_UPSTREAM_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' ||
@@ -34,9 +34,22 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
+# An unresolved conflict leaves each conflicted path in the index at stages
+# 1/2/3 with no stage 0 — plain `git ls-files` below lists such a path once
+# per stage (3x), and every stage-3 duplicate silently became a manifest
+# entry (found via 3 real CI failures on PR #1296/#1297, 2026-10-21: the
+# duplicate CHANGELOG.md entries broke scripts/verify-manifest.sh). Fail
+# before generating rather than ship a corrupt manifest.
+UNMERGED=$(git -C "$SCRIPT_DIR" diff --name-only --diff-filter=U)
+if [ -n "$UNMERGED" ]; then
+    echo "ERROR: незавершённый конфликт слияния — запустите generate-manifest.sh после git add/rebase --continue:" >&2
+    echo "$UNMERGED" >&2
+    exit 1
+fi
+
 echo "Генерация манифеста v$VERSION..."
 
-# === Исключения, которые НЕ попадают ни в files, ни в excluded_paths ===
+# === Exclusions that go neither into files nor into excluded_paths ===
 SKIP_PATTERNS=(
     ".git/"
     ".github/"
@@ -52,24 +65,24 @@ SKIP_PATTERNS=(
     "templates/"
 )
 
-# === Исключения, которые идут в excluded_paths (dev-only, не раздаются пользователям) ===
-# issue #247 (корень #246): раньше здесь стоял общий "scripts/" — весь каталог
-# считался dev-only, и update.sh никогда не доставлял ни один из 92 файлов
-# пользователям, вопреки docs/DATA-POLICY.md. Полный анализ графа ссылок
-# (peer-session 2026-07-11-11) показал, что это неверно: большинство скриптов
-# зовутся из доставляемых skills/hooks (иногда транзитивно — day-open-pipeline.sh
-# запускается через launchd, а не напрямую из skill, и это не ловится grep-ом).
-# Решение по итогам ЭМОГССБ: default = доставлять scripts/ целиком; explicit
-# exclude только для скриптов, у которых НЕТ ни одной ссылки из доставляемого
-# артефакта (проверено — только .github/workflows/* или ничего). Ошибка в эту
-# сторону (лишний dev-скрипт доставлен) безвредна; обратная (нужный скрипт не
-# доставлен) — воспроизводит #246. EXCLUDED_SCRIPTS ниже — короткий список,
-# не растущий с каждым новым skill (в отличие от прежнего allow-list на *доставку*).
+# === Exclusions that go into excluded_paths (dev-only, not distributed to users) ===
+# issue #247 (root of #246): a blanket "scripts/" used to stand here — the whole directory
+# was considered dev-only, and update.sh never delivered a single one of the 92 files
+# to users, contrary to docs/DATA-POLICY.md. A full analysis of the reference graph
+# (peer-session 2026-07-11-11) showed this is wrong: most scripts
+# are called from delivered skills/hooks (sometimes transitively — day-open-pipeline.sh
+# is run via launchd, not directly from a skill, and grep does not catch it).
+# Decision from the ЭМОГССБ review: default = deliver scripts/ entirely; explicit
+# exclude only for scripts that have NO reference from a delivered
+# artifact (verified — only .github/workflows/* or nothing). An error in this
+# direction (an extra dev script delivered) is harmless; the opposite (a needed script not
+# delivered) reproduces #246. EXCLUDED_SCRIPTS below is a short list
+# that does not grow with every new skill (unlike the former allow-list for *delivery*).
 EXCLUDED_PATTERNS=(
     "scripts/tests/"
     "docs/developer/"    # never delivered since the first manifest commit (23b0494, WP-7 MFC4) —
-                          # unrelated to the WP-401 Ф6.1 docs/ freeze below, keep excluded
-    "sessions/2026-06/"    # WP-401 Ф6.1: archived transcript, not for delivery. NOTE: sessions/00-index.md
+                          # unrelated to the WP-401 Phase 6.1 docs/ freeze below, keep excluded
+    "sessions/2026-06/"    # WP-401 Phase 6.1: archived transcript, not for delivery. NOTE: sessions/00-index.md
                             # stays OUT of this exclusion on purpose — it's a protected seed-once-then-never-
                             # touch file like memory/MEMORY.md (see is_protected_user_file() in update.sh),
                             # not a deprecated artifact. A future "sessions/YYYY-MM/" transcript must get its
@@ -79,26 +92,35 @@ EXCLUDED_PATTERNS=(
 EXCLUDED_SCRIPTS=(
     "scripts/check-component-parity.sh"        # CI-only: validate-template.yml + verify-template-integrity.sh
     "scripts/check-manifest-rename-coverage.py" # CI-only: validate-template.yml
-    "scripts/verify-template-integrity.sh"      # локальное зеркало CI-гейта для контрибьюторов шаблона, не для пользователей
-    "scripts/translate.py"                      # CI-only: translate-sync.yml (синхронизация EN-доков автором шаблона)
+    "scripts/check-copy-pairs.sh"               # CI-only: validate-template.yml and scripts/tests/test_template_hygiene_checks.sh (WP-7, template cleanup)
+    "scripts/check-shipped-config-secrets.sh"   # CI-only: validate-template.yml and scripts/tests/test_template_hygiene_checks.sh (WP-7, template cleanup)
+    "scripts/verify-template-integrity.sh"      # local mirror of the CI gate for template contributors, not for users
+    "scripts/translate.py"                      # CI-only: translate-sync.yml (synchronization of EN docs by the template author)
+    "scripts/export-glossary-snapshot.py"       # CI-only: snapshot of graph terms for translation (WP-5 Phase 67)
+    "scripts/fetch-glossary-concepts.py"        # CI-only: traversal of concept_list for the terms snapshot (WP-5 Phase 67)
     "scripts/delivery_checks.py"                # CI-only: translate-sync.yml
-    "scripts/audit-ad-hoc-roles.py"             # нет ссылок ни из одного доставляемого артефакта
-    "scripts/agent-dashboard.py"                # только scripts/tests/, нет ссылок из доставляемого
-    "scripts/generate-helper-catalog.py"        # нет ссылок из доставляемого
-    "scripts/iwe-trace.py"                      # нет ссылок из доставляемого
-    "scripts/session-dispatcher-tsekh.py"       # нет ссылок из доставляемого
-    "scripts/iwe-catalog-list.py"               # ссылается только docs/maintaining-skills.md (сам dev-only)
-    "scripts/guide-kit-sync.sh"                 # author-only: заносит релиз iwesys/guide-kit в дерево шаблона (WP-483 Ф4)
-    "scripts/upstream-intake-preview.py"        # author-only: read-only intake новых upstream-релизов в den317
+    "scripts/assemble_distribution.py"          # CI-only: translate-sync.yml (assembling the composition of the English version, WP-610 Phase 10)
+    "scripts/release-notice-build.py"           # CI-only: notify-update.yml (release announcement, WP-529)
+    "scripts/audit-ad-hoc-roles.py"             # no references from any delivered artifact
+    "scripts/agent-dashboard.py"                # only scripts/tests/, no references from delivered artifacts
+    "scripts/generate-helper-catalog.py"        # no references from delivered artifacts
+    "scripts/iwe-trace.py"                      # no references from delivered artifacts
+    "scripts/session-dispatcher-tsekh.py"       # no references from delivered artifacts
+    "scripts/iwe-catalog-list.py"               # referenced only by docs/maintaining-skills.md (itself dev-only)
+    "scripts/guide-kit-sync.sh"                 # author-only: brings the iwesys/guide-kit release into the template tree (WP-483 Phase 4)
+    "scripts/upstream-intake-preview.py"        # author-only: read-only intake of upstream releases into den317
 )
 
 EXCLUDED_EXACT=(
     "promotion-status.yaml"
-    "scripts/guide-kit-sync-state.yaml"         # provenance vendored-копии guide-kit/ — нужен CI drift-check, не пользователям
+    "translation/glossary-snapshot-allowlist.yaml"  # CI-only: terms snapshot allowlist (WP-5 Phase 67)
+    "translation/glossary-snapshot.csv"         # CI-only: graph terms snapshot (WP-5 Phase 67)
+    "translation/glossary-snapshot.meta.json"   # CI-only: terms snapshot passport (WP-5 Phase 67)
+    "scripts/guide-kit-sync-state.yaml"         # provenance of the vendored guide-kit/ copy — needed by the CI drift check, not by users
     "${EXCLUDED_SCRIPTS[@]}"
 )
 
-# === Исключения из files, но не в excluded_paths (пользовательское пространство) ===
+# === Excluded from files but not in excluded_paths (user space) ===
 FILES_EXCLUDE_PATTERNS=(
     "seed/"
     ".claude/settings.local.json"
@@ -114,13 +136,14 @@ FILES_EXCLUDE_EXACT=(
     "PRIVACY.md"
     "CODEOWNERS"
     "CITATION.cff"
+    ".gitattributes"
     "params.yaml"
     "params.yaml.example"
     "extensions/day-close.after.md"
     "extensions/mcp-user.json"
 )
 
-# issue #325: .github/ и setup/ are blanket-excluded below (CI-only / install-time),
+# issue #325: .github/ and setup/ are blanket-excluded below (CI-only / install-time),
 # but cloud-scheduler is a documented, maintained feature living in both namespaces —
 # its workflow and install script never reached users despite fix #188. Explicit
 # per-file include, same technique as setup/validate-template.sh below.
@@ -129,6 +152,13 @@ GITHUB_EXPLICIT_INCLUDE=(
     ".github/workflows/notify-security.yml"
     ".github/workflows/notify-update.yml"
     ".github/workflows/post-release-audit.yml"
+    # issue #1223: never shipped at all (not in files, not in excluded_paths),
+    # so a fork's copy froze at whatever version it last had and stayed red
+    # forever on checks that need files this manifest deliberately never
+    # delivers (setup/integration-contract-validator.sh, scripts/tests/*).
+    # Shipping it now delivers the issue #1223 repo-gate fix (jobs skip on
+    # forks instead of failing) to existing forks, not just new ones.
+    ".github/workflows/validate-template.yml"
 )
 GITHUB_CI_ONLY_EXCLUDE=(
     ".github/workflows/nightly-template-audit.yml"
@@ -137,20 +167,66 @@ SETUP_EXPLICIT_INCLUDE=(
     "setup/build-runtime.sh"
     "setup/install-iwe-paths.sh"
     "setup/validate-template.sh"
+    "setup/lib/apply-op.sh"                     # WP-529 Phase 245: Step 5 of update.sh writes through this executor; without delivery the update will stop
     "setup/optional/setup-cloud-scheduler.sh"   # install-time, but requires one-time delivery — issue #325
-    "setup/optional/setup-local-gateway.sh"     # referenced by delivered docs/AGENT-VENDOR-SETUP.md (WP-499 Ф16), same class as #325
+    "setup/optional/setup-local-gateway.sh"     # referenced by delivered docs/AGENT-VENDOR-SETUP.md (WP-499 Phase 16), same class as #325
 )
 # issue #502/#508.2: seed/ is user-owned by default, but these files are
 # platform delivery infrastructure. Existing installations need their target
 # release bytes before update.sh can migrate hooks and the derived-snapshot
-# updater into the governance repo.
+# updater into the governance repo. Routed via docs/critical-files-map.yaml
+# category 'platform-hooks-explicit-include' — any future addition/removal
+# here needs a matching `Delivery-Route: platform-hooks-explicit-include`
+# trailer (scripts/check-delivery-route-label.sh, WP-529 Phase 2).
 PLATFORM_HOOKS_EXPLICIT_INCLUDE=(
     "seed/strategy/.githooks/pre-commit"
     "seed/strategy/.githooks/pre-push"
     "seed/strategy/scripts/install-hooks.sh"
+    # WP-485 Phase 14: portable isolate-push for template users (а∩г)
+    "seed/strategy/scripts/isolate-push.sh"
+    # issue #941: strategist.sh publishes through $governance/scripts/ds-publish.sh,
+    # which the template never shipped; update.sh delivers it only when absent.
+    "seed/strategy/scripts/ds-publish.sh"
     # #533: existing installations need the subject-scoped Day Open reader.
     "seed/strategy/scripts/day-open-llm-fill.py"
     "seed/strategy/scripts/update-derived-snapshot.py"
+    "seed/strategy/scripts/generate-executor-catalog.py"
+    # issue #693: full transitive call graph of day-open-pipeline.sh (the live
+    # Day Open pipeline) — every entry below is `source`d or invoked by
+    # day-open-pipeline.sh, day-open-scaffold.sh, or one of the two *-runner.sh
+    # it calls. Missing any one of them reproduces the FATAL that
+    # scripts/iwe-audit.sh §3b already warns about for lib/common.sh (a stale
+    # or absent lib/ breaks the scaffold identically to an outdated one), but
+    # the audit only ever checked 3 of these 22 files — this list is the
+    # verified full closure, not a re-scoped subset.
+    "seed/strategy/scripts/day-open-pipeline.sh"
+    "seed/strategy/scripts/day-open-scaffold.sh"
+    "seed/strategy/scripts/day-open-hooks-runner.sh"
+    "seed/strategy/scripts/day-open-checks-runner.sh"
+    "seed/strategy/scripts/day-open-bottleneck-patch.sh"
+    "seed/strategy/scripts/day-open-budget-patch.py"
+    "seed/strategy/scripts/day-open-close-error-patch.py"
+    "seed/strategy/scripts/day-open-ledger-render-patch.py"
+    "seed/strategy/scripts/day-open-multiplier-backfill-patch.py"
+    "seed/strategy/scripts/day-open-priorities-patch.py"
+    "seed/strategy/scripts/day-open-sync-banner-patch.py"  # stale-input banner step 4.58 (#1245)
+    "seed/strategy/scripts/day-open-version-check-patch.py"
+    "seed/strategy/scripts/ledger-append.sh"
+    "seed/strategy/scripts/llm-proxy-launcher.sh"
+    "seed/strategy/scripts/lib/common.sh"
+    "seed/strategy/scripts/lib/day-open-hooks.sh"
+    "seed/strategy/scripts/lib/find-python3.sh"
+    "seed/strategy/scripts/lib/ledger-path.sh"
+    "seed/strategy/scripts/lib/ledger-publish-kick.sh"
+    "seed/strategy/scripts/lib/ledger_path.py"
+    "seed/strategy/scripts/lib/network-wait.sh"
+    "seed/strategy/scripts/lib/notification-render.sh"
+    "seed/strategy/scripts/lib/telegram.sh"
+    "seed/strategy/scripts/lib/wp_inbox.py"
+    # issue #1102: extractor.sh looks for scripts/lib/publish-gate.sh since
+    # WP-5 F48, but it never shipped -- every install silently fell back to
+    # a raw `git push` with no retry on a stale origin/main.
+    "seed/strategy/scripts/lib/publish-gate.sh"
 )
 # #533: unlike ordinary seed content, these are platform-owned delivery and
 # upgrade infrastructure.  Keep each path explicit so the blanket seed/
@@ -164,7 +240,7 @@ AGENT_FAULT_EXPLICIT_INCLUDE=(
     "seed/strategy/scripts/agent_fault_remind.py"
     "seed/strategy/scripts/agent_fault_remind.sh"
 )
-# WP-7 Ф-script-contract-gate: EXCLUDED_PATTERNS below still blanket-excludes
+# WP-7 Phase script-contract-gate: EXCLUDED_PATTERNS below still blanket-excludes
 # scripts/tests/ (correct default — it's mostly the author's own pytest suite,
 # dev-only, same reasoning as issue #246/#247 above but scoped to this one
 # directory instead of removed entirely). These paths are the exception —
@@ -175,10 +251,16 @@ AGENT_FAULT_EXPLICIT_INCLUDE=(
 # real release would have shipped a template without its own test gate and
 # nobody would have noticed until a user hit the bug the gate exists to catch.
 SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
-    # 2026-08-23 (v0.38.7 матрица, находка 4): check-python-resolver-contract.sh
-    # доставляется, а его обязательный baseline сидел в excluded — на установке
-    # строго из манифеста сторож падал rc=2. Ratchet-снимок — часть поставки.
+    # Changes to this array require a `Delivery-Route: github-explicit-include`
+    # commit trailer (docs/critical-files-map.yaml) — enforced by
+    # scripts/check-delivery-route-label.sh in CI.
+    # 2026-08-23 (v0.38.7 matrix, finding 4): check-python-resolver-contract.sh
+    # is delivered, but its mandatory baseline sat in excluded — on an install
+    # strictly from the manifest the guard failed with rc=2. The ratchet snapshot is part of the delivery.
     "scripts/tests/fixtures/python-resolver-baseline.txt"
+    "scripts/tests/test_issue_728_agentigore_dirslash.sh"
+    "scripts/tests/test_issue_718_sync_canary.sh"
+    "scripts/tests/test_issue_720_decision_log_sot.sh"
     "scripts/tests/test_create_wp_registry_coherence.sh"
     "scripts/tests/test_check_orphan_hooks.sh"
     "scripts/tests/test_capture_bus_detector_timeout.sh"
@@ -194,6 +276,10 @@ SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
     "scripts/tests/test_critical_alert_failure_matrix.sh"
     "scripts/tests/test_create_wp_repeat_and_cwd.sh"
     "scripts/tests/test_create_wp_hypothesis_relation.sh"
+    # issue #956: run-issue-tests.sh (delivered) names both in ADDITIONAL_ISSUE_TESTS,
+    # and a registered test file that is missing fails the runner on an installed copy.
+    "scripts/tests/test_create_wp_verification_class.sh"
+    "scripts/tests/test_create_wp_artifactor_gate.sh"
     "scripts/tests/test_day_close_lock_timezone.sh"
     "scripts/tests/test_fresh_seed_reproduction.sh"
     "scripts/tests/test_generate_manifest_registers_setup_exclusions.sh"
@@ -213,6 +299,11 @@ SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
     # ship with the template — a user's copy must be able to run its own
     # issue-regression gate (same rationale as the 03.08 block above).
     "scripts/tests/run-issue-tests.sh"
+    "scripts/tests/test_issue_1032_strategy_session_offline.sh"
+    "scripts/tests/test_issue_1032_windows_fail_closed.sh"
+    # The delivered #1257 test invokes this verifier regression suite.
+    "scripts/tests/check-wp-registered-smoke.sh"
+    "scripts/tests/test_issue_1257_wp_registration.sh"
     "scripts/tests/test_issue_434_pipeline_scaffold_only.sh"
     "scripts/tests/test_issue_453_calendar_private_visibility.sh"
     "scripts/tests/test_issue_455_scaffold_missing_lib_fatal.sh"
@@ -230,6 +321,18 @@ SCRIPT_CONTRACT_EXPLICIT_INCLUDE=(
     "scripts/tests/test_update_build_runtime_fail_closed.sh"
     "scripts/tests/test_update_delivers_python_resolver_before_roles.sh"
     "scripts/tests/test_role_runner_update_marker_guard.sh"
+    # issue #557 (30.08): zsh regression for the day-close commit guard —
+    # runs in CI via run-issue-tests.sh, must ship with the template like its
+    # bash sibling above.
+    "scripts/tests/test_issue_557_zsh_special_vars.sh"
+    # WP-7 Phase 216 (11.10): phase-1 gate of issue #1114 (cp1251) and regressions of #1147
+    # are delivered, like the whole test_issue_* family; the baseline is a mandatory
+    # ratchet file of the delivered check-python-encoding.py (same reason as
+    # python-resolver-baseline.txt above: without it the gate fails on install).
+    "scripts/tests/cp1251-smoke.sh"
+    "scripts/tests/python-encoding-baseline.txt"
+    "scripts/tests/test_issue_1114_encoding_gate.sh"
+    "scripts/tests/test_issue_1147_memory_migrate.sh"
 )
 
 is_explicit_include() {
@@ -241,11 +344,11 @@ is_explicit_include() {
     return 1
 }
 
-# Собираем файлы.
+# Collect the files.
 FILES=()
 EXCLUDED_PATHS=()
 while IFS= read -r rel; do
-    # Пропускаем мусор/инструментарий
+    # Skip junk/tooling
     if is_explicit_include "$rel" \
         "${GITHUB_EXPLICIT_INCLUDE[@]}" \
         "${SCRIPT_CONTRACT_EXPLICIT_INCLUDE[@]}" \
@@ -284,7 +387,7 @@ while IFS= read -r rel; do
         continue
     fi
 
-    # Проверяем excluded_paths (dev-only)
+    # Check excluded_paths (dev-only)
     is_excluded=false
     for pattern in "${EXCLUDED_PATTERNS[@]}"; do
         case "$rel" in
@@ -300,7 +403,7 @@ while IFS= read -r rel; do
         continue
     fi
 
-    # Проверяем files-исключения (пользовательское пространство)
+    # Check files exclusions (user space)
     is_files_exclude=false
     for pattern in "${FILES_EXCLUDE_PATTERNS[@]}"; do
         case "$rel" in
@@ -319,7 +422,7 @@ while IFS= read -r rel; do
 # manifest-completeness check (issue #207).
 done < <(git -C "$SCRIPT_DIR" ls-files | LC_ALL=C sort)
 
-# Читаем существующий манифест для deprecated_files (ручное управление)
+# Read the existing manifest for deprecated_files (managed manually)
 DEPRECATED_JSON="[]"
 if [ -f "$MANIFEST" ]; then
     DEPRECATED_JSON=$(python3 -c "
@@ -331,11 +434,11 @@ print(json.dumps(data.get('deprecated_files', []), ensure_ascii=False))
 fi
 
 TMPDIR=$(mktemp -d)
-# Через printf: построчная запись без bash-array-interpolation внутри строки
+# Via printf: line-by-line write without bash-array interpolation inside a string
 printf '%s\n' "${FILES[@]}" > "$TMPDIR/files.txt"
 printf '%s\n' "${EXCLUDED_PATHS[@]}" > "$TMPDIR/excluded.txt"
 
-# Генерируем JSON
+# Generate JSON
 python3 -c "
 import hashlib
 import json
@@ -385,9 +488,19 @@ _ls = subprocess.run(
 if _ls.returncode != 0:
     sys.exit('generate-manifest: git ls-files failed: ' + _ls.stderr.strip())
 tracked_now = set(_ls.stdout.splitlines())
+# WP-7 Ф92: a files[] to excluded_paths[] move needs a deprecated_files entry
+# too (already-installed pilots got the file while it was still delivered),
+# but bare tracked_now above would auto-purge that entry right back out.
+# excluded_confirmed=true on the entry itself (not a code-side list) marks
+# a deliberate transition, keeping the 22.08 protection for every other
+# tracked-but-unmarked path.
+excluded_now = set(excluded)
 kept, dropped = [], []
 for entry in data['deprecated_files']:
-    (dropped if entry.get('path') in delivered_now or entry.get('path') in tracked_now else kept).append(entry)
+    path = entry.get('path')
+    confirmed_excluded_transition = entry.get('excluded_confirmed') and path in excluded_now
+    (kept if confirmed_excluded_transition or (path not in delivered_now and path not in tracked_now)
+     else dropped).append(entry)
 for entry in dropped:
     print('  ⚠ deprecated_files: %s снова в поставке — запись удалена из deprecated' % entry.get('path'), file=sys.stderr)
 data['deprecated_files'] = kept

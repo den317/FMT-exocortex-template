@@ -28,7 +28,7 @@ CREATE_WP = Path(__file__).parent.parent / "create-wp.sh"
 def _extract_weekplan_writer() -> str:
     """Достаёт WeekPlan-writer без привязки к порядковому номеру шага."""
     text = CREATE_WP.read_text(encoding="utf-8")
-    marker = re.search(r"^# --- Шаг \d+: WeekPlan ---$", text, flags=re.MULTILINE)
+    marker = re.search(r"^# --- Step \d+: WeekPlan ---$", text, flags=re.MULTILINE)
     assert marker, "В create-wp.sh отсутствует секция WeekPlan"
     start = marker.end()
     heredoc_start = text.index("<<'PYEOF'\n", start) + len("<<'PYEOF'\n")
@@ -64,11 +64,41 @@ def test_standard_schema_inserts_row(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "добавлена" in result.stdout
     content = weekplan.read_text(encoding="utf-8")
-    # h_val = re.sub(r"[^0-9\-]", "", budget) — единица измерения обрезается,
-    # колонка "h" содержит только число (единица уже в заголовке колонки).
+    # h_val takes the number(s) from budget via regex (issue #1088) — the unit
+    # of measurement is cut off, column "h" contains only the number (the unit is already
+    # in the column header).
     assert "🟡 | 16 | **Новый РП** — [описание] | 3 | — | P2 | pending | [заполнить] |" in content
-    # исходная строка не тронута
+    # original line untouched
     assert "🟢 | 10 | **Существующий РП** | 5h | R1 | P3 | done | готово" in content
+
+
+def test_fractional_budget_keeps_decimal_point(tmp_path):
+    """issue #1088: старый `re.sub(r"[^0-9\\-]", "", budget)` читал "0.5h"
+    как "05" (пять часов на вид, не полчаса) — точка обрезалась вместе с
+    "h". Регрессия на нескольких форматов budget, включая те, что не
+    начинаются сразу с цифры (issue #1088 cold review, Fable)."""
+    weekplan = tmp_path / "WeekPlan W31.md"
+    weekplan.write_text(
+        "# WeekPlan W31\n\n"
+        "**Бюджет:** 40h\n\n"
+        "🚦 | # | РП | h | Источник | P | Статус | Результат\n"
+        "|---|---|---|---|----------|---|---|--------|-----------|\n",
+        encoding="utf-8",
+    )
+    for wp_num, budget, expected_h in [
+        ("20", "0.5h", "0.5"),
+        ("21", "0,5h", "0.5"),
+        ("22", "2.5-3.5h", "2.5-3.5"),
+        ("23", "~2h", "2"),
+        ("24", " 2h", "2"),
+        ("25", "бред", "?"),
+    ]:
+        result = _run_writer(weekplan, wp_num, f"РП {wp_num}", "P3", budget)
+        assert result.returncode == 0, result.stderr
+        content = weekplan.read_text(encoding="utf-8")
+        assert f"| {wp_num} | **РП {wp_num}** — [описание] | {expected_h} |" in content, (
+            f"budget={budget!r}: expected h={expected_h!r} in\n{content}"
+        )
 
 
 def test_unrecognized_schema_does_not_corrupt_file(tmp_path):
@@ -87,7 +117,7 @@ def test_unrecognized_schema_does_not_corrupt_file(tmp_path):
     assert result.returncode == 0
     assert "не найдена" in result.stderr
     assert "добавлена" not in result.stdout
-    # файл не изменился ни на байт
+    # file did not change by a single byte
     assert weekplan.read_text(encoding="utf-8") == original
 
 
@@ -97,7 +127,8 @@ def test_column_order_independent(tmp_path):
     weekplan.write_text(
         "# WeekPlan W31\n\n"
         "**Бюджет:** 40h\n\n"
-        "# | Статус | РП | h\n"
+        # With a leading `|`: the line `# | Статус | РП | h` without it is an ATX heading, not a table header.
+        "| # | Статус | РП | h |\n"
         "|---|---|---|---|\n",
         encoding="utf-8",
     )
@@ -106,7 +137,7 @@ def test_column_order_independent(tmp_path):
 
     assert result.returncode == 0, result.stderr
     content = weekplan.read_text(encoding="utf-8")
-    # порядок должен соответствовать заголовку (# | Статус | РП | h), не фиксированному 7-полю
+    # order must match the header (# | Статус | РП | h), not a fixed 7-field one
     inserted_line = [ln for ln in content.splitlines() if "5" in ln and "РП с другим" in ln][0]
     cells = [c.strip() for c in inserted_line.strip().strip("|").split("|")]
     assert cells == ["5", "pending", "**РП с другим порядком колонок** — [описание]", "2"]

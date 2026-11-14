@@ -1,6 +1,6 @@
 #!/bin/bash
-# Шаблон уведомлений: Синхронизатор (R8)
-# Вызывается из notify.sh через source
+# Notification template: Synchronizer (R8)
+# Called from notify.sh via source
 
 LOG_DIR="$HOME/logs/synchronizer"
 DATE=$(date +%Y-%m-%d)
@@ -27,6 +27,14 @@ build_message() {
 
             local repo_list
             repo_list=$(echo "$latest_run" | grep 'FOUND:' 2>/dev/null | sed 's/.*FOUND: /  /' || echo "")
+
+            # Was: sent "Репо с коммитами: 0" on every run, even when not a
+            # single repository changed -- the same smell as with Knowledge
+            # Feeder (found by the same session 09.10). A run where something really
+            # was found (found>0) stays realtime -- this is not the same decision
+            # (moving routine found>0 into a digest -- a separate architectural
+            # change, not touched here).
+            [ "$found" -gt 0 ] || { echo ""; return; }
 
             printf "<b>🔄 Code Scan</b>\n\n"
             printf "📅 %s\n\n" "$DATE"

@@ -69,11 +69,15 @@ echo "=== Detector regex regression tests ==="
 echo ""
 
 # Detector #7 fixtures
-for f in "$FIXTURES_DIR"/detector_07/positive_*.md; do
+# issue #1106: .sh/.py mutant-form fixtures added alongside the original
+# .md (prompts) ones — $DETECTOR_07_REGEX is now the single shared base
+# regex for all three (prompts/.py/.sh), so one glob per expect-class
+# covers every extension.
+for f in "$FIXTURES_DIR"/detector_07/positive_*.md "$FIXTURES_DIR"/detector_07/positive_*.sh "$FIXTURES_DIR"/detector_07/positive_*.py; do
     [ -f "$f" ] || continue
     run_test "07" "$f" "positive" "$DETECTOR_07_REGEX"
 done
-for f in "$FIXTURES_DIR"/detector_07/negative_*.md; do
+for f in "$FIXTURES_DIR"/detector_07/negative_*.md "$FIXTURES_DIR"/detector_07/negative_*.sh "$FIXTURES_DIR"/detector_07/negative_*.py; do
     [ -f "$f" ] || continue
     run_test "07" "$f" "negative" "$DETECTOR_07_REGEX"
 done

@@ -18,6 +18,11 @@ ENV_FILE="$WORKSPACE/.exocortex.env"
 MOCK_ARGS="$TEST_ROOT/codex-args"
 
 mkdir -p "$WORKSPACE/DS-strategy" "$TEST_HOME" "$FAKE_BIN"
+# Modern strategist validates a governance HEAD before its publish phase.
+# Keep the isolated fixture a real local repository; no remote is configured.
+git -C "$WORKSPACE/DS-strategy" init -q
+git -C "$WORKSPACE/DS-strategy" -c user.name=Test -c user.email=test@example.invalid \
+    commit --allow-empty -qm "fixture: governance baseline"
 printf 'export IWE_GOVERNANCE_REPO="DS-strategy"\n' > "$TEST_HOME/.iwe-paths"
 cat > "$ENV_FILE" <<EOF
 GITHUB_USER="test-user"
@@ -64,6 +69,8 @@ env PATH="$FAKE_BIN:$PATH" \
     IWE_RUNTIME="$WORKSPACE/.iwe-runtime" \
     IWE_GOVERNANCE_REPO="DS-strategy" \
     AI_CLI="codex" \
+    AI_CLI_PROMPT_FLAG="--" \
+    AI_CLI_EXTRA_FLAGS="exec --ephemeral --sandbox workspace-write --approve-for-me -C $WORKSPACE/DS-strategy" \
     MOCK_ARGS="$MOCK_ARGS" \
     bash "$WORKSPACE/.iwe-runtime/roles/strategist/scripts/strategist.sh" day-plan
 assert_codex_args strategist "$WORKSPACE/DS-strategy"
@@ -76,6 +83,8 @@ env PATH="$FAKE_BIN:$PATH" \
     IWE_RUNTIME="$WORKSPACE/.iwe-runtime" \
     IWE_GOVERNANCE_REPO="DS-strategy" \
     AI_CLI="codex" \
+    AI_CLI_PROMPT_FLAG="--" \
+    AI_CLI_EXTRA_FLAGS="exec --ephemeral --sandbox workspace-write --approve-for-me -C $WORKSPACE" \
     MOCK_ARGS="$MOCK_ARGS" \
     bash "$WORKSPACE/.iwe-runtime/roles/extractor/scripts/extractor.sh" on-demand
 assert_codex_args extractor "$WORKSPACE"

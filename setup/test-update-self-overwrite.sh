@@ -48,8 +48,15 @@ printf '# Template CLAUDE.md\n\nSame content both sides.\n' > "$UPSTREAM/CLAUDE.
 printf '#!/bin/bash\necho "hook v2"\n' > "$UPSTREAM/.claude/hooks/dummy-hook.sh"
 
 # The marked update.sh the manifest will bind — differs from the running copy.
-cp "$UPDATE_SH_REAL" "$UPSTREAM/update.sh"
+# The comment goes in BEFORE the end marker: update.sh must still end with it (#1004).
+sed '$d' "$UPDATE_SH_REAL" > "$UPSTREAM/update.sh"
 printf '\n# self-overwrite-regression-marker issue-505\n' >> "$UPSTREAM/update.sh"
+tail -n 1 "$UPDATE_SH_REAL" >> "$UPSTREAM/update.sh"
+
+# WP-529 Ф245: Step 5 пишет через исполнитель setup/lib/apply-op.sh — фикстура
+# доставляет его, как это делает настоящий манифест.
+mkdir -p "$UPSTREAM/setup/lib"
+cp "$SELF_DIR/lib/apply-op.sh" "$UPSTREAM/setup/lib/apply-op.sh"
 
 python3 - "$UPSTREAM" <<'PYEOF'
 import hashlib, json, sys
@@ -60,7 +67,7 @@ def entry(p):
 manifest = {
     'schema_version': 2,
     'version': '0.99.0-test-505',
-    'files': [entry('CLAUDE.md'), entry('.claude/hooks/dummy-hook.sh'), entry('update.sh')],
+    'files': [entry('CLAUDE.md'), entry('.claude/hooks/dummy-hook.sh'), entry('update.sh'), entry('setup/lib/apply-op.sh')],
     'deprecated_files': [],
 }
 (root / 'update-manifest.json').write_text(json.dumps(manifest))
@@ -78,6 +85,9 @@ cp "$UPSTREAM/CLAUDE.md" "$SCRIPT_DIR/.claude.md.base"
 WORKSPACE_DIR="$TEST_ROOT/repo"
 cp "$UPSTREAM/CLAUDE.md" "$WORKSPACE_DIR/CLAUDE.md"
 cp "$UPSTREAM/CLAUDE.md" "$WORKSPACE_DIR/.claude.md.base"
+printf 'GITHUB_USER="test-user"\nWORKSPACE_DIR="%s"\n' "$WORKSPACE_DIR" \
+  > "$WORKSPACE_DIR/.exocortex.env"
+chmod 600 "$WORKSPACE_DIR/.exocortex.env"
 git -C "$SCRIPT_DIR" init -q
 git -C "$SCRIPT_DIR" config user.email t@t; git -C "$SCRIPT_DIR" config user.name t
 git -C "$SCRIPT_DIR" add -A; git -C "$SCRIPT_DIR" commit -q -m init
@@ -214,6 +224,9 @@ cp "$UPSTREAM/CLAUDE.md" "$SCRIPT_DIR2/.claude.md.base"
 WORKSPACE_DIR2="$TEST_ROOT/repo2"
 cp "$UPSTREAM/CLAUDE.md" "$WORKSPACE_DIR2/CLAUDE.md"
 cp "$UPSTREAM/CLAUDE.md" "$WORKSPACE_DIR2/.claude.md.base"
+printf 'GITHUB_USER="test-user"\nWORKSPACE_DIR="%s"\n' "$WORKSPACE_DIR2" \
+  > "$WORKSPACE_DIR2/.exocortex.env"
+chmod 600 "$WORKSPACE_DIR2/.exocortex.env"
 git -C "$SCRIPT_DIR2" init -q
 git -C "$SCRIPT_DIR2" config user.email t@t; git -C "$SCRIPT_DIR2" config user.name t
 git -C "$SCRIPT_DIR2" add -A; git -C "$SCRIPT_DIR2" commit -q -m init

@@ -1,14 +1,16 @@
 #!/bin/bash
-# Шаблон уведомлений: Стратег (R1)
-# Вызывается из notify.sh через source
+# Notification template: Strategist (R1)
+# Called from notify.sh via source
 
 STRATEGY_DIR="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/current"
 STRATEGY_REPO_DIR="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}"
-DATE=$(date +%Y-%m-%d)
+# WP-568: the reconciliation day is fixed by the strategist (DAY_OPEN_PLAN_DATE) — otherwise a run past midnight
+# would name the already next day in the signal, though it reconciled the previous one.
+DATE="${DAY_OPEN_PLAN_DATE:-$(date +%Y-%m-%d)}"
 
 find_strategy_file() {
     case "$1" in
-        "day-plan"|"evening"|"day-close"|"note-review")
+        "day-plan"|"evening"|"day-close")
             echo "$STRATEGY_DIR/DayPlan $DATE.md"
             ;;
         "session-prep")
@@ -23,45 +25,57 @@ find_strategy_file() {
     esac
 }
 
-# HTML-escape для контента из markdown-источника (parse_mode=HTML).
-# Применять к переменным, которые приходят из DayPlan/WeekPlan текста, ДО подстановки в printf.
-# Не применять к статическим <b>/<a> тегам из printf — они должны остаться буквальными.
-# Причина: фразы вида "<4/5", "a < b" в markdown ломают Telegram parser (Bad Request: Unsupported start tag).
+# HTML-escape for content from a markdown source (parse_mode=HTML).
+# Apply to variables that come from DayPlan/WeekPlan text, BEFORE substitution into printf.
+# Do not apply to the static <b>/<a> tags from printf — they must remain literal.
+# Reason: phrases like "<4/5", "a < b" in markdown break the Telegram parser (Bad Request: Unsupported start tag).
 escape_html() {
     python3 -c 'import sys, html; sys.stdout.write(html.escape(sys.stdin.read()))'
 }
 
+# Plan table -> Telegram list (#982). Columns are found by the header row, not by
+# position: DayPlan is `🚦 | ТВС | # | РП | h | Статус`, WeekPlan is
+# `🚦 | # | РП | h | Статус | ...`, an older WeekPlan has no 🚦 at all. The icon is the
+# done/in-progress marker from Статус, else the traffic light from 🚦, else ⬜.
+# No `#` before the number: Telegram turns `#WP-17` into the hashtag `#WP`.
 table_to_list() {
     local file="$1"
     local section="$2"
-    # dayplan: 🚦 | ТВС | # | РП | h | Статус (2 leading columns vs weekplan)
-    # weekplan (default): # | РП | Бюджет | Статус | Дедлайн | Репо
-    local format="${3:-weekplan}"
 
     sed -n -E "/^## ${section}|<summary>.*${section}/,/^---|^<\/details>/p" "$file" \
         | grep '^|' \
-        | tail -n +3 \
-        | while IFS='|' read -r _ f1 f2 f3 f4 f5 f6 _rest; do
-            local num rp hours status
-            if [ "$format" = "dayplan" ]; then
-                num="$f3"; rp="$f4"; hours="$f5"; status="$f6"
-            else
-                num="$f1"; rp="$f2"; hours="$f3"; status="$f4"
-            fi
-            num=$(echo "$num" | xargs)
-            rp=$(echo "$rp" | xargs | sed 's/\*\*//g')
-            hours=$(echo "$hours" | xargs | sed 's/\*\*//g')
-            status=$(echo "$status" | xargs)
-
-            local icon="⬜"
-            case "$status" in
-                *done*|*"✅"*) icon="✅" ;;
-                *in_progress*|*in.progress*) icon="🔄" ;;
-                *pending*) icon="⬜" ;;
-            esac
-
-            printf "%s #%s %s (%s)\n" "$icon" "$num" "$rp" "$hours"
-        done
+        | awk -F'|' '
+            function trim(x) { gsub(/^[ \t]+|[ \t]+$/, "", x); return x }
+            function strip(x) { gsub(/\*\*/, "", x); return trim(x) }
+            NR == 1 {
+                for (i = 2; i < NF; i++) {
+                    h = trim($i)
+                    if (h == "🚦") ci = i
+                    else if (h == "#") ni = i
+                    else if (h == "РП") ri = i
+                    else if (h == "h" || h == "Бюджет") hi = i
+                    else if (h == "Статус") si = i
+                }
+                next
+            }
+            NR == 2 { next }
+            ri == "" { next }
+            {
+                light = ci ? trim($ci) : ""
+                num = ni ? trim($ni) : ""
+                rp = strip($ri)
+                hours = hi ? strip($hi) : ""
+                status = si ? trim($si) : ""
+                icon = "⬜"
+                if (light != "" && light != "—" && light != "-") icon = light
+                if (status ~ /done|✅/) icon = "✅"
+                else if (status ~ /in_progress|in.progress/) icon = "🔄"
+                out = icon
+                if (num != "" && num != "—" && num != "-") out = out " " num
+                out = out " " rp
+                if (hours != "") out = out " (" hours ")"
+                print out
+            }'
 }
 
 get_github_link() {
@@ -83,9 +97,73 @@ get_github_link() {
     fi
 }
 
+# D16 (#983, #981): the morning Day Open built no plan and the strategist no longer replaces it with
+# the free-form prompt. Static like week-review-failed: there is no file to look up. strategist.sh
+# passes a reason code in DAY_OPEN_FAILED_REASON and the exit code in DAY_OPEN_FAILED_RC; only digits
+# of the code reach the HTML message.
+build_day_open_failed_message() {
+    local rc="${DAY_OPEN_FAILED_RC:-}" reason
+    local advice="Откройте день в сессии Claude Code командой «открывай». Подробности - в журнале стратега за сегодня (logs/strategist/$DATE.log в домашнем каталоге)."
+    case "$rc" in ''|*[!0-9]*) rc="" ;; esac
+    case "${DAY_OPEN_FAILED_REASON:-}" in
+        update-incomplete)
+            reason="Обновление шаблона не завершено: оставлен маркер .update-incomplete. Автоматическое Открытие дня отложено${rc:+ (код $rc)}."
+            advice="Завершите или восстановите update.sh; после снятия маркера планировщик повторит попытку. Если план нужен сейчас, откройте день в сессии Claude Code командой «открывай»."
+            ;;
+        not-delivered)
+            reason="Конвейер Открытия дня (scripts/day-open-pipeline.sh) не установлен на этой машине."
+            advice="Запустите update.sh, чтобы его установить. План на сегодня соберите в сессии Claude Code командой «открывай»."
+            ;;
+        no-gateway-disabled)
+            reason="Шлюз модели не настроен — автоматический утренний план выключен. Это сообщение больше не повторится."
+            advice="Открывайте день в сессии Claude Code командой «открывай». Когда шлюз появится, утренний сбор включится сам."
+            ;;
+        pipeline-failed)
+            reason="Конвейер Открытия дня завершился с ошибкой${rc:+ (код $rc)}. Если включён планировщик Синхронизатора, он повторит попытку позже; если план нужен сейчас, не ждите."
+            ;;
+        attempts-exhausted)
+            reason="Попытки собрать план за сегодня исчерпаны (ошибка или прерывание по тайм-ауту${rc:+, последний код $rc}), автоматических повторов сегодня больше не будет."
+            ;;
+        *)
+            reason="Конвейер Открытия дня не собрал план${rc:+ (код $rc)}."
+            ;;
+    esac
+    printf "<b>🔴 План дня не собран</b>\n\n%s\n\n%s" "$reason" "$advice"
+}
+
 build_message() {
     local scenario="$1"
     local file
+
+    # A retry event of week-review (scheduler) is not a finished review: the strategist
+    # already sent its own "week-review-failed" message (WP-568, 02.11).
+    if [ "$scenario" = "week-review" ] && [ -n "${RETRY_EVENT:-}" ]; then
+        echo ""
+        return
+    fi
+
+    # WP-561 Phase 25: a failed week-review must alarm even when no WeekPlan file is found or the
+    # model wrote nothing, so this message is static and skips the file lookup below.
+    if [ "$scenario" = "week-review-failed" ]; then
+        printf "<b>🔴 Week-Review не доведён до сервера</b>\n\nОтчёт недели не подтверждён на общей версии (запуск не начался, модель не справилась с заданием, или готовый отчёт не передан на сервер) - следующие сценарии недели могут остаться без итогов. В журнале стратега за сегодня видно, на каком именно шаге сорвалось."
+        return
+    fi
+    if [ "$scenario" = "day-open-missing" ]; then
+        printf "<b>🟡 План дня не опубликован сервером</b>\n\nDayPlan за %s отсутствует на общей версии хранилища после окна серверного Открытия дня. Серверный конвейер не подтвердил публикацию: либо не запустился, либо не довёл push. Этот хост — наблюдатель и сам день не открывает. Подробности - в журнале стратега за сегодня (logs/strategist/%s.log в домашнем каталоге)." "$DATE" "$DATE"
+        return
+    fi
+    if [ "$scenario" = "day-open-failed" ]; then
+        build_day_open_failed_message
+        return
+    fi
+    # #1261: this message never reads the DayPlan (see comment below), so it must not
+    # depend on one existing — days without a DayPlan (manual open, or none at all)
+    # silently dropped the notification before this scenario was moved above the lookup.
+    if [ "$scenario" = "note-review" ]; then
+        printf "<b>📝 Note-Review завершён</b>\n\nЗаметки остаются в inbox, пока вы не примете по ним решение."
+        return
+    fi
+
     file=$(find_strategy_file "$scenario")
 
     if [ -z "$file" ] || [ ! -f "$file" ]; then
@@ -98,7 +176,7 @@ build_message() {
             local title
             title=$(grep '^# ' "$file" | head -1 | sed 's/^# //' | escape_html)
             local plan_items
-            plan_items=$(table_to_list "$file" "План на сегодня" "dayplan" | escape_html)
+            plan_items=$(table_to_list "$file" "План на сегодня" | escape_html)
 
             printf "<b>📋 %s</b>\n\n" "$title"
             printf "<b>План:</b>\n%s" "$plan_items"
@@ -120,10 +198,6 @@ build_message() {
             title=$(grep '^# ' "$file" | head -1 | sed 's/^# //' | escape_html)
 
             printf "<b>📊 Week-Review завершён</b>\n\n%s" "$title"
-            ;;
-
-        "note-review")
-            printf "<b>📝 Note-Review завершён</b>\n\nЗаметки обработаны, inbox почищен."
             ;;
 
         *)

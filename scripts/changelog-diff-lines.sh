@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # routing: helper  skill=notify-update,validate-template
-# changelog-diff-lines.sh — извлекает добавленные строки CHANGELOG.md за
-# диапазон коммитов, с опциональным фильтром по бирке [security].
+# changelog-diff-lines.sh — extracts the added lines of CHANGELOG.md over
+# a commit range, with an optional filter by the [security] tag.
 #
-# Единая логика для .github/workflows/notify-update.yml (push) и
-# validate-template.yml (push + pull_request) — WP-7 Ф62 п.4. Выделена из
-# трёх независимых копий, найденных code review 13.08.2026 (DP.SC.172 P2:
-# третье повторение → функция); там же найден баг дублирования — голый
-# `grep '\[security\]'` матчил подстроку где угодно в тексте коммита, не
-# только позицию бирки-префикса (ложные "🔒 срочно"-алерты на коммитах вида
+# Single logic for .github/workflows/notify-security.yml (push) and
+# validate-template.yml (push + pull_request) — WP-7 Phase 62 item 4. Extracted from
+# three independent copies found by code review 13.08.2026 (DP.SC.172 P2:
+# third repetition → function); a duplication bug was found there too — a bare
+# `grep '\[security\]'` matched the substring anywhere in the commit text, not
+# only the position of the prefix tag (false "🔒 urgent" alerts on commits like
 # "fix: drop obsolete [security]-only migration shim").
 #
-# Использование:
+# Usage:
 #   bash changelog-diff-lines.sh <base-sha|""> [--security-only]
 #
-# base-sha пустой или все нули → нет валидной base (initial push/новая
-# ветка): берём весь верхний блок CHANGELOG.md (до следующего "## [").
+# base-sha empty or all zeros → no valid base (initial push/new
+# branch): take the whole top block of CHANGELOG.md (up to the next "## [").
 
 set -uo pipefail
 
@@ -26,25 +26,34 @@ security_only=false
 [[ "${2:-}" == "--security-only" ]] && security_only=true
 
 if [[ ! -f "$CHANGELOG" ]]; then
-    exit 0
+    echo "ERROR: CHANGELOG.md is missing: $CHANGELOG" >&2
+    exit 1
 fi
 
 if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
-    lines=$(awk '/^## \[/{n++} n==1' "$CHANGELOG")
+    if ! lines=$(awk '/^## \[/{n++} n==1' "$CHANGELOG"); then
+        echo "ERROR: CHANGELOG.md extraction failed" >&2
+        exit 1
+    fi
 else
-    diff_output=$(git -C "$FMT_DIR" diff --unified=0 "$base"..HEAD -- CHANGELOG.md 2>&1)
-    diff_status=$?
-    if [[ $diff_status -ne 0 ]]; then
-        echo "⚠️  git diff завершился с ошибкой (base=$base): $diff_output" >&2
-        lines=""
-    else
-        lines=$(printf '%s\n' "$diff_output" | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)
+    if ! diff_output=$(git -C "$FMT_DIR" diff --unified=0 "$base"..HEAD -- CHANGELOG.md 2>&1); then
+        echo "ERROR: git diff failed (base=$base): $diff_output" >&2
+        exit 1
+    fi
+    if ! lines=$(printf '%s\n' "$diff_output" | awk '
+        substr($0, 1, 1) == "+" && substr($0, 1, 3) != "+++" { print substr($0, 2) }
+    '); then
+        echo "ERROR: CHANGELOG diff parsing failed" >&2
+        exit 1
     fi
 fi
 
 if $security_only; then
-    # Якорим на позицию бирки-префикса ("- [security] "), не голую подстроку.
-    lines=$(printf '%s\n' "$lines" | grep '^- \[security\] ' || true)
+    # Anchor on the position of the prefix tag ("- [security] "), not a bare substring.
+    if ! lines=$(printf '%s\n' "$lines" | awk '/^- \[security\] /'); then
+        echo "ERROR: CHANGELOG security filter failed" >&2
+        exit 1
+    fi
 fi
 
 printf '%s\n' "$lines"

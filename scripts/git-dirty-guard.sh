@@ -3,7 +3,7 @@
 # see DP.SC.159, DP.ROLE.059
 # git-dirty-guard.sh — protects a repo's periodic pull from a dirty working tree.
 #
-# WP-484 (2026-07-19). Root cause of the recurring tsekh-1 cleanup: sync-strategy-files.sh
+# WP-484 (2026-07-19). Root cause of the recurring remote-server cleanup: sync-strategy-files.sh
 # (and the fleeting-notes sync) write files straight from origin's blobs without ever
 # committing, so ${IWE_GOVERNANCE_REPO:-DS-strategy}'s working tree on the server accumulates "dirty" entries
 # whose content is byte-identical to origin — not real work, just a stale local HEAD.
@@ -16,7 +16,7 @@
 #   - every dirty TRACKED file byte-identical to origin/<branch>  → stale mirror, safe to
 #     `git reset --hard origin/<branch>` (untracked files are never touched — reset --hard
 #     doesn't remove them, and they're exactly the shape of real new work found live on
-#     2026-07-18/19: WP-406 Ф22, WP-455 Ф11, WP-493 Ф7, none yet on origin).
+#     2026-07-18/19: WP-406 Phase 22, WP-455 Phase 11, WP-493 Phase 7, none yet on origin).
 #   - any dirty tracked file DIFFERS from origin/<branch>          → real uncommitted work,
 #     never touched automatically — loud Telegram alert instead, caller must skip pull
 #     this round rather than attempt a doomed rebase.

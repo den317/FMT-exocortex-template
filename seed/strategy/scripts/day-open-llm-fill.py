@@ -1,5 +1,5 @@
-# SNAPSHOT — synced manually via script-promote.sh from FMT-exocortex-template/scripts/. Do not edit here directly.
 from __future__ import annotations
+# SNAPSHOT — synced manually via script-promote.sh from FMT-exocortex-template/scripts/. Do not edit here directly.
 #!/usr/bin/env python3
 """
 day-open-llm-fill.py — WP-356: per-section LLM-заполнение PENDING-маркеров DayPlan.
@@ -22,6 +22,7 @@ day-open-llm-fill.py — WP-356: per-section LLM-заполнение PENDING-м
 
 import argparse
 import glob
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -177,7 +178,7 @@ def rebuild_compact_dashboard(text: str) -> str:
     """
     lines = text.split("\n")
 
-    # 1. Собрать топ-7 строк-РП из таблицы 'План на сегодня'
+    # 1. Collect the top-7 WP rows from the 'План на сегодня' table
     plan_rows = []
     in_plan = False
     for ln in lines:
@@ -192,11 +193,11 @@ def rebuild_compact_dashboard(text: str) -> str:
             if len(plan_rows) >= 7:
                 break
         elif plan_rows and not s.startswith("|"):
-            break  # таблица закончилась (Бюджет дня / пустая строка / </details>)
+            break  # the table ended (Day budget / empty line / </details>)
     if not plan_rows:
         return text
 
-    # 2. Компактные строки: | флаг | # краткое-название |
+    # 2. Compact rows: | flag | # short-name |
     compact = ["**Сегодня (топ-7 по приоритету):**"]
     for row in plan_rows:
         cols = [c.strip() for c in row.strip("|").split("|")]
@@ -208,7 +209,7 @@ def rebuild_compact_dashboard(text: str) -> str:
             short = short[:57] + "…"
         compact.append(f"| {flag} | {num} {short} |")
 
-    # 3. Заменить старый подблок РП внутри Compact Dashboard на compact
+    # 3. Replace the old WP sub-block inside the Compact Dashboard with the compact one
     out = []
     in_dash = False
     skipping = False
@@ -231,20 +232,24 @@ def rebuild_compact_dashboard(text: str) -> str:
             if s == "":
                 skipping = False
                 out.append(ln)
-            continue  # пропускаем старые строки таблицы
+            continue  # skip the old table rows
         out.append(ln)
     return "\n".join(out)
 
 
-def _panel_yesterday_iso() -> str:
-    """Вчера по московскому календарю — та же конвенция, что у ночного воркера (Ф3.3)."""
-    from datetime import datetime, timedelta, timezone
+def _dashboard_today_iso() -> str:
+    """Сегодня по московскому календарю -- дата, под которой dashboard_worker.py
+    пишет ночной снимок (запуск 07:30 MSK, WP-417 Ф-cutover-switch 2026-09-02).
+    Заменяет _panel_yesterday_iso() -- старая панель считала за ВЧЕРА (target_date
+    в panel_worker.py), PD-dashboard пишет файл под датой самого запуска."""
+    from datetime import datetime, timezone
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo("Europe/Moscow"))
-    except Exception:  # noqa: BLE001 — zoneinfo нет → Москва = UTC+3 (без DST с 2014)
+    except Exception:  # noqa: BLE001 — no zoneinfo → Moscow = UTC+3 (no DST since 2014)
+        from datetime import timedelta
         now = datetime.now(timezone.utc) + timedelta(hours=3)
-    return (now.date() - timedelta(days=1)).isoformat()
+    return now.date().isoformat()
 
 
 def _strip_panel_block(text: str, begin: str, end: str) -> str:
@@ -256,7 +261,7 @@ def _strip_panel_block(text: str, begin: str, end: str) -> str:
     if stop == -1:
         return text
     stop += len(end)
-    after = stop + 1 if text[stop:stop + 1] == "\n" else stop  # съесть хвостовой \n
+    after = stop + 1 if text[stop:stop + 1] == "\n" else stop  # consume the trailing \n
     return text[:start] + text[after:]
 
 
@@ -265,6 +270,109 @@ GATE_METRICS_SCRIPT = os.path.join(
 )
 GATE_SECTION_BEGIN = "<summary><b>Gate-метрики"
 GATE_SECTION_END = "</details>"
+
+def _mask_fenced_code(text: str) -> str:
+    """Hide Markdown code from HTML parsing while preserving every text offset."""
+    fence = ""
+    output = []
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        masked = bool(fence or marker)
+        if marker:
+            token, tail = marker.groups()
+            if not fence:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence) and not tail.strip():
+                fence = ""
+        output.append(re.sub(r"[^\r\n]", " ", line) if masked else line)
+    return "".join(output)
+
+
+class _DetailsSections(HTMLParser):
+    """Locate matched details/summary boundaries; comments and code are inert."""
+
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+        self.line_offsets = [0]
+        for line in text.splitlines(keepends=True):
+            self.line_offsets.append(self.line_offsets[-1] + len(line))
+        self.stack = []
+        self.openers = []
+        self.summary = None
+        self.sections = []
+        self.code_tags = []
+        self.code_start = None
+        self.code_spans = []
+
+    def _text_offset(self):
+        line, column = self.getpos()
+        return self.line_offsets[line - 1] + column
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"pre", "code"}:
+            if not self.code_tags:
+                self.code_start = self._text_offset()
+            self.code_tags.append(tag)
+            return
+        if self.code_tags:
+            return
+        if tag == "details":
+            section = {"start": self._text_offset(), "title_parts": []}
+            self.stack.append(section)
+            self.openers.append(section)
+        elif tag == "summary" and self.stack and "summary_end" not in self.stack[-1]:
+            self.summary = self.stack[-1]
+
+    def handle_data(self, data):
+        if self.summary is not None and not self.code_tags:
+            self.summary["title_parts"].append(data)
+
+    def handle_endtag(self, tag):
+        if self.code_tags:
+            if tag == self.code_tags[-1]:
+                self.code_tags.pop()
+                if not self.code_tags:
+                    self.code_spans.append((self.code_start, self.text.find(">", self._text_offset()) + 1))
+            return
+        if tag == "summary" and self.summary is not None:
+            self.summary["summary_end"] = self.text.find(">", self._text_offset()) + 1
+            self.summary["title"] = "".join(self.summary["title_parts"]).strip()
+            self.summary = None
+        elif tag == "details" and self.stack:
+            section = self.stack.pop()
+            if "summary_end" in section:
+                section["body_end"] = self._text_offset()
+                section["end"] = self.text.find(">", self._text_offset()) + 1
+                self.sections.append(section)
+
+
+def _mask_code(text: str) -> str:
+    visible = _mask_fenced_code(text)
+    visible = re.sub(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)",
+                     lambda match: re.sub(r"[^\r\n]", " ", match.group()), visible, flags=re.DOTALL)
+    parser = _DetailsSections(visible)
+    parser.feed(visible)
+    if parser.code_tags:
+        parser.code_spans.append((parser.code_start, len(visible)))
+    parts = []
+    offset = 0
+    for start, end in parser.code_spans:
+        parts.extend([visible[offset:start], re.sub(r"[^\r\n]", " ", visible[start:end])])
+        offset = end
+    parts.append(visible[offset:])
+    return "".join(parts)
+
+
+def _parse_details(text: str) -> _DetailsSections:
+    visible = _mask_code(text)
+    parser = _DetailsSections(visible)
+    parser.feed(visible)
+    return parser
+
+
+def _details_sections(text: str) -> list[dict]:
+    return sorted(_parse_details(text).sections, key=lambda section: section["start"])
 
 
 def inject_gate_metrics(text: str) -> str:
@@ -312,33 +420,38 @@ def inject_gate_metrics(text: str) -> str:
 
 
 def inject_panel_tile(text: str) -> str:
-    """Врезать тайл табло (WP-417 Ф3.4) в Compact Dashboard перед END-маркером.
+    """Врезать тайл табло (WP-417 Ф-cutover-switch, 2026-09-02) в Compact Dashboard
+    перед END-маркером.
 
-    Локальный режим: читает самую свежую панель из panel.db (вариант A data-ready
-    gate) и рендерит блок. Идемпотентно — старый блок <!-- panel-tile --> вырезается
-    и заменяется свежим (повторный Day Open не дублирует). Деградирует мягко: нет БД
-    или ошибка чтения → тайл пропускается, открытие дня не падает (P4: причина в лог).
-    Общий scaffold не трогаем — врезка только в локальном пайплайне ${IWE_GOVERNANCE_REPO:-DS-strategy}.
+    Источник -- PD-dashboard (git, ночной писатель dashboard_worker.py), не
+    panel.db/Neon (старый WP-417 Ф3.4 источник superseded архитектурным пивотом
+    18.08-01.09, см. inbox/WP-417/WP-417.md "Актуализация и решение пилота о
+    составе табло"). Идемпотентно -- старый блок <!-- panel-tile --> вырезается
+    и заменяется свежим (повторный Day Open не дублирует). Деградирует мягко:
+    нет PD-dashboard/файла на сегодня -> тайл пропускается, открытие дня не
+    падает (P4: причина в лог). Общий scaffold не трогаем -- врезка только в
+    локальном пайплайне ${IWE_GOVERNANCE_REPO:-DS-strategy}.
     """
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
     try:
-        from panel_render import PANEL_BEGIN, PANEL_END, read_panel, render_panel_block
-    except Exception:  # noqa: BLE001 — panel-модулей нет → тайл просто не показываем
-        print("[inject_panel_tile] panel-модули недоступны — тайл пропущен", file=sys.stderr)
+        from dashboard_render import (
+            PANEL_BEGIN, PANEL_END, read_dashboard_snapshot, render_dashboard_panel_block,
+        )
+    except Exception:  # noqa: BLE001 — dashboard modules unavailable → simply do not show the tile
+        print("[inject_panel_tile] dashboard-модули недоступны — тайл пропущен", file=sys.stderr)
         return text
 
     marker = "---END-COMPACT-DASHBOARD---"
     if marker not in text:
-        return text  # нет дашборда (необычный scaffold) — некуда врезать
+        return text  # no dashboard (unusual scaffold) — nowhere to insert
 
-    account_id = os.environ.get("PANEL_ACCOUNT_ID", "local")
     try:
-        panel = read_panel(account_id)
-    except Exception:  # noqa: BLE001 — БД недоступна → тайл пропускаем, день не валим
-        print("[inject_panel_tile] чтение panel.db не удалось — тайл пропущен", file=sys.stderr)
+        snapshot = read_dashboard_snapshot(_fault_profile_workspace())
+    except Exception:  # noqa: BLE001 — PD dashboard unavailable → skip the tile, do not fail the day
+        print("[inject_panel_tile] чтение PD-dashboard не удалось — тайл пропущен", file=sys.stderr)
         return text
 
-    block = render_panel_block(panel, _panel_yesterday_iso())
+    block = render_dashboard_panel_block(snapshot, _dashboard_today_iso())
     text = _strip_panel_block(text, PANEL_BEGIN, PANEL_END)
     idx = text.find(marker)
     return text[:idx] + block + "\n" + text[idx:]
@@ -453,13 +566,7 @@ def has_bare_details(text: str) -> bool:
     A bare <details> is the "Details" rendering bug. Used as a post-fill gate so a
     regression blocks the commit instead of reaching the pilot.
     """
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.strip().lower().startswith("<details"):
-            window = " ".join(lines[i + 1:i + 4]).lower()
-            if "<summary>" not in window:
-                return True
-    return False
+    return any("summary_end" not in section for section in _parse_details(text).openers)
 
 
 def split_into_chunks(text: str) -> list[dict]:
@@ -467,18 +574,22 @@ def split_into_chunks(text: str) -> list[dict]:
     chunks = []
     current_lines = []
     current_header = "preamble"
+    world_sections = [section for section in _details_sections(text) if section["title"] == "Мир"]
+    offset = 0
 
-    for line in text.splitlines(keepends=True):
-        if line.startswith("## ") or line.strip().startswith("<details"):
+    for line, visible in zip(text.splitlines(keepends=True), _mask_code(text).splitlines(keepends=True)):
+        inside_world = any(section["start"] < offset < section["end"] for section in world_sections)
+        if not inside_world and (visible.startswith("## ") or visible.strip().startswith("<details")):
             if current_lines:
-                chunks.append({"header": current_header, "lines": current_lines, "has_pending": "<!-- PENDING" in "".join(current_lines)})
+                chunks.append({"header": current_header, "lines": current_lines, "has_pending": "<!-- PENDING" in _mask_code("".join(current_lines))})
             current_header = line.strip()
             current_lines = [line]
         else:
             current_lines.append(line)
+        offset += len(line)
 
     if current_lines:
-        chunks.append({"header": current_header, "lines": current_lines, "has_pending": "<!-- PENDING" in "".join(current_lines)})
+        chunks.append({"header": current_header, "lines": current_lines, "has_pending": "<!-- PENDING" in _mask_code("".join(current_lines))})
     return chunks
 
 
@@ -561,6 +672,7 @@ def build_today_plan_prompt(header: str, section_content: str, weekplan: str,
         "6. Не меняй структуру markdown (таблицы, списки, жирный текст).",
         "7. Верни ТОЛЬКО содержимое секции — БЕЗ заголовка секции.",
         "8. Audit-trail для carry-over: после строки '**Carry-over из Day Close вчера:**' воспроизведи ВЕСЬ список из WeekReport ('Не выполнено (carry-over ...)') или вчерашнего DayPlan ('Завтра начать с'). Если какой-то пункт carry-over НЕ попал в таблицу плана — оставь его в самой строке carry-over с пометкой `(отложено: <причина>)` в круглых скобках сразу после пункта. Возможные причины: 'нет WP-ID — ad-hoc задача, не проходит JSON-fact pipeline' / 'условный carry-over \"если бюджет\", дневной бюджет заполнен другими РП' / 'WP в JSON, но статус — done/blocked'. НЕ выкидывай пункт молча — у пилота должен оставаться след. ВАЖНО: пункты с пометкой '(отложено: ...)' живут ТОЛЬКО в строке carry-over (текстовом следе), их часы НЕ входят в Бюджет дня (инвариант 5 остаётся в силе: бюджет = сумма часов JSON-фактов + mandatory_daily_wps).",
+        "9. В переданной секции таблица содержит одну строку-ОБРАЗЕЦ формата: '| 🔴 | С | NNN | **<!-- PENDING -->** | X | pending |'. Это НЕ данные и не РП из JSON — это только показ формата колонок. Эта строка целиком (включая литералы NNN, X, pending) НЕ должна попасть в твой ответ ни в каком виде. Замени её (и добавь остальные) РОВНО N строками, где N = число РП в JSON-фактах (инвариант 2) — по одной строке на каждый РП, реальные номер/название/часы/статус из JSON, без единого NNN/X/<!-- PENDING --> в финальной таблице.",
         "",
         "=== JSON-ФАКТЫ: Активные РП (источник — frontmatter WP-*.md) ===",
         facts_json,
@@ -610,16 +722,101 @@ def call_proxy(prompt: str, proxy_url: str, proxy_secret: str | None,
         return data.get("text", "")
 
 
+def is_world_chunk(chunk: dict) -> bool:
+    return any(section["title"] == "Мир" for section in _details_sections("".join(chunk["lines"])))
+
+
+def fill_world_lens_inplace(chunk: dict, weekplan: str, active_wps: str,
+                            proxy_url: str, proxy_secret: str | None) -> bool:
+    """Ф32 п.1 (WP-484, 31.07): the world section's news list is scaffold-rendered
+    fact, not LLM material — sending the whole section for rewriting reliably lost
+    the list (the model returned only its «Вывод», with hallucinated WP numbers).
+    Replace ONLY the single '**Вывод:** <!-- PENDING ... -->' line; every other
+    line stays byte-identical. Returns True if a replacement happened."""
+    lens_indices = [i for i, line in enumerate(_mask_code("".join(chunk["lines"])).splitlines())
+                    if line.startswith("**Вывод:**") and "<!-- PENDING" in line]
+    if not lens_indices:
+        return False  # deterministic "no data" conclusion from the scaffold — nothing to fill
+    if len(lens_indices) != 1:
+        raise ValueError("World lens is ambiguous; original PENDING retained")
+    lens_idx = lens_indices[0]
+    news_body = "".join(
+        line for i, line in enumerate(chunk["lines"][2:], start=2)
+        if i != lens_idx and line.strip() != "</details>"
+    )
+    prompt = "\n".join([
+        "Ты — утренний ассистент пилота IWE.",
+        "Ниже список сегодняшних новостей (секция «Мир» DayPlan) и план недели.",
+        "ЗАДАЧА: верни ТОЛЬКО текст для строки '**Вывод:**' — 2-4 предложения: какие из ЭТИХ новостей релевантны активным РП из WeekPlan.",
+        "Ссылайся только на РП-номера, реально присутствующие в контексте ниже; ничего не выдумывай.",
+        "Не повторяй список новостей, не добавляй заголовков или HTML, верни голый текст вывода одной строкой.",
+        "",
+        "=== НОВОСТИ ===",
+        news_body,
+        "=== КОНТЕКСТ: WeekPlan ===",
+        weekplan[:4000],
+        "=== КОНТЕКСТ: Активные WP ===",
+        active_wps or "Нет активных WP.",
+    ])
+    response = call_proxy(prompt, proxy_url, proxy_secret).strip()
+    if not response:
+        raise RuntimeError("Empty response for world lens (Вывод)")
+    response = re.sub(r"^\**Вывод:\**\s*", "", response)
+    if not response or "\n" in response or "\r" in response or re.search(r"</?[A-Za-z]|<!--", response):
+        raise ValueError("World lens must contain one nonempty plain-text line; original PENDING retained")
+    chunk["lines"][lens_idx] = f"**Вывод:** {response}\n"
+    return True
+
+
+def is_today_plan_section(header: str, content: str) -> bool:
+    return (
+        "План на сегодня" in content or "today_plan" in content.lower()
+        or "План на сегодня" in header or "today_plan" in header.lower()
+    )
+
+
+def warn_today_plan_placeholders(text: str) -> None:
+    """Report final table placeholders using the Block DOF signature (WP-561)."""
+    for chunk in split_into_chunks(text):
+        content = "".join(chunk["lines"])
+        if not is_today_plan_section(chunk["header"], content):
+            continue
+        leftover = [line for line in content.splitlines()
+                    if line.strip().startswith("|")
+                    and re.search(r"\|\s*NNN\s*\||<!-- PENDING|\|\s*X\s*\|", line)]
+        if leftover:
+            print("[WARN] today_plan final table contains placeholders "
+                  "(NNN/X/PENDING) -- Block DOF check will block the commit. "
+                  "Offending line(s):", file=sys.stderr)
+            for line in leftover:
+                print(f"[WARN]   {line}", file=sys.stderr)
+
+
 def fill_chunk(chunk: dict, weekplan: str, active_wps: str, calendar: str,
                cp_profile: str, proxy_url: str, proxy_secret: str | None,
                wp_facts: list[dict] | None = None,
                fault_profile: str = "",
                fleeting_notes: str = "") -> str:
     header = chunk["header"]
-    content = "".join(chunk["lines"][1:])  # без заголовка
+    content = "".join(chunk["lines"][1:])  # without the header
 
-    # Consolidated prompt with JSON facts for today_plan
-    is_today_plan = "План на сегодня" in header or "today_plan" in header.lower()
+    # Consolidated prompt with JSON facts for today_plan.
+    # `header` is usually the bare "<details>"/"<details open>" tag (chunking
+    # stores the <summary> title in `content`, not `header`) — checking
+    # `header` alone means this branch never fires for that shape, and the
+    # plan table falls through to the generic per-section prompt, which
+    # leaves the scaffold's example placeholders (N/NNN/X) unreplaced instead
+    # of computing a real seq/hours value per WP. Checking `content` alone
+    # would instead miss a plain "## План на сегодня" heading (chunk header
+    # can carry the title directly there) if the body never repeats the
+    # phrase — Codex review, WP-484 backfill-regression-fix session, 31.08.
+    # Checking both covers each chunking shape without betting on which one
+    # is live. Regressed and re-fixed three times in a consumer's installed
+    # copy (2026-07-09, then 26.08, then 31.08) — each time only that copy
+    # was patched, so this canonical source kept re-seeding the bug on the
+    # next backfill; fixed here too (WP-484, peer-session with Codex, same
+    # day) to close that loop.
+    is_today_plan = is_today_plan_section(header, content)
     if is_today_plan and wp_facts:
         prompt = build_today_plan_prompt(header, content, weekplan, wp_facts,
                                          calendar, cp_profile, fault_profile)
@@ -651,6 +848,7 @@ def main() -> None:
 
     scaffold = read_file(args.scaffold)
     if "<!-- PENDING" not in scaffold:
+        warn_today_plan_placeholders(scaffold)
         print("[INFO] No PENDING markers — nothing to fill.")
         Path(args.out).write_text(scaffold, encoding="utf-8")
         return
@@ -682,6 +880,20 @@ def main() -> None:
 
     for chunk in chunks:
         if not chunk["has_pending"]:
+            filled_chunks.append(chunk)
+            continue
+        # World section: targeted single-line lens fill, list stays byte-identical
+        # (Phase 32 item 1 — the generic whole-chunk path lost the scaffold's news list).
+        if is_world_chunk(chunk):
+            try:
+                if fill_world_lens_inplace(chunk, weekplan, active_wps,
+                                           args.proxy_url, args.proxy_secret):
+                    print("[OK] Filled: Мир (только строка Вывод, список сохранён)", file=sys.stderr)
+                else:
+                    print("[INFO] Мир: PENDING вне строки Вывод (нет данных источника) — секция оставлена как есть", file=sys.stderr)
+            except Exception as e:  # noqa: BLE001 — same per-section failure contract as below
+                failed_sections.append("Мир")
+                print(f"[FAIL] Section Мир: {e}", file=sys.stderr)
             filled_chunks.append(chunk)
             continue
         try:
@@ -744,12 +956,15 @@ def main() -> None:
         result_lines.extend(chunk["lines"])
     result = "".join(result_lines)
 
-    # WP-5 Ф 2026-06-11 П1: Compact Dashboard — топ-7 из готового плана, не sweep
+    # WP-5 Phase 2026-06-11 item 1: Compact Dashboard — top-7 from the ready plan, not a sweep
     result = rebuild_compact_dashboard(result)
-    # WP-417 Ф3.4: тайл табло за вчера — ПОСЛЕ rebuild (иначе он сотрёт блок), локально
+    # WP-417 Phase 3.4: yesterday's dashboard tile — AFTER rebuild (otherwise it would wipe the block), locally
     result = inject_panel_tile(result)
-    # Gate-метрики: заменить тело секции реальным выводом gate-metrics.sh (только Mac)
+    # Gate metrics: replace the section body with the real output of gate-metrics.sh (Mac only)
     result = inject_gate_metrics(result)
+    # Inspect the actual output after all local post-processing.
+    # A failed LLM call can also leave the original scaffold table in this output.
+    warn_today_plan_placeholders(result)
 
     # Sanity: if result is much shorter than scaffold, something went wrong
     if len(result) < len(scaffold) * 0.5:

@@ -1,10 +1,11 @@
 ---
 name: audit-installation
-description: Аудит пользовательской инсталляции IWE. Запускает scripts/iwe-audit.sh + MCP healthcheck + smoke-test ритуала через sentinel-механику (контракт dry-run-contract.md), передаёт отчёт subagent'у в роли VR.R.002 Аудитор (context isolation) → verdict ✅/⚠️/❌ по 6 компонентам (Inventory, L1 drift, DS-strategy, L3 customizations, MCP, ритуал). Используй после restore из бэкапа, после update.sh, или при еженедельной сверке.
+description: Аудит пользовательской инсталляции IWE. Запускает scripts/iwe-audit.sh + MCP healthcheck + smoke-test ритуала через sentinel-механику (контракт dry-run-contract.md), передаёт отчёт subagent'у в роли VR.R.002 Аудитор (context isolation) → verdict ✅/⚠️/❌ по 6 компонентам (Inventory, L1 drift, {{GOVERNANCE_REPO}}, L3 customizations, MCP, ритуал). Используй после restore из бэкапа, после update.sh, или при еженедельной сверке.
 argument-hint: "[--skip-mcp] [--critical]"
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/audit-installation]
   phrases: []
@@ -28,14 +29,14 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## When to use
 
-Аудит пользовательской инсталляции IWE. Запускает scripts/iwe-audit.sh + MCP healthcheck + smoke-test ритуала через sentinel-механику (контракт dry-run-contract.md), передаёт отчёт subagent'у в роли VR.R.002 Аудитор (context isolation) → verdict ✅/⚠️/❌ по 6 компонентам (Inventory, L1 drift, DS-strategy, L3 customizations, MCP, ритуал). Используй после restore из бэкапа, после update.sh, или при еженедельной сверке.
+Аудит пользовательской инсталляции IWE. Запускает scripts/iwe-audit.sh + MCP healthcheck + smoke-test ритуала через sentinel-механику (контракт dry-run-contract.md), передаёт отчёт subagent'у в роли VR.R.002 Аудитор (context isolation) → verdict ✅/⚠️/❌ по 6 компонентам (Inventory, L1 drift, {{GOVERNANCE_REPO}}, L3 customizations, MCP, ритуал). Используй после restore из бэкапа, после update.sh, или при еженедельной сверке.
 
 ## Обещание
 
 За ≤5 минут — markdown-отчёт ✅/⚠️/❌ по 6 компонентам инсталляции:
 1. **Inventory** — все ли критичные L1-файлы (CLAUDE.md, скиллы, протоколы) на месте
 2. **L1 drift** — расхождения с FMT-exocortex-template
-3. **DS-strategy** — git status + diff с FMT-strategy-template
+3. **{{GOVERNANCE_REPO}}** — git status + diff с FMT-strategy-template
 4. **L3 customizations** — extensions/, отличия params.yaml от skeleton, AUTHOR-ONLY зоны
 5. **MCP healthcheck** — 4 tools отвечают (с уважением к подписочному гейтингу DP.SC.112)
 6. **Ритуал smoke-test** — `/run-protocol close day` запускается под sentinel-защитой, доходит до write-шагов (см. `memory/dry-run-contract.md`)
@@ -47,12 +48,30 @@ Verdict выносит subagent в роли Аудитора, читая отч�
 Найти и запустить `iwe-audit.sh` через fallback-цепочку (author-mode → workspace, user-mode → `$IWE_SCRIPTS` из `~/.iwe-paths`):
 
 ```bash
-if [ -f "$HOME/IWE/scripts/iwe-audit.sh" ]; then
-    AUDIT_SCRIPT="$HOME/IWE/scripts/iwe-audit.sh"
-elif [ -n "${IWE_SCRIPTS:-}" ] && [ -f "$IWE_SCRIPTS/iwe-audit.sh" ]; then
+# issue #688: a non-interactive top-level Bash call doesn't go through
+# .bashrc/.zshenv (interactive-shell guard) or BASH_ENV (read before the
+# harness can set it) — $IWE_SCRIPTS is unset here on plenty of real
+# installs even though ~/.iwe-paths exists and is correct. Source it
+# directly, in this same shell, before reading the variable — `.` doesn't
+# depend on interactive/BASH_ENV machinery at all.
+# issue #932: the installer writes <workspace>/.iwe-paths (install-iwe-paths.sh);
+# $HOME/.iwe-paths is the legacy location, tried last.
+IWE_PATHS="${IWE_PATHS_FILE:-}"
+if [ -z "$IWE_PATHS" ]; then
+    for _c in "${IWE_WORKSPACE:-}/.iwe-paths" "${WORKSPACE_DIR:-}/.iwe-paths" \
+              "$PWD/.iwe-paths" "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-paths" "$HOME/.iwe-paths"; do
+        [ -r "$_c" ] && { IWE_PATHS="$_c"; break; }
+    done
+fi
+[ -n "$IWE_PATHS" ] && [ -r "$IWE_PATHS" ] && . "$IWE_PATHS"
+if [ -n "${IWE_SCRIPTS:-}" ] && [ -f "$IWE_SCRIPTS/iwe-audit.sh" ]; then
+    # $IWE_SCRIPTS first (#566): the hardcoded workspace copy, when it exists at
+    # all, is a stale leftover — the installer points IWE_SCRIPTS at the template.
     AUDIT_SCRIPT="$IWE_SCRIPTS/iwe-audit.sh"
+elif [ -f "${IWE_WORKSPACE:-$HOME/IWE}/scripts/iwe-audit.sh" ]; then
+    AUDIT_SCRIPT="${IWE_WORKSPACE:-$HOME/IWE}/scripts/iwe-audit.sh"
 else
-    echo "iwe-audit.sh не найден. Если \$IWE_SCRIPTS не выставлен — выполни 'source \$HOME/.iwe-paths' (или перезапусти shell), затем повтори. Если файла .iwe-paths нет — запусти setup.sh из FMT-шаблона."
+    echo "iwe-audit.sh не найден. \$IWE_PATHS ($IWE_PATHS) не даёт рабочий \$IWE_SCRIPTS — проверь, что файл существует и содержит export IWE_SCRIPTS=... (запусти setup.sh из FMT-шаблона, если файла нет)."
     exit 1
 fi
 bash "$AUDIT_SCRIPT" $([ "${ARGUMENTS:-}" = "--critical" ] && echo "--critical")
@@ -63,7 +82,7 @@ bash "$AUDIT_SCRIPT" $([ "${ARGUMENTS:-}" = "--critical" ] && echo "--critical")
 - 1 → warnings (отметить, продолжать)
 - 2 → critical gaps в bash-проверках (отметить, продолжать — Аудитор оценит совокупно с MCP)
 
-Скрипт покрывает разделы 1-3 отчёта (Inventory, L1 drift, DS-strategy).
+Скрипт покрывает разделы 1-3 отчёта (Inventory, L1 drift, {{GOVERNANCE_REPO}}).
 
 ## Шаг 2. MCP healthcheck (если не `--skip-mcp`)
 
@@ -74,7 +93,9 @@ bash "$AUDIT_SCRIPT" $([ "${ARGUMENTS:-}" = "--critical" ] && echo "--critical")
 | `mcp__claude_ai_IWE__knowledge_search` | `query: "test"`, `limit: 1` | бесплатный | ✅ если ответ <15s |
 | `mcp__claude_ai_IWE__github_status` | (без параметров) | бесплатный | ✅ если ответ |
 | `mcp__claude_ai_IWE__personal_search` | `query: "ping"`, `limit: 1` | **подписочный** | ✅ если ответ; **403/subscription_required → ⏸️** (не считать failure) |
-| `mcp__claude_ai_IWE__dt_read_digital_twin` | `path: "1_declarative"` | **подписочный** | ✅ если ответ; **403/subscription_required → ⏸️** (не считать failure) |
+| `mcp__claude_ai_IWE__dt_read_digital_twin` | `path: "/"` | **подписочный** | ✅ если ответ; **403/subscription_required → ⏸️** (не считать failure) |
+
+Двойник проверяется по корню `/`, а не по разделу: незаполненная категория метамодели (например `1_declarative`) отвечает `Path not found`, и исправная установка получала ложный ❌ (#932).
 
 **Подписочное гейтование (DP.SC.112).** `personal_*` и `dt_*` требуют активной БР в `subscription_grants`. Без подписки — это **не сбой инсталляции**, а ожидаемый отказ. Помечать как ⏸️ subscription_required, не ❌. Coverage считать только по доступным для пользователя tool'ам.
 
@@ -103,19 +124,11 @@ Coverage: N/4
 
 ### Алгоритм
 
-1. **Создать sentinel** (единое имя для gate + capability владельца, issue #369):
+1. **Создать репетицию через begin-helper** (issue #549 stage 2 — эксклюзивное создание под транзакционным замком; token печатается один раз в stdout):
    ```bash
-   DRY_SID="${CLAUDE_SESSION_ID:-noid}"
-   DRY_SAFE_SID=$(printf '%s' "$DRY_SID" | tr -cd 'A-Za-z0-9._-')
-   DRY_TOKEN=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-   DRY_OWNER="/tmp/iwe-dry-run-owner-${DRY_SAFE_SID:-noid}.token"
-   umask 077
-   printf '%s' "$DRY_TOKEN" > "$DRY_OWNER"
-   jq -nc --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg sid "$DRY_SID" \
-     --arg token "$DRY_TOKEN" --arg owner "$DRY_OWNER" \
-     '{created_at:$created,session_id:$sid,initiator:"audit-installation",owner_token:$token,owner_file:$owner}' \
-     > /tmp/iwe-dry-run.flag
+   bash "$IWE_SCRIPTS/dry-run-begin.sh" audit-installation "${CLAUDE_SESSION_ID:-}"
    ```
+   Helper печатает `gate_id=`, `owner_token=`, `owner_session_id=`. **Запомни все три значения из вывода tool-call'а** — shell-переменные между твоими Bash-вызовами не живут (Codex r2), а token хранить в файле нельзя (его прочитает репетиция). Активная чужая репетиция → helper завершится ошибкой с её gate_id.
 2. **Запустить subagent** через Agent tool (subagent_type=general-purpose, модель Sonnet) с промптом:
 
    ```
@@ -134,9 +147,9 @@ Coverage: N/4
    ```
 
 3. **Дождаться завершения subagent'а.**
-4. **Очистить sentinel:**
+4. **Завершить репетицию** (атомарный переход active→completed с capability token; sentinel снимается самим helper'ом после completed — Stop-хук теперь только идемпотентный fallback). Подставь значения, запомненные на шаге 1:
    ```bash
-   rm -f /tmp/iwe-dry-run.flag
+   bash "$IWE_SCRIPTS/dry-run-complete.sh" "<gate_id из шага 1>" rehearsal-finished "<owner_session_id из шага 1>" "<owner_token из шага 1>"
    ```
 5. **Сформировать секцию 6 отчёта:**
    ```markdown
@@ -183,7 +196,7 @@ Coverage: N/4
 Ты исполняешь роль VR.R.002 Аудитор (PACK-verification). Твоя задача — прочитать markdown-отчёт по аудиту инсталляции IWE и вынести verdict.
 
 Эталон:
-- VR.SC.005 (Service Clause): инсталляция должна иметь все критические L1-файлы, ритуалы должны загружаться, MCP должен отвечать, DS-strategy — быть git-репо.
+- VR.SC.005 (Service Clause): инсталляция должна иметь все критические L1-файлы, ритуалы должны загружаться, MCP должен отвечать, {{GOVERNANCE_REPO}} — быть git-репо.
 - Gate-критерии (из WP-265 §Gate-критерии):
   - ✅ — 0 critical gaps, ≤2 warnings
   - ⚠️ — 1+ warning или ≥3 minor gaps; работоспособно
@@ -202,7 +215,7 @@ Coverage: N/4
 - L1 (платформа): ✅/⚠️/❌ — короткое объяснение
 - Ритуалы: ✅/⚠️/❌ — ...
 - MCP: ✅/⚠️/❌ — ...
-- DS-strategy: ✅/⚠️/❌ — ...
+- {{GOVERNANCE_REPO}}: ✅/⚠️/❌ — ...
 
 **Критичные gaps (если есть):**
 - [список с указанием файла/компонента]
@@ -219,13 +232,11 @@ Coverage: N/4
 
 1. **Сохранить полный отчёт + verdict в файл:**
    ```bash
-   # Приоритет: workspace/scripts/ → $IWE_SCRIPTS (FMT-template/scripts/ для user-mode) → $HOME/IWE
-   if [ -d "$HOME/IWE/scripts" ]; then
-       AUDIT_LOG_DIR="$HOME/IWE/scripts"
-   elif [ -n "${IWE_SCRIPTS:-}" ] && [ -d "$IWE_SCRIPTS" ]; then
-       AUDIT_LOG_DIR="$IWE_SCRIPTS"
+   # Priority (#566): $IWE_SCRIPTS convention first, hardcode only as fallback → $HOME/IWE
+   if [ -d "${IWE_SCRIPTS:-$HOME/IWE/scripts}" ]; then
+       AUDIT_LOG_DIR="${IWE_SCRIPTS:-$HOME/IWE/scripts}"
    else
-       AUDIT_LOG_DIR="$HOME/IWE"
+       AUDIT_LOG_DIR="${IWE_WORKSPACE:-$HOME/IWE}"
    fi
    mkdir -p "$AUDIT_LOG_DIR"
    AUDIT_LOG="$AUDIT_LOG_DIR/iwe-audit-$(date +%Y%m%d-%H%M%S).log"
@@ -241,7 +252,7 @@ Coverage: N/4
 ## Ограничения текущей реализации
 
 - **Smoke-test покрывает один ритуал** (`/run-protocol close day`). Расширение на week-close / month-close — мини-РП, копия шага 2.5 с другими subcommand'ами.
-- **DS-strategy diff** — работает только если существует `FMT-strategy-template/` (или `templates/strategy-skeleton/`). Если нет — секция пометится «N/A».
+- **{{GOVERNANCE_REPO}} diff** — работает только если существует `FMT-strategy-template/` (или `templates/strategy-skeleton/`). Если нет — секция пометится «N/A».
 - **MCP healthcheck** — зависит от текущих доступных tools. Если набор изменится, обновить шаг 2.
 - **Sentinel sticky-state** — защита: TTL 10 мин в хуке + Stop-cleanup. Edge case: если хук изменён и не читает sentinel → блокировки не будет (fail-open). Защита: периодический re-test `/audit-installation` ловит регрессию.
 

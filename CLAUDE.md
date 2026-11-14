@@ -23,7 +23,7 @@
 1. **WP Gate:** ЛЮБОЕ задание → `memory/protocol-open.md` ДО начала работы. Новый РП → Ритуал согласования → явное «да»/«делаем»/«открывай»; без этого не регистрировать.
 2. **Push:** «заливай»/«запуши»/«закрывай» → commit + push без вопросов, ДО отчёта Закрытия. Любой Close: `git status --short` по всем репо → незафиксированное commit + push ДО следующего шага.
 3. **Close:** Триггер Закрытия → протокол Закрытия → выполнить.
-4. **Pull-on-Touch:** PreToolUse-хук автоматически делает best-effort `git pull --rebase --autostash` один раз на репо. Не выполняй ручной `cd && git pull`; при сбое хук сообщает `potentially stale`, процедура → `memory/reference/agent-core.md`.
+4. **Pull-on-Touch:** PreToolUse-хук при первом обращении к репо за сессию проверяет свежесть; чистую отставшую копию обновляет через `fetch` и `merge --ff-only --no-autostash`. При несохранённых правках или отказе оставляет их на месте и сообщает `potentially stale`. Не заменяй эту проверку ручным `pull`, `rebase` или `stash`; порядок → `memory/reference/agent-core.md`.
 5. **Чеклист-верификация:** Quick/Day Close — sub-agent Haiku R23 сверяет с чеклистом. Исключения: ≤15 мин или без изменений файлов.
 6. **Hooks/Scripts Bypass Gate (S-33):** без явного разрешения не менять `.claude/hooks|scripts/`, `.iwe-runtime/`, `FMT-exocortex-template/`, не обходить хуки; блок хука → bug-файл + пилоту + ждать. → `.claude/rules-lazy/hooks-bypass-gate.md`.
 7. **Автономность:** не спрашивать подтверждения — выполни → отчитайся. Исключения: необратимо-разрушительное; WP Gate Ритуал; choice-question. Полный текст → `.claude/rules-lazy/blocking-rules-full.md` п.7.
@@ -42,6 +42,7 @@
 - Начало работы → какие сервисы (MAP.002) затронуты?
 - Пользовательский сценарий → **SC Gate:** какое обещание (08-service-clauses/) затронуто?
 - Создание/размещение артефакта → **Routing Gate:** карта DP.KR.001 §5; «по аналогии с соседним» запрещено.
+- Создание нового файла-реестра/каталога с идентификаторами (своя система нумерации) → укажи область их уникальности и ответственного за схему; если область общая с другим реестром — найди место учёта схем и согласуй новую схему там, не заводи параллельную нумерацию молча.
 - Первое содержательное действие в репо → **Repo-Touch Gate:** прочитать `<repo>/CLAUDE.md`; блок «обязательно загружай» → загрузить ДО ответа.
 - Архитектурное решение → **АрхГейт** `/archgate`.
 - РП затрагивает PII → **Security Gate (B7.3):** §Б чеклист ArchGate ДО реализации; логирование PII = блокер.
@@ -57,8 +58,8 @@
 
 Файлы/репо → `memory/navigation.md` · Pack-репо → `memory/repo-type-rules.md` · терминология → `memory/hard-distinctions.md` · FPF/SOTA/Роли → `memory/fpf-reference.md`, `memory/sota-reference.md`, `memory/roles.md` · документ/чеклист → `memory/checklists.md`.
 
-Политика: ≤11 файлов; построчно проверяется только distinctions.md (≤150), остальное — суммарным M1/M2-бюджетом (WP-7 NR1.2); lazy-reference без лимита. Горизонты/frontmatter → `memory/memory-lifecycle-spec.md`; temporal metadata → `memory/protocol-work.md §2`.
-Рабочая директория: `{{HOME_DIR}}/IWE/`; `memory/` = симлинк на auto-memory.
+Политика: построчно проверяется только distinctions.md (≤150), остальное — суммарным M1/M2-бюджетом (WP-7 NR1.2); lazy-reference без лимита (issue #736: старое «≤11 файлов» не имело кода-исполнителя и разошлось с практикой — архитектура памяти давно перешла на HOT/WARM/COLD с бюджетом по токенам, не по числу файлов, см. `memory/memory-lifecycle-spec.md`). Горизонты/frontmatter → `memory/memory-lifecycle-spec.md`; temporal metadata → `memory/protocol-work.md §2`.
+Рабочая директория: `{{WORKSPACE_DIR}}/`; `memory/` = симлинк на auto-memory.
 
 ## 5. АрхГейт — ОБЯЗАТЕЛЬНАЯ оценка
 
@@ -74,6 +75,10 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 > **3 слоя:** L1 (§1-§7) = платформа (`update.sh`). L2 (§8) = staging. L3 (§9) = авторское.
 > Протоколы → `memory/protocol-*.md` · различения → `.claude/rules/distinctions.md` · форматирование → `.claude/rules/formatting.md` · стабильные знания → `memory/*.md` · свои правила → §8/§9.
+
+> **Extensions Gate (БЛОКИРУЮЩЕЕ для Edit/Write; советующее в целом):** пользовательские правила идут в `extensions/*.md`, настройки в файл параметров (образец `params.yaml.example`); новый project-local skill допустим в `.claude/skills/<name>/`, если такого каталога нет в `update-manifest.json` (issue #311); платформенные скиллы и `memory/protocol-*.md` напрямую не править (обновление их перезапишет). Хук перехватывает `Edit|Write`, но не разбирает произвольные Bash-команды: это защита от случайной правки, не граница безопасности. **`extensions/` поддерживает только плоские файлы верхнего уровня, без подкаталогов** — подкаталоги не зеркалируются в exocortex-бэкап и не восстанавливаются при переезде на другое устройство (issue #1310); это явный контракт, не пробел.
+
+> **Obsidian:** поддерживаемый vault — отдельный governance-репозиторий `{{GOVERNANCE_REPO}}`; корень `{{WORKSPACE_DIR}}` не открывать как vault из-за больших Markdown-файлов (например, `FPF/FPF-Spec.md`). Весь workspace просматривать через VS Code.
 
 <!-- PLATFORM-END -->
 
@@ -94,6 +99,7 @@ These rules cover repository synchronization only; preserve this project's exist
 - Integrate upstream automatically only at task startup, in a clean working tree, without an active merge/rebase/cherry-pick/bisect, and only by fast-forward to the inspected upstream commit (`git merge --ff-only <sha>`). Do not switch another task's branch. If dirty, diverged, detached or lacking an upstream, preserve the state and explain the required resolution. A fetch/network failure means freshness is UNKNOWN, not verified; read-only offline work may continue with that limitation stated.
 - Prefer a separate task branch (and a separate worktree for simultaneous local writers). Preserve existing repository rules for PRs, direct-main changes, acceptance and commits. Never automatically stash, discard changes, reset hard, force-push, delete refs or publish unrelated work to achieve synchronization. Hourly automation must only fetch and report.
 - Web/API agents: read this instruction and task files from one freshly resolved branch commit, rather than from chat memory. Immediately before writing, re-read the target branch head and relevant file/blob SHA; use the connector's conditional-write/expected-SHA mechanism where supported. If the base changed, re-read and recompute the patch; do not overwrite the concurrent change. If a safe conditional update is unavailable, use a new branch/PR and report that limitation.
+- Drive-backed workspace (for example, IWE_GD in ChatGPT + Google Drive + Obsidian): the Git rules above apply to actual Git development tasks, not ordinary Markdown edits through the Drive connector. Use Drive file IDs and current metadata to identify the target; re-read its content and metadata before an in-place update, and report whether the connector can enforce a revision precondition. Never modify Drive-synced `.git/` contents or claim an Obsidian laptop has received an edit until synchronization has been verified. GitHub Issues are optional, not a mandatory representation of work products; use GitHub for code/PR work when explicitly in scope.
 - Before an authorized push/publication, refresh the remote state and review the exact staged diff. Use an ordinary push; if rejected, fetch and reconcile explicitly. Before moving to another computer, send the authorized commits to GitHub (or clearly report that work remains local). Finish with branch, commit/PR, validation actually run, and any unpublished or conflicting changes. Never claim GitHub is updated from a local-only commit or an unmerged PR.
 <!-- DEN317-REPOSITORY-SYNC:END -->
 
@@ -110,6 +116,8 @@ These rules cover repository synchronization only; preserve this project's exist
 
 **NEVER `git add -u`, `git add .`, `git add -A`** — подхватывают изменения ДРУГИХ агентов (Kimi/Hermes работают параллельно) → неверная атрибуция. Стейджить только конкретные файлы; перед коммитом `git diff --cached --name-only`, лишнее — `git restore --staged`. Примеры → `memory/reference/agent-core.md`.
 
+**После `git mv` в этом же ходе — сверять содержимое, не только имя (issue #511).** Список имён из `--name-only` может выглядеть верным, а диф — пустым (rename без правок) или устаревшим (правки Edit'ом ушли не в тот путь). Если этим ходом был `git mv` любого из коммитуемых файлов: перед `git commit` прогнать `git diff --cached <новый_путь>` и убедиться, что нужные правки внутри; коммитить только новый путь после `git mv`, не старый; отдельно проверить код возврата `git add` перед переходом к `git commit`.
+
 ## Artifact Naming
 
 **Do not invent artifact names.** Names for sections, documents, RPs, and deliverables must come from the plan/task you received. If the task is silent on a name — report "need clarification on name" instead of making one up.
@@ -121,6 +129,10 @@ Discrepancy found (file ≠ plan, stale content): **report to pilot, do not sile
 ## Working Directory
 
 `{{WORKSPACE_DIR}}/`
+
+## FPF Usage
+
+Работа опирается на FPF/DPF → скилл `/fpf` (шаг 0 читает инструкцию автора (файл USING-FPF.md в копии FPF) и проверяет полный текст). Нет полного текста → сказать об этом пользователю и не делать вывод, который от него зависит; в ответе — версия копии, номера паттернов, допущения.
 
 ## Status Reporting — Agent Status Registry (РП-395)
 
@@ -167,29 +179,16 @@ Respond in Russian unless the user writes in English.
 
 ## 8. Staging (обкатка → шаблон)
 
-> Правила на обкатке (STAGING.md) → работают → переносятся в шаблон (L1). Новое поведение в §9 → ОДНОВРЕМЕННО строка в STAGING.md (`status: testing`). Промоция на Week Close (`validated`→`promoted`, `rejected` остаётся в §9 — не удалять) → скилл `/author-mode` и `.claude/rules-lazy/blocking-rules-full.md`.
-
-**Активная запись:** S-45 Agent Inbox (WP-324) — `inbox/agent/` + `iwe-agent-dispatcher.py`, промотировано в FMT `extensions/agent-inbox/`. Status: testing.
+> Раздел авторов шаблона: правила на обкатке и их промоция. В поставке пустой; свои правила ведите в `extensions/*.md` и в файле параметров.
 
 ---
 
-## 9. Авторское (только мой IWE)
+## 9. Авторское (ваши правила)
 
-> Элаборации всех пунктов → `memory/reference/agent-core.md`.
+> Раздел ваш: платформа его не наполняет. Правила проекта пишите внутри блока ниже, обновление шаблона блок USER-SPACE сохраняет.
 
-- **Obsidian:** поддерживаемый vault — отдельный governance-репозиторий `{{GOVERNANCE_REPO}}`; корень `{{WORKSPACE_DIR}}` не открывать как vault из-за больших Markdown-файлов (например, `FPF/FPF-Spec.md`). Весь workspace просматривать через VS Code.
-- **Комментарии кода — только EN (решение Андрея, 14.06.2026):** весь `{{WORKSPACE_DIR}}/**`; исключение — user-facing строки по языку интерфейса.
-- **Различения (авторские):** `memory/distinctions-warm.md` и `extensions/`; `.claude/rules/distinctions.md` — поставляемый платформенный hot-слой, пользовательские правки допустимы только внутри явного `USER-SPACE` блока.
-- **Именование:** governance-репо называется `DS-strategy` по умолчанию; рабочая директория `{{HOME_DIR}}/IWE/`.
-- **Extensions Gate (БЛОКИРУЮЩЕЕ для Edit/Write; советующее в целом):** пользовательские правила и настройки идут в `extensions/*.md` + `params.yaml`; новый project-local skill допустим в `.claude/skills/<name>/`, только если этот каталог отсутствует в `update-manifest.json` (issue #311). Существующий платформенный skill или `memory/protocol-*.md` напрямую не править; автор (`author_mode: true`) редактирует L1 как SoT и доставляет через `template-sync.sh`. Хук перехватывает `Edit|Write`, но не разбирает произвольные Bash-команды: это guardrail от случайной правки, не tool-independent security boundary.
-- **README.md (FMT-exocortex-template):** изменение структуры — по согласованию с владельцем.
-- **WP Entry Filter (S-47, БЛОКИРУЮЩЕЕ):** новый РП — только при явной связи с R1-R6 месяца или внешнем заказчике; иначе → `inbox/backlog-with-triggers.md`. Исключения: spin-off закрытого РП; прямое поручение пилота.
-- **Именование РП:** существительное-артефакт, только русский (Pack-ID допустим); реестр ≤80 символов → SYNC-CORE; переименование — синхронно REGISTRY+MEMORY.md+WeekPlan+DayPlan+WP-context.
-- **Память (S-35):** новые `memory/*.md` — обязательный frontmatter; шаблон и горизонты → `memory/memory-lifecycle-spec.md` (единственный источник).
-- **Security Audit Cadence (WP-212, S-36):** per-ArchGate (§Б B7.1 + STRIDE) · Week Close (`security-posture.md §3`) · Daily (tsekh-1) · Month Close (VR.R.002).
-- **WeekPlan/WeekReport split (WP-297):** WeekPlan = только интенты, WeekReport = только факты; при создании WeekPlan итоги уезжают в WeekReport.
-- **Режим «на пальцах» (S-37):** триггеры «объясни», «на пальцах», «что сделали», «простыми словами» → Response Style + `memory/feedback_response_clarity_for_pilot.md`.
-- **Календарный конвейер (WP-357):** SoT — `DS-strategy/calendar/process-catalog.yaml` (+ derived `date-ledger.yaml`, не редактировать); новый процесс = каталог + plist; спецификация → `docs/calendar-pipeline.md`.
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->
 
 ---
 

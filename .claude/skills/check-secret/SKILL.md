@@ -5,6 +5,7 @@ argument-hint: "<text-or-file-path>"
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/check-secret]
   phrases: []
@@ -49,17 +50,17 @@ bash "$IWE_SCRIPTS/route-task.sh" --skill check-secret --args "$ARGUMENTS"
 1. Перечислить найденные паттерны (с метками: Neon API key, GitHub token, и т.д.).
 2. Для каждого — рекомендация:
    - Если плейсхолдер/тест/документация — добавить маркер `# secret-ok` в строку или `[REDACTED]` placeholder.
-   - Если реальный секрет — НЕ публиковать; запустить cascade rotation (см. `DP.RUNBOOK.003-cascade-secret-rotation.md`); см. правило 25 в `feedback_behaviour.md`.
+   - Если реальный секрет — НЕ публиковать; запустить cascade rotation (см. `DP.RUNBOOK.003-cascade-secret-rotation.md`); правило: агент не запрашивает плейнтекст секрета, а пользователь не вставляет его в чат (передавать ссылку, имя переменной или путь к файлу); показанный секрет считается скомпрометированным: отозвать и заменить во всех местах хранения.
 3. После redaction — повторить проверку.
 
 ## Шаг 4. Лог
 
-Каждое использование скилла логируется в `~/IWE/.claude/logs/check-secret.jsonl` (только metadata: timestamp, hash аргумента, decision; **не сами секреты**).
+Каждое использование скилла логируется в `${IWE_WORKSPACE:-$HOME/IWE}/.claude/logs/check-secret.jsonl` (только metadata: timestamp, hash аргумента, decision; **не сами секреты**).
 
 ## Связи
 
 - **Слои защиты (issue #410, актуализировано 2026-08-12):** ровно два, не три — pre-commit хук (`scripts/pre-commit-secret-scan.sh`, автоматический) и этот скилл (ручной, до вставки в чат/публикацию). B7.7a (блок Bash) и B7.7b (PostToolUse redact) в поставке не существуют — если появятся, дописать сюда третьим слоем.
-- **Правило поведения:** Правило 25 в `memory/feedback_behaviour.md` — secrets никогда в чат как плейнтекст.
+- **Правило поведения:** secrets никогда не публикуются в чат как плейнтекст (если ведётся персональный журнал поведенческих правил — зафиксировать там же).
 - **Runbook:** `DP.RUNBOOK.003-cascade-secret-rotation.md` для процедуры reactive ротации.
 - **Канон паттернов:** `$IWE_SCRIPTS/pre-commit-secret-scan.sh` — единая точка для regex-паттернов; check.sh использует тот же набор.
 

@@ -179,7 +179,7 @@ epistemic_stage: emerging
 ## 1. Определение
 ## 2. Назначение
 ## 3. Структура
-## 4. Жизненный цикл
+## 4. Состояния и переходы
 ## 5. Связанные документы
 ```
 
@@ -321,9 +321,9 @@ epistemic_stage: emerging
 
 ### Шаг 8a: Пометка captures
 
-> После применения accept-кандидатов — пометить обработанные captures в `{{GOVERNANCE_REPO}}/inbox/captures.md`.
+> После применения accept-кандидатов — пометить обработанные captures в том файле, где найден capture: помесячный `{{GOVERNANCE_REPO}}/inbox/captures/YYYY-MM.md` (при включённой ротации) или легаси `{{GOVERNANCE_REPO}}/inbox/captures.md`.
 
-1. Для каждого accept-кандидата, который был взят из `captures.md`:
+1. Для каждого accept-кандидата, который был взят из captures-файла:
    - Добавить `[processed YYYY-MM-DD]` к заголовку записи
    - `[processed]` ставится **ТОЛЬКО** после подтверждённой записи в Pack (не при чтении)
 2. Для reject-кандидатов из captures.md — добавить `[rejected YYYY-MM-DD]` с причиной

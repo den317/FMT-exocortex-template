@@ -1,0 +1,109 @@
+# iwe-backup-sources.yaml — default backup sources outside ${HOME}/IWE
+#
+# WP-7 Phase 233a, 2026-10-16 (peer-session 2026-10-16-18-iwe-template-backup,
+# Claude+Kimi+Codex, round-loop, consensus reached).
+#
+# Problem: the only existing mechanism (backup-icloud.sh) covers
+# only ${HOME}/IWE. The AI agents' runtime directories (memory, conversation history,
+# configs) lie outside IWE and are not protected by anything — found in the incident of losing
+# ~/.claude/logs/style-violations.log with no way to restore the examples
+# of violations.
+#
+# Classification by RECOVERABILITY, not by location (a peer-session finding:
+# the division "logs=recoverable" was wrong — the specific incident directly
+# refutes it). Three tiers:
+#
+#   tier0_unique       — unique data, no second copy anywhere.
+#                         Back up ALWAYS, from the first implementation phase.
+#   tier1_scheduled     — recoverable with effort (time/manual work), but
+#                         not automatically. Back up on a schedule.
+#   tier2_optional      — reproducible automatically (reinstall,
+#                         re-download) or of low value. Back up
+#                         optionally, when explicitly enabled by the user.
+#
+# A new runtime subdirectory unknown to the script is included in tier1 BY DEFAULT
+# with the mark unknown=true — it is not silently excluded (peer-session
+# decision: "include by default and signal growth, do not
+# silently exclude").
+#
+# User's local override: ${HOME}/.iwe-backup-sources.local.yaml —
+# this file is NOT touched by a template update (update.sh). Values from there
+# supplement the defaults below; an entry with the same (expanded) path replaces
+# the default one — this way a source can, for example, be marked optional: true.
+# Override format — the same schema.
+#
+# optional: true — the source exists only when the agent is installed or
+# the storage method is chosen; its absence is not critical (issue #1351).
+# The working tree ${WORKSPACE_DIR} is always required, override does not
+# change this.
+
+schema_version: 1
+
+tier0_unique:
+  # The working tree is the only path that MUST exist for
+  # any template user (accounting for a non-standard WORKSPACE_DIR);
+  # the others are optional depending on whether specific agents are installed.
+  - path: "${WORKSPACE_DIR}"
+    agent: "core"
+    note: "рабочее дерево платформы — git-репозитории включаются ЦЕЛИКОМ, включая .git/ (пир-сессия отозвала исключение .git: непушнутые коммиты/stash/локальные ветки не восстановимы из remote)"
+  - path: "${HOME}/.claude/projects"
+    optional: true
+    agent: "claude"
+    note: "auto-memory (включает MEMORY.md) и полные стенограммы — невосстановимо"
+  - path: "${HOME}/.claude.json"
+    optional: true
+    agent: "claude"
+    note: "глобальный конфиг Claude Code (OAuth-токены, project history)"
+  - path: "${HOME}/.codex/config.toml"
+    optional: true
+    agent: "codex"
+    note: "конфиг Codex"
+  - path: "${HOME}/.gitconfig"
+    optional: true
+    agent: "core"
+    note: "git identity + signing key reference"
+  - path: "${HOME}/.git-credentials"
+    optional: true
+    agent: "core"
+    note: "HTTPS git-токены, если credential helper = store"
+
+tier1_scheduled:
+  - path: "${HOME}/.claude/logs"
+    agent: "claude"
+    note: "логи с фактурой (инцидент-триггер этой фазы: style-violations.log)"
+  - path: "${HOME}/.claude/state"
+    agent: "claude"
+  - path: "${HOME}/.codex"
+    agent: "codex"
+    note: "весь каталог Codex, кроме уже перечисленного в tier0"
+  - path: "${HOME}/.hermes"
+    agent: "hermes"
+  - path: "${HOME}/.kimi"
+    agent: "kimi"
+  - path: "${HOME}/.kimi-code"
+    agent: "kimi"
+  - path: "${HOME}/.grok"
+    agent: "grok"
+  - path: "${HOME}/.zshrc"
+    agent: "core"
+  - path: "${HOME}/.bash_profile"
+    agent: "core"
+
+tier2_optional:
+  - path: "${HOME}/.claude/file-history"
+    agent: "claude"
+    note: "история правок редактора — большая по объёму, частично восстановима из git"
+  - path: "${HOME}/.vscode"
+    agent: "core"
+    note: "расширения VS Code — восстановимы переустановкой"
+
+# Known-but-excluded — NOT backed up and no warning about absence (SSH/GPG/
+# Keychain). A separate follow-up (Phase 233d): its own protected mechanism,
+# not a general tar/restic snapshot without extra protection of private keys.
+known_excluded:
+  - path: "${HOME}/.ssh"
+    reason: "приватные ключи — отдельный защищённый механизм (Ф233д), не этот конвейер"
+  - path: "${HOME}/.gnupg"
+    reason: "GPG-ключи — отдельный защищённый механизм (Ф233д), не этот конвейер"
+  - path: "macOS Keychain"
+    reason: "системное хранилище, не файл — вне скоупа файлового бэкапа, документируется как известное ограничение"

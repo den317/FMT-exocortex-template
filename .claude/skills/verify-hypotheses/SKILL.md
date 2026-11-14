@@ -3,6 +3,7 @@ name: verify-hypotheses
 description: Сверка журнала гипотез (hypotheses-log.md) по запросу вне ритма week-close. Фильтрует записи со статусом «на сверке» и наступившей датой, сверяет критерий фальсификации с доступной фактурой, предлагает вердикт, пилот подтверждает, вердикт пишется новой записью. Вызывать на явную фразу пилота, не автоматически.
 version: 0.1.0
 status: experimental
+browser_safe: false
 layer: L1
 agents: single
 interaction: multi-step
@@ -12,6 +13,9 @@ gates_rationale: "IntegrationGate пропущен явным разрешени
 triggers:
   slash: [/verify-hypotheses]
   phrases: ["сверь гипотезы недели", "сверь гипотезы"]
+routing:
+  executor: sonnet
+  deterministic: false
 ---
 
 # /verify-hypotheses
@@ -80,7 +84,7 @@ Output: изменения сохранены, история гипотез н�
 ## Verification
 
 ```bash
-bash scripts/verify-skill.sh verify-hypotheses
+bash .claude/skills/skill-creator/scripts/verify-skill.sh verify-hypotheses
 ```
 Ожидаемый результат: PASS. Живая проверка — вызвать скилл вручную после 2026-09-01 (дата сверки первой записи H-001 в `hypotheses-log.md`), убедиться, что алгоритм находит именно эту запись и не находит других (журнал сейчас содержит только H-001).
 

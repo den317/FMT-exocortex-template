@@ -1,45 +1,95 @@
 #!/bin/bash
 # routing: helper  skill=day-close  called-by=haiku
 # see DP.SC.159, DP.ROLE.059
-# day-close.sh — Автоматические шаги Day Close (backup + reindex + linear sync + sessions)
+# day-close.sh — Automatic Day Close steps (backup + reindex + linear sync + sessions)
 #
-# Вызывается Claude из протокола Day Close (protocol-close.md § День, шаг 4).
-# Объединяет четыре механических операции в одну команду.
+# Called by Claude from the Day Close protocol (protocol-close.md § Day, step 4).
+# Combines four mechanical operations into one command.
 #
-# Использование:
-#   day-close.sh                # все четыре шага
-#   day-close.sh --backup       # только backup
-#   day-close.sh --reindex      # только reindex
-#   day-close.sh --linear       # только linear sync
-#   day-close.sh --sessions     # только консолидация сессий дня (DAP1-B, WP-7)
+# Usage:
+#   day-close.sh                # all four steps
+#   day-close.sh --backup       # backup only
+#   day-close.sh --reindex      # reindex only
+#   day-close.sh --linear       # linear sync only
+#   day-close.sh --sessions     # day's session consolidation only (DAP1-B, WP-7)
 #
-# Конфигурация: Пути заданы через переменные ниже — настроить при установке.
+# Configuration: Paths are set via the variables below — configure at installation.
 
 set -euo pipefail
 
-# === КОНФИГУРАЦИЯ (настроить при установке) ===
+# === CONFIGURATION (configure at installation) ===
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
+# issue #545: iwe_sessions_dir (resolver of the journals root per the writer's contract)
+source "$SCRIPT_DIR/lib/common.sh" || {
+  echo "FATAL: lib/common.sh not found next to $0 — промотированная копия устарела, обновите её вместе с шаблоном" >&2
+  exit 1
+}
 GOVERNANCE_REPO="${GOVERNANCE_REPO:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
 DS_STRATEGY="$WORKSPACE_DIR/$GOVERNANCE_REPO"
+# iwe_claude_project_slug PATH — the directory name Claude Code uses under
+# ~/.claude/projects for PATH: every character that is not an ASCII letter or
+# digit becomes "-" (so "/", ".", "_" and " " all do): /Users/alice/IWE → -Users-alice-IWE.
+# issue #869: three scripts used three different rules ("tr /", "tr /_.",
+# "tr /_ "), and none converted a Git Bash path ("/f/notes") to the native form
+# Claude Code actually sees ("F:\notes"). On Windows the native path comes from
+# cygpath; the drive-letter case does not matter there, the file system is
+# case-insensitive. A non-ASCII character becomes one dash (python3 counts characters
+# whatever the locale - launchd and cron run with none; the sed fallback does the same
+# only under a UTF-8 locale). Not verified against Claude Code for non-ASCII paths.
+# KEEP IN SYNC with setup.sh and update.sh — the same function body;
+# scripts/tests/test_issue_869_claude_slug.sh fails when the copies diverge.
+iwe_claude_project_slug() {
+    local path="$1" native=""
+    if command -v cygpath >/dev/null 2>&1; then
+        native=$(cygpath -w "$path" 2>/dev/null) || native=""
+        [ -n "$native" ] && path="$native"
+    fi
+    if command -v python3 >/dev/null 2>&1 \
+       && python3 -c 'import os, re, sys; sys.stdout.write(re.sub("[^A-Za-z0-9]", "-", os.fsencode(sys.argv[1]).decode("utf-8", "replace")))' "$path" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s' "$path" | sed 's/[^A-Za-z0-9]/-/g'
+}
+
 # Slug derived from WORKSPACE_DIR (not $HOME) so it matches Claude's project key
 # regardless of workspace location. Override via IWE_MEMORY_SRC if needed.
-WORKSPACE_SLUG=$(echo "$WORKSPACE_DIR" | tr '/_ ' '-')
+WORKSPACE_SLUG=$(iwe_claude_project_slug "$WORKSPACE_DIR")
 MEMORY_SRC="${IWE_MEMORY_SRC:-$HOME/.claude/projects/${WORKSPACE_SLUG}/memory}"
+# issue #1401: the backup reads the same memory the agents write. Agents and
+# .claude/hooks/memory-exocortex-sync.sh go through the $WORKSPACE_DIR/memory
+# link (CLAUDE.md §4); when the slug guess points at a different, stale
+# project folder, the backup used to copy that folder's old files over the
+# fresh mirror. The link wins, as in the hook; a disagreement is reported.
+MEMORY_SRC_MISMATCH=""
+if [ -z "${IWE_MEMORY_SRC:-}" ] && [ -d "$WORKSPACE_DIR/memory" ]; then
+  _link_memory=$(cd -P -- "$WORKSPACE_DIR/memory" 2>/dev/null && pwd -P) || _link_memory=""
+  _slug_memory=$(cd -P -- "$MEMORY_SRC" 2>/dev/null && pwd -P) || _slug_memory=""
+  if [ -n "$_link_memory" ]; then
+    if [ -n "$_slug_memory" ] && [ "$_slug_memory" != "$_link_memory" ]; then
+      MEMORY_SRC_MISMATCH="$_slug_memory"
+    fi
+    MEMORY_SRC="$_link_memory"
+  fi
+  unset _link_memory _slug_memory
+fi
 EXOCORTEX_DST="$DS_STRATEGY/exocortex"
-# MCP reindex — опциональный компонент (WP-187 iwe-knowledge Gateway заменяет локальный knowledge-mcp).
-# Переопределить путь можно через env IWE_SELECTIVE_REINDEX.
+# MCP reindex — an optional component (WP-187 iwe-knowledge Gateway replaces the local knowledge-mcp).
+# The path can be overridden via env IWE_SELECTIVE_REINDEX.
 # do_reindex() exit code for "some branches indexed, some failed" (see do_reindex).
 readonly RC_REINDEX_PARTIAL=3
+# A step that cannot run (missing script/dir/interpreter) is a SKIP, not an
+# ok: the summary and log must distinguish "done" from "not attempted" (#559).
+readonly RC_STEP_SKIPPED=90
 SELECTIVE_REINDEX="${IWE_SELECTIVE_REINDEX:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/selective-reindex.sh}"
 SOURCES_JSON="${IWE_SOURCES_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources.json}"
 SOURCES_PERSONAL_JSON="${IWE_SOURCES_PERSONAL_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources-personal.json}"
-# issue #463: linear_sync_path и защита day-rhythm-config.yaml ниже читаются через
-# python3+yaml с fallback на пустую строку — без pyyaml это не падает, а тихо
-# возвращает пустую строку, неотличимую от «поля нет в конфиге». Один явный
-# warning здесь вместо голого ModuleNotFoundError на каждом отдельном вызове.
+# issue #463: linear_sync_path and the day-rhythm-config.yaml guard below are read via
+# python3+yaml with a fallback to an empty string — without pyyaml this does not fail but quietly
+# returns an empty string, indistinguishable from "the field is not in the config". One explicit
+# warning here instead of a bare ModuleNotFoundError on every individual call.
 #
 # Evgenii Red Team review 2026-08-19 (defect #5 class): resolve python3+PyYAML
 # ONCE via the F6 shared resolver (scripts/lib/find-python3.sh, #453/#463),
@@ -68,7 +118,7 @@ BACKUP_MANIFEST_NAME=".day-close-backup-manifest.json"
 BACKUP_QUARANTINE_NAME=".day-close-backup-incomplete"
 readonly RC_BACKUP_WARNING=4
 BACKUP_WARNING=false
-# Linear sync: путь читается из params.yaml (ключ linear_sync_path)
+# Linear sync: the path is read from params.yaml (key linear_sync_path)
 PARAMS_YAML="$WORKSPACE_DIR/params.yaml"
 LINEAR_SYNC=""
 if [ -n "$RESOLVED_PYTHON3" ] && [ -f "$PARAMS_YAML" ]; then
@@ -78,9 +128,9 @@ if [ -n "$RESOLVED_PYTHON3" ] && [ -f "$PARAMS_YAML" ]; then
   fi
 fi
 LOG_FILE="${IWE_DAY_CLOSE_LOG:-$HOME/logs/day-close.log}"
-# === /КОНФИГУРАЦИЯ ===
+# === /CONFIGURATION ===
 
-# Цвета
+# Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -165,7 +215,6 @@ sync_owned_memory_files() {
 
   "$STDLIB_PYTHON3" - "$@" <<'PYEOF'
 import hashlib
-import fcntl
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -175,6 +224,15 @@ import sys
 import time
 import unicodedata
 import uuid
+
+# issue #933/#1099: fcntl does not exist on Windows. The POSIX transaction
+# journal below (fcntl.flock at the lock acquisition near the bottom of this
+# script) never runs on Windows -- dispatch exits through main_windows()
+# first -- but the unconditional import used to crash before that dispatch
+# was even reached, which took out the already-reviewed Windows branch along
+# with it (WP-7 F171, #911).
+if os.name != "nt":
+    import fcntl
 
 
 source_root = Path(sys.argv[1])
@@ -204,6 +262,220 @@ protected_roots = {
     "rules",
 }
 hash_pattern = re.compile(r"[0-9a-f]{64}")
+
+# issue #911: the POSIX implementation below needs fcntl and os.*(dir_fd=...),
+# neither available on Windows Python, and cannot run there at all. This
+# branch is a deliberately smaller Windows counterpart, not a port: consensus
+# from peer review (WP-7 F171, 24.09) was to under-promise rather than fake
+# parity with the POSIX transaction journal (hardlink quarantine, TOCTOU
+# hardening, NFKC+casefold path canonicalization) --
+#   - no deletion of stale files and no carrying their entries forward in the
+#     new manifest (a carried-forward entry can go stale itself between the
+#     hash check and the manifest write, with nothing here to catch it --
+#     the same race a reviewer found in an earlier draft of this branch);
+#   - cooperative locking is the existing precopy marker file, not a second,
+#     Windows-only lock primitive (msvcrt.locking) nothing else honors;
+#   - os.replace() is not atomic on Windows when the destination is held
+#     open by another process; a locked destination is skipped with a
+#     warning, not treated as a fatal error for the whole run.
+# The manifest this branch writes is always a SUBSET of what a POSIX run
+# would produce (only files this run actually copied) -- files it does not
+# mention are simply untracked, never silently deleted, by this branch or by
+# a later POSIX run reading its manifest.
+def is_windows_shell():
+    return os.name == "nt"
+
+
+def main_windows():
+    if not destination_root.is_dir():
+        warn(f"destination root is not a directory: {destination_root}")
+        raise SystemExit(1)
+
+    reserved_stems = {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+
+    def reject_unsafe_component(component):
+        if (
+            not component
+            or component in {".", ".."}
+            or component != component.strip()
+            or component.endswith(".")
+            or any(ch in component for ch in '<>:"|?*')
+            or any(ord(ch) < 32 for ch in component)
+        ):
+            raise ValueError(f"unsafe path component for Windows: {component!r}")
+        stem = component.rsplit(".", 1)[0].upper()
+        if stem in reserved_stems:
+            raise ValueError(f"reserved Windows device name: {component!r}")
+
+    def owned_relative_windows(raw):
+        if not isinstance(raw, str) or not raw or "\\" in raw or ":" in raw:
+            raise ValueError(f"unsafe manifest path: {raw!r}")
+        relative = PurePosixPath(raw)
+        if relative.is_absolute():
+            raise ValueError(f"unsafe manifest path: {raw!r}")
+        parts = relative.parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError(f"unsafe manifest path: {raw!r}")
+        for part in parts:
+            reject_unsafe_component(part)
+        head = parts[0]
+        # Cold review, WP-7 F171: an exact-string check here missed a
+        # same-named-but-different-case file (e.g. "Day-Rhythm-Config.yaml"),
+        # which is the SAME filesystem object as the real, protected one on
+        # any case-insensitive filesystem -- Windows always, and this
+        # machine's own APFS by default. protected_alias()/canonical_
+        # component() (defined above, NFKC+casefold) are the same check the
+        # POSIX branch already uses in validate_owned_relative() -- reuse
+        # them instead of a second, weaker one.
+        if head in protected_roots or (len(parts) == 1 and head in protected_files):
+            raise ValueError(f"manifest path is protected: {raw!r}")
+        if protected_alias(parts) is not None:
+            raise ValueError(f"manifest path aliases a protected path: {raw!r}")
+        return relative
+
+    def is_reparse_point(path):
+        try:
+            st = path.lstat()
+        except OSError:
+            return False
+        attrs = getattr(st, "st_file_attributes", 0)
+        return path.is_symlink() or bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+    def discover_windows():
+        discovered = {}
+        for directory, subdirectories, filenames in os.walk(source_root, followlinks=False):
+            relative_dir = Path(directory).relative_to(source_root)
+            parts = relative_dir.parts
+            kept = []
+            for name in sorted(subdirectories):
+                child = Path(directory) / name
+                if not parts and name in protected_roots:
+                    continue
+                # Cold review, WP-7 F171: this warning used to only fire for
+                # a reparse point below the top level -- a top-level one
+                # (e.g. memory/ itself symlinked, or an early sibling) hit
+                # the protected_roots branch above and was skipped silently.
+                if is_reparse_point(child):
+                    warn(f"skipped reparse point directory: {child}")
+                    continue
+                kept.append(name)
+            subdirectories[:] = kept
+            for name in sorted(filenames):
+                if Path(name).suffix not in {".md", ".yaml", ".yml"}:
+                    continue
+                if not parts and name in protected_files:
+                    continue
+                path = Path(directory) / name
+                if is_reparse_point(path):
+                    warn(f"skipped reparse point file: {path}")
+                    continue
+                raw = PurePosixPath(*parts, name).as_posix()
+                try:
+                    owned_relative_windows(raw)
+                except ValueError as error:
+                    warn(f"source file skipped ({error}): {raw}")
+                    continue
+                discovered[raw] = path
+        return discovered
+
+    def atomic_write_windows(target, data):
+        temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+        try:
+            # Cold review, WP-7 F171: mkdir() used to sit outside this try,
+            # so a stale non-directory at an intermediate path component
+            # crashed the whole run instead of skipping this one file, same
+            # as the write/replace failures below already handle.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(temporary, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            return True
+        except OSError as error:
+            # Not atomic on Windows when the destination is held open by
+            # another process (Codex, WP-7 F171 review) -- degrade to a
+            # skip-with-warning for this one file, not a fatal run.
+            warn(f"could not publish {target.name} (destination busy?): {error}")
+            return False
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+    lock_marker = destination_root / lock_path.name
+    if lock_marker.exists():
+        warn(
+            f"lock marker present ({lock_marker.name}) -- another backup may be "
+            "running, or one crashed and left it behind; refusing to start. If no "
+            "backup is actually running, delete this file and retry."
+        )
+        raise SystemExit(1)
+    try:
+        lock_marker.write_text("windows-backup\n", encoding="ascii")
+    except OSError as error:
+        # Cold review, WP-7 F171: write_text() is open+write+close, not
+        # atomic -- a failure partway through (e.g. ENOSPC) can leave a
+        # partial file that then permanently blocks every future run with
+        # no diagnostic pointing at this one. Clean up before exiting.
+        try:
+            lock_marker.unlink()
+        except FileNotFoundError:
+            pass
+        warn(f"could not create lock marker: {error}")
+        raise SystemExit(1)
+
+    try:
+        write_precopy_journal_windows()
+        sources = discover_windows()
+        copied = {}
+        for raw, path in sources.items():
+            try:
+                data = path.read_bytes()
+            except OSError as error:
+                warn(f"source file unreadable, skipped: {raw} ({error})")
+                continue
+            digest = hashlib.sha256(data).hexdigest()
+            target = destination_root.joinpath(*PurePosixPath(raw).parts)
+            if atomic_write_windows(target, data):
+                copied[raw] = digest
+        if params_source is not None and "params.yaml" in active_special_targets:
+            try:
+                atomic_write_windows(destination_root / "params.yaml", params_source.read_bytes())
+            except OSError as error:
+                warn(f"params.yaml not published: {error}")
+        manifest_path.write_bytes(manifest_payload(copied))
+        try:
+            quarantine_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            # Cold review, WP-7 F171: copying and the manifest write above
+            # already succeeded -- a transient failure on this purely
+            # cosmetic cleanup step must not turn a real success into a
+            # reported "backup failed" by escalating to the outer handler.
+            warn(f"precopy marker left behind (harmless, cleared on next run): {error}")
+        print(f"owned memory files (windows compatibility mode): {len(copied)}", file=sys.stderr)
+    finally:
+        try:
+            lock_marker.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_precopy_journal_windows():
+    quarantine_path.write_bytes(b'{"schema_version":1,"state":"precopy"}\n')
+
+
+# Dispatch happens at the bottom of the script, after every function this
+# branch calls (manifest_payload among them) is defined -- see the matching
+# `if is_windows_shell():` right before the POSIX module-level flow starts.
 
 
 class PreflightError(RuntimeError):
@@ -344,7 +616,11 @@ def open_destination_parent(relative, create_parents):
                     return None
                 os.mkdir(component, mode=0o700, dir_fd=descriptor)
                 os.fsync(descriptor)
-                entry_stat = exact_entry_stat(descriptor, component)
+                # direct stat avoids os.listdir fd-position issue on btrfs (issue #1181)
+                try:
+                    entry_stat = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    entry_stat = None
             if entry_stat is None or not stat.S_ISDIR(entry_stat.st_mode):
                 raise PreflightError(
                     f"destination intermediate component is not a directory: {component}"
@@ -1211,6 +1487,20 @@ def recover_active_journal(journal):
 
 
 destination_root.mkdir(parents=True, exist_ok=True)
+
+if is_windows_shell():
+    warn(
+        "Windows compatibility mode: no descriptor-bound TOCTOU protection, no "
+        "hardlink quarantine, no POSIX NFKC+casefold path canonicalization; "
+        "stale files are not removed in this mode."
+    )
+    try:
+        main_windows()
+    except (OSError, UnicodeError, ValueError) as error:
+        warn(f"backup failed ({error})")
+        raise SystemExit(1)
+    raise SystemExit(0)
+
 if destination_root.is_symlink():
     raise SystemExit("destination exocortex root must not be a symlink")
 try:
@@ -1389,13 +1679,63 @@ PYEOF
   atomic_copy_file "$rhythm_src" "$rhythm_dst" "day-rhythm-config.yaml"
 }
 
-# --- Шаг 1: Backup memory/ + CLAUDE.md → exocortex/ ---
+# resolve_memory_src_fallback — issue #637: WORKSPACE_SLUG matches Claude's
+# project key only when the CLI was launched from WORKSPACE_DIR itself; launched
+# from a parent (e.g. workspace at ~/projects/IWE, CLI started in ~/projects)
+# the key slugs the launch cwd instead and the primary guess misses by one
+# level. Tries, in order: (1) the exact WORKSPACE_SLUG match already computed
+# into MEMORY_SRC, (2) the sole memory/ dir among ~/.claude/projects/*/ if
+# there is exactly one (ambiguous with 2+, so skipped rather than guessed),
+# (3) $GOVERNANCE_REPO/memory (the memory/ symlink CLAUDE.md §4 documents).
+# Prints which tier matched to stderr so a chosen fallback is never silent.
+resolve_memory_src_fallback() {
+  local d candidates=()
+  for d in "$HOME"/.claude/projects/*/memory; do
+    [ -d "$d" ] && candidates+=("$d")
+  done
+  if [ "${#candidates[@]}" -eq 1 ]; then
+    warn "  memory source: WORKSPACE_SLUG guess missed, using sole match ${candidates[0]}"
+    printf '%s\n' "${candidates[0]}"
+    return 0
+  fi
+  if [ -d "$DS_STRATEGY/memory" ]; then
+    warn "  memory source: WORKSPACE_SLUG guess missed, using $DS_STRATEGY/memory"
+    printf '%s\n' "$DS_STRATEGY/memory"
+    return 0
+  fi
+  return 1
+}
+
+# --- Step 1: Backup memory/ + CLAUDE.md → exocortex/ ---
+# do_backup [TARGET] — copies into TARGET (default: the canon's exocortex/). The
+# helpers below read EXOCORTEX_DST, so the local shadows the global for them too.
+# A frozen canon is never written: main() routes that case to do_backup_frozen
+# (issue #1279), which calls this function with a snapshot directory as TARGET.
 do_backup() {
-  log "Шаг 1/3: Backup memory/ → exocortex/"
+  local EXOCORTEX_DST="${1:-$EXOCORTEX_DST}"
+  log "Шаг 1/3: Backup memory/ → $EXOCORTEX_DST/"
 
   if [ ! -d "$MEMORY_SRC" ]; then
-    err "Memory source not found: $MEMORY_SRC"
-    return 1
+    # issue #536 regression test asserts an explicit IWE_MEMORY_SRC override
+    # that doesn't exist is a real misconfiguration (hard fail, not silent
+    # skip) — the fallback chain below is only for the auto-guessed default
+    # missing its target, not for a caller who named a specific path.
+    if [ -n "${IWE_MEMORY_SRC:-}" ]; then
+      err "Memory source not found: $MEMORY_SRC"
+      return 1
+    fi
+    local fallback
+    if fallback="$(resolve_memory_src_fallback)"; then
+      MEMORY_SRC="$fallback"
+    else
+      warn "Memory source not found: $MEMORY_SRC (no unambiguous fallback either) — backup skipped"
+      return "$RC_STEP_SKIPPED"
+    fi
+  fi
+
+  if [ -n "$MEMORY_SRC_MISMATCH" ]; then
+    warn "  memory source: беру $MEMORY_SRC (ссылка memory/ рабочей установки), а не $MEMORY_SRC_MISMATCH (папка по имени проекта) — они разошлись, проверьте, какая из них устарела (issue #1401)"
+    BACKUP_WARNING=true
   fi
 
   mkdir -p "$EXOCORTEX_DST"
@@ -1426,7 +1766,36 @@ do_backup() {
   # a dedicated subtree so recovery never confuses platform rules with memory.
   if [ -d "$WORKSPACE_DIR/.claude/rules" ]; then
     mkdir -p "$EXOCORTEX_DST/rules"
-    rsync -a --delete "$WORKSPACE_DIR/.claude/rules/" "$EXOCORTEX_DST/rules/"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --delete "$WORKSPACE_DIR/.claude/rules/" "$EXOCORTEX_DST/rules/"
+    else
+      # issue #1099: Git Bash ships no rsync. Copy into a sibling first and swap
+      # only after the copy succeeded, so a failed copy never leaves the mirror
+      # empty. The trailing "/." copies dotfiles as well.
+      rules_tmp="$EXOCORTEX_DST/rules.new.$$"
+      rules_old="$EXOCORTEX_DST/rules.old.$$"
+      rm -rf "$rules_tmp" "$rules_old"
+      if ! { mkdir -p "$rules_tmp" \
+             && cp -pR "$WORKSPACE_DIR/.claude/rules/." "$rules_tmp/"; }; then
+        rm -rf "$rules_tmp"
+        echo "ERROR: rules mirror copy failed without rsync" >&2
+        return 1
+      fi
+      # Set the previous mirror aside before the swap, so a failed move can put
+      # it back instead of leaving no mirror at all.
+      if [ -e "$EXOCORTEX_DST/rules" ] && ! mv "$EXOCORTEX_DST/rules" "$rules_old"; then
+        rm -rf "$rules_tmp"
+        echo "ERROR: rules mirror swap failed without rsync" >&2
+        return 1
+      fi
+      if ! mv "$rules_tmp" "$EXOCORTEX_DST/rules"; then
+        [ -e "$rules_old" ] && mv "$rules_old" "$EXOCORTEX_DST/rules"
+        rm -rf "$rules_tmp"
+        echo "ERROR: rules mirror swap failed without rsync" >&2
+        return 1
+      fi
+      rm -rf "$rules_old"
+    fi
   fi
 
   # day-rhythm is also a separate root artefact. Exact bytes win except for a
@@ -1434,8 +1803,8 @@ do_backup() {
   # destination list. No YAML parser means preserve rather than guess.
   backup_day_rhythm_config || return 1
 
-  # issue #217: обратная подстановка $HOME -> {{HOME_DIR}} делает бэкап ОС-агностичным
-  # (симметрично прямой подстановке в setup.sh и restore-from-exocortex.sh).
+  # issue #217: reverse substitution $HOME -> {{HOME_DIR}} makes the backup OS-agnostic
+  # (symmetric to the forward substitution in setup.sh and restore-from-exocortex.sh).
   if [ -f "$WORKSPACE_DIR/CLAUDE.md" ]; then
     atomic_instruction_backup \
       "$WORKSPACE_DIR/CLAUDE.md" "$EXOCORTEX_DST/CLAUDE.md" "CLAUDE.md" || return 1
@@ -1454,9 +1823,61 @@ do_backup() {
   fi
 }
 
-# iwe_repo_dirs — печатает поддиректории с .git, дедуплицированные по реальному
-# физическому пути (repo-symlink алиас иначе считается отдельным репозиторием
-# наравне с оригиналом — двойной reindex одного источника, найдено 2026-07-17).
+# issue #1279: the same freeze condition as session-guard.sh FROZEN_CANONICAL_PATHS
+# and .claude/hooks/memory-exocortex-sync.sh (duplicated, KEEP IN SYNC): frozen by
+# default, IWE_FROZEN_CANONICAL_PATH="" disables it, another path freezes that one.
+# A run holding --canonical-owner (IWE_CANONICAL_OWNER, set by strategist.sh) may
+# write the canon directly.
+exocortex_canon_frozen() {
+  [ -z "${IWE_CANONICAL_OWNER:-}" ] || return 1
+  if [ -n "${IWE_FROZEN_CANONICAL_PATH+x}" ] && [ -z "$IWE_FROZEN_CANONICAL_PATH" ]; then
+    return 1
+  fi
+  local frozen="${IWE_FROZEN_CANONICAL_PATH:-$DS_STRATEGY}" frozen_real canon_real
+  frozen_real=$(cd "$frozen" 2>/dev/null && pwd -P) || return 1
+  canon_real=$(cd "$DS_STRATEGY" 2>/dev/null && pwd -P) || return 1
+  [ "$frozen_real" = "$canon_real" ]
+}
+
+# Frozen canon: a durable snapshot is taken synchronously (local, fast) and the
+# publish through an isolated worktree + ds-publish.sh runs in the background
+# (scripts/exocortex-publish.sh). The previous attempt's outcome is surfaced
+# here, so a failing publish is never hidden behind a green step.
+do_backup_frozen() {
+  local publisher="$SCRIPT_DIR/exocortex-publish.sh" rc=0 last=""
+  log "Шаг 1/3: Backup memory/ → снимок ($GOVERNANCE_REPO заморожен, канон не пишется)"
+  if [ ! -f "$publisher" ]; then
+    err "  exocortex-publish.sh не найден рядом с day-close.sh — бэкап памяти не выполнен"
+    return 1
+  fi
+  bash "$publisher" snapshot || rc=$?
+  case "$rc" in
+    0) ;;
+    "$RC_STEP_SKIPPED") return "$RC_STEP_SKIPPED" ;;
+    *) err "  снимок памяти не сохранён (код $rc)"; return 1 ;;
+  esac
+  local prev_rc=0
+  last=$(bash "$publisher" status 2>/dev/null) || prev_rc=$?
+  if bash "$publisher" publish --background >/dev/null 2>&1; then
+    log "  снимок памяти сохранён, публикация запущена в фоне (или поставлена в очередь)"
+  else
+    warn "  снимок памяти сохранён, но фоновую публикацию запустить не удалось — повтор при следующем запуске"
+    BACKUP_WARNING=true
+  fi
+  if [ "$prev_rc" -eq 3 ]; then
+    warn "  ⚠ $last"
+    BACKUP_WARNING=true
+  elif [ -n "$last" ]; then
+    log "  предыдущая попытка: $last"
+  fi
+  if $BACKUP_WARNING; then
+    return "$RC_BACKUP_WARNING"
+  fi
+}
+
+# iwe_repo_dirs — prints subdirectories with .git, deduplicated by real
+# physical path (a repo-symlink alias would otherwise count as a separate repository
+# alongside the original — a double reindex of one source, found 2026-07-17).
 iwe_repo_dirs() {
   local repo real seen=""
   for repo in "$@"; do
@@ -1470,22 +1891,22 @@ iwe_repo_dirs() {
   done
 }
 
-# --- Шаг 2: Knowledge-MCP reindex ---
+# --- Step 2: Knowledge-MCP reindex ---
 do_reindex() {
   log "Шаг 2/3: Knowledge-MCP reindex"
 
   if [ ! -x "$SELECTIVE_REINDEX" ]; then
     warn "  selective-reindex.sh не найден: $SELECTIVE_REINDEX — пропуск"
-    return 0
+    return "$RC_STEP_SKIPPED"
   fi
 
   if [ -z "$RESOLVED_PYTHON3" ]; then
     warn "  reindex: пропущено — pyyaml не найден (см. предупреждение выше)"
-    return 0
+    return "$RC_STEP_SKIPPED"
   fi
 
-  # Маппинг dir→source+config из L2 (sources.json) и L4 (sources-personal.json)
-  # Python резолвит path→git-root, чтобы связать dirname репо с source-именем.
+  # Mapping dir→source+config from L2 (sources.json) and L4 (sources-personal.json)
+  # Python resolves path→git-root to link the repo dirname with the source name.
   local dir_map
   dir_map=$("$RESOLVED_PYTHON3" - "$SOURCES_JSON" "$SOURCES_PERSONAL_JSON" << 'PYEOF'
 import sys, json, os
@@ -1502,7 +1923,7 @@ for config_path in sys.argv[1:]:
 PYEOF
   ) || { warn "  Mapping build failed — пропуск reindex"; return 0; }
 
-  # Определяем, какие Pack/DS были изменены сегодня
+  # Determine which Pack/DS were changed today
   local l2_sources="" l4_sources=""
   while IFS= read -r repo; do
     local repo_name
@@ -1538,7 +1959,7 @@ PYEOF
   # stalled on a failed L4 while L2 had already indexed 3078/2116 docs).
   local l2_rc=0 l4_rc=0 ran=0 failed=0
 
-  # Вызов 1: L2 источники (sources.json — дефолт selective-reindex)
+  # Call 1: L2 sources (sources.json — the selective-reindex default)
   if [ -n "$l2_sources" ]; then
     log "  L2 источники:$l2_sources"
     ran=$((ran + 1))
@@ -1550,7 +1971,7 @@ PYEOF
     fi
   fi
 
-  # Вызов 2: L4 источники (sources-personal.json через SOURCES_CONFIG)
+  # Call 2: L4 sources (sources-personal.json via SOURCES_CONFIG)
   if [ -n "$l4_sources" ]; then
     log "  L4 источники:$l4_sources"
     ran=$((ran + 1))
@@ -1572,111 +1993,154 @@ PYEOF
   fi
 }
 
-# --- Шаг 3: Linear sync ---
+# --- Step 3: Linear sync ---
 do_linear() {
   log "Шаг 3/3: Linear sync"
 
   if [ ! -x "$LINEAR_SYNC" ]; then
     warn "  linear-sync.sh не найден: $LINEAR_SYNC — пропуск"
-    return 0
+    return "$RC_STEP_SKIPPED"
   fi
 
   "$LINEAR_SYNC"
 }
 
-# --- Шаг 4: Консолидация сессий дня (DAP1-B, WP-7) ---
+# --- Step 4: Consolidation of the day's sessions (DAP1-B, WP-7) ---
 do_session_consolidation() {
   log "Шаг 4/4: Консолидация сессий дня"
 
   if [ -z "$RESOLVED_PYTHON3" ]; then
     warn "  Консолидация сессий: пропущено — pyyaml не найден (см. предупреждение выше)"
-    return 0
+    return "$RC_STEP_SKIPPED"
   fi
 
   local today
   today=$(date +%Y-%m-%d)
   local month_dir
   month_dir=$(date +%Y-%m)
-  local sessions_root="$DS_STRATEGY/sessions/$month_dir"
+  # issue #545: journals root — by the same contract as the writer
+  # (session-guard.sh): MC-sessions after migration, legacy otherwise.
+  local sessions_base
+  if ! sessions_base=$(iwe_sessions_dir); then
+    warn "  IWE_SESSIONS_ROOT=${IWE_SESSIONS_ROOT:-} недоступен — консолидация читает legacy-путь"
+    sessions_base="$DS_STRATEGY/sessions"
+  fi
+  local sessions_root="$sessions_base/$month_dir"
   local output_file="$DS_STRATEGY/current/sessions-today.md"
 
   if [ ! -d "$sessions_root" ]; then
-    warn "  Папка sessions/$month_dir не найдена — пропуск"
-    return 0
+    warn "  Папка $sessions_root не найдена — пропуск"
+    return "$RC_STEP_SKIPPED"
   fi
 
-  # Сканируем meta.yaml для сессий сегодняшнего дня
-  local entries=()
-  while IFS= read -r meta; do
-    local session_dir
-    session_dir=$(dirname "$meta")
-    local session_id
-    session_id=$(basename "$session_dir")
+  # session-guard writes ordinary sessions as flat Markdown ORZ files. Peer
+  # sessions additionally have meta.yaml under YYYY-MM/DD/SESSION_ID. Read both
+  # formats once and let a valid meta.yaml replace its matching flat ORZ row.
+  local entries
+  if ! entries=$("$RESOLVED_PYTHON3" - "$sessions_root" "$today" <<'PY'
+from pathlib import Path
+import re
+import sys
 
-    # Читаем task_id и task_description из meta.yaml (python для YAML)
-    local task_id task_desc start_time
-    task_id=$("$RESOLVED_PYTHON3" -c "
-import sys, yaml
-with open('$meta') as f:
-    d = yaml.safe_load(f)
-print(d.get('task_id', '') or '')
-" 2>/dev/null || echo "")
-    task_desc=$("$RESOLVED_PYTHON3" -c "
-import sys, yaml
-with open('$meta') as f:
-    d = yaml.safe_load(f)
-desc = d.get('task_description', '') or ''
-print(desc[:80] + ('...' if len(desc) > 80 else ''))
-" 2>/dev/null || echo "")
-    start_time=$("$RESOLVED_PYTHON3" -c "
-import sys, yaml
-with open('$meta') as f:
-    d = yaml.safe_load(f)
-t = str(d.get('start_time', '') or '')
-print(t[11:16] if len(t) >= 16 else '')
-" 2>/dev/null || echo "")
-
-    # Только если task_id не пустой — WP-явная сессия
-    if [ -n "$task_id" ]; then
-      entries+=("| $start_time | $task_id | $task_desc |")
-    fi
-  done < <(find "$sessions_root" -maxdepth 2 -name "meta.yaml" 2>/dev/null \
-    | while IFS= read -r f; do
-        # Проверяем дату в meta.yaml
-        date_val=$("$RESOLVED_PYTHON3" -c "
 import yaml
-with open('$f') as fh:
-    d = yaml.safe_load(fh)
-print(str(d.get('date','') or ''))
-" 2>/dev/null || echo "")
-        if [ "$date_val" = "$today" ]; then
-          echo "$f"
-        fi
-      done | sort)
 
-  mkdir -p "$(dirname "$output_file")"
+root = Path(sys.argv[1])
+today = sys.argv[2]
+day = today[-2:]
+by_session = {}
 
-  if [ ${#entries[@]} -eq 0 ]; then
+
+def read_yaml(path, content):
+    try:
+        data = yaml.safe_load(content) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"WARN: cannot parse session {path}: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        print(f"WARN: session data is not a mapping: {path}", file=sys.stderr)
+        return None
+    return data
+
+
+def add_session(session_id, data, description):
+    if str(data.get("date", "")) != today:
+        return
+    wp = str(data.get("task_id") or data.get("wp") or "")
+    if not re.fullmatch(r"WP-[1-9][0-9]*", wp):
+        return
+    start = str(data.get("start_time") or "")
+    time = start[11:16] if len(start) >= 16 else "—"
+    description = re.sub(r"\s+", " ", str(description or "")).replace("|", r"\|")
+    if len(description) > 80:
+        description = description[:80] + "..."
+    by_session[session_id] = (time, wp, description)
+
+
+for path in sorted(root.glob(f"{today}-*.md")):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"WARN: cannot read session {path}: {exc}", file=sys.stderr)
+        continue
+    if not lines or lines[0] != "---":
+        continue
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        print(f"WARN: unclosed frontmatter: {path}", file=sys.stderr)
+        continue
+    data = read_yaml(path, "\n".join(lines[1:end]))
+    if data is None:
+        continue
+    title = next((line[2:] for line in lines[end + 1:] if line.startswith("# ")), "")
+    description = title.split(" — ", 1)[-1] if title else ""
+    add_session(str(data.get("session_id") or path.stem), data, description)
+
+# Both legacy YYYY-MM/SESSION_ID/meta.yaml and current YYYY-MM/DD/SESSION_ID/meta.yaml.
+meta_paths = sorted((*root.glob(f"{today}-*/meta.yaml"),
+                     *(root / day).glob(f"{today}-*/meta.yaml")))
+for path in meta_paths:
+    try:
+        data = read_yaml(path, path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"WARN: cannot read session {path}: {exc}", file=sys.stderr)
+        continue
+    if data is None:
+        continue
+    add_session(str(data.get("session_id") or path.parent.name), data,
+                data.get("task_description") or "")
+
+for session_id in sorted(by_session):
+    time, wp, description = by_session[session_id]
+    print(f"| {time} | {wp} | {description} |")
+PY
+  ); then
+    warn "  Консолидация сессий: не удалось прочитать журналы"
+    return 1
+  fi
+
+  if [ -z "$entries" ]; then
     log "  Нет WP-сессий за $today — sessions-today.md не записан"
     return 0
   fi
 
+  mkdir -p "$(dirname "$output_file")"
   {
     echo "<!-- sessions-today: $today — auto-generated by day-close.sh -->"
     echo "## Сессии дня $today"
     echo ""
     echo "| Время | РП | Задача |"
     echo "|-------|----|--------|"
-    for e in "${entries[@]}"; do
-      echo "$e"
-    done
+    printf '%s\n' "$entries"
     echo ""
   } > "$output_file"
 
-  log "  Записано ${#entries[@]} сессий → $(basename "$output_file")"
+  local count
+  count=$(printf '%s\n' "$entries" | wc -l | tr -d ' ')
+  log "  Записано $count сессий → $(basename "$output_file")"
 }
 
-# --- Лог ---
+# --- Log ---
 write_log() {
   local date_str
   date_str=$(date "+%Y-%m-%d %H:%M")
@@ -1686,6 +2150,14 @@ write_log() {
 
 # --- Main ---
 main() {
+  # Internal mode for scripts/exocortex-publish.sh: step 1 only, into the given
+  # snapshot directory instead of the canon; no day-close log line.
+  if [ "${1:-}" = "--exocortex-snapshot" ]; then
+    [ "$#" -eq 2 ] && [ -n "$2" ] || { err "Использование: day-close.sh --exocortex-snapshot DIR"; return 1; }
+    do_backup "$2"
+    return $?
+  fi
+
   local do_all=true
   local run_backup=false
   local run_reindex=false
@@ -1723,10 +2195,15 @@ main() {
 
   if $run_backup; then
     local backup_rc=0
-    do_backup || backup_rc=$?
+    if exocortex_canon_frozen; then
+      do_backup_frozen || backup_rc=$?
+    else
+      do_backup || backup_rc=$?
+    fi
     case "$backup_rc" in
       0)                     backup_status="ok" ;;
       "$RC_BACKUP_WARNING") backup_status="warn" ;;
+      "$RC_STEP_SKIPPED")    backup_status="skip" ;;
       *)                     backup_status="fail" ;;
     esac
   fi
@@ -1737,16 +2214,33 @@ main() {
     case "$reindex_rc" in
       0)                     reindex_status="ok" ;;
       "$RC_REINDEX_PARTIAL") reindex_status="partial" ;;
+      "$RC_STEP_SKIPPED")    reindex_status="skip" ;;
       *)                     reindex_status="fail" ;;
     esac
   fi
 
+  # skip must not read as fail: a template install legitimately lacks the
+  # optional components these steps need (#559 follow-up — cold review found
+  # the RC_STEP_SKIPPED returns landed without this mapping, turning the old
+  # false-ok into a false-FAIL with exit 1).
   if $run_linear; then
-    if do_linear; then linear_status="ok"; else linear_status="fail"; fi
+    local linear_rc=0
+    do_linear || linear_rc=$?
+    case "$linear_rc" in
+      0)                  linear_status="ok" ;;
+      "$RC_STEP_SKIPPED") linear_status="skip" ;;
+      *)                  linear_status="fail" ;;
+    esac
   fi
 
   if $run_sessions; then
-    if do_session_consolidation; then sessions_status="ok"; else sessions_status="fail"; fi
+    local sessions_rc=0
+    do_session_consolidation || sessions_rc=$?
+    case "$sessions_rc" in
+      0)                  sessions_status="ok" ;;
+      "$RC_STEP_SKIPPED") sessions_status="skip" ;;
+      *)                  sessions_status="fail" ;;
+    esac
   fi
 
   write_log "$backup_status" "$reindex_status" "$linear_status" "$sessions_status"

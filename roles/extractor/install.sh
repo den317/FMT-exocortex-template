@@ -1,7 +1,7 @@
 #!/bin/bash
-# Extractor: установка launchd-агента для inbox-check
-# Запускает inbox-check каждые 3 часа.
-# WP-273 Этап 2: plist берётся из $IWE_RUNTIME (Generated runtime, F).
+# Extractor: installation of the launchd agent for inbox-check
+# Runs inbox-check every 3 hours.
+# WP-273 Stage 2: the plist is taken from $IWE_RUNTIME (Generated runtime, F).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,16 +21,27 @@ else
     echo "  ⚠ Legacy mode: используются плейсхолдеры из FMT-substituted (запустите setup.sh ≥0.29.0 для архитектуры F)"
 fi
 
+# WP-5 Phase 46: the scheduled run is headless — warn now (not blocking) if Claude
+# Code has no login at all, instead of a silent failure at the first 3h tick.
+# The saved subscription token is picked up by extractor.sh load_env, so its
+# presence counts even though `claude auth status` here does not see it.
+if [ ! -f "$HOME/.secrets/claude_code_oauth_token" ] \
+   && command -v claude >/dev/null 2>&1 \
+   && ! claude auth status --json >/dev/null 2>&1; then
+    echo "  ⚠ Claude Code не подключён — автоматический inbox-check не сможет войти."
+    echo "    Выполните: bash \$IWE_TEMPLATE/roles/extractor/scripts/connect.sh"
+fi
+
 echo "Installing Extractor launchd agent..."
 echo "  PLIST_SRC: $PLIST_SRC"
 
-# Проверяем что plist существует
+# Check that the plist exists
 if [ ! -f "$PLIST_SRC" ]; then
     echo "ERROR: $PLIST_SRC not found"
     exit 1
 fi
 
-# WP-273 R5 fix: fail-fast если plist содержит literal {{...}}
+# WP-273 R5 fix: fail-fast if the plist contains a literal {{...}}
 if grep -qE '\{\{[A-Z_]+\}\}' "$PLIST_SRC" 2>/dev/null; then
     echo "ERROR: $PLIST_SRC содержит незаменённые плейсхолдеры:" >&2
     grep -oE '\{\{[A-Z_]+\}\}' "$PLIST_SRC" | sort -u | sed 's/^/  /' >&2
@@ -42,7 +53,7 @@ if grep -qE '\{\{[A-Z_]+\}\}' "$PLIST_SRC" 2>/dev/null; then
     exit 2
 fi
 
-# Делаем скрипт исполняемым (runtime path)
+# Make the script executable (runtime path)
 if [ -f "$SCRIPT_TARGET" ]; then
     chmod +x "$SCRIPT_TARGET"
 fi
@@ -109,17 +120,25 @@ fi
 
 mkdir -p "$(dirname "$PLIST_DST")"
 
-# Выгружаем старый агент (если есть)
-launchctl unload "$PLIST_DST" 2>/dev/null || true
+# SETUP_CI installs files only: unloading a host agent is still a global write.
+if [ -z "${SETUP_CI:-}" ]; then
+    launchctl unload "$PLIST_DST" 2>/dev/null || true
+fi
 
-# Копируем plist
+# Copy the plist
 cp "$PLIST_SRC" "$PLIST_DST"
 
-# Загружаем агент
-if [ -z "${SETUP_CI:-}" ]; then
-    launchctl load "$PLIST_DST"
-else
+# Load the agent
+if [ -n "${SETUP_CI:-}" ]; then
     echo "  ⊠ SETUP_CI: plist copied, launchctl activation skipped"
+elif [ -n "${IWE_SKIP_LOAD:-}" ]; then
+    # issue #1143: see roles/synchronizer/install.sh for the rationale —
+    # same convention, kept consistent even though this role's plist has
+    # RunAtLoad=false (no live dispatch risk today, but the contract
+    # between update.sh and install.sh should not differ per role).
+    echo "  ⊠ IWE_SKIP_LOAD: plist copied, launchctl load skipped (state the user set earlier is preserved, not loaded)"
+else
+    launchctl load "$PLIST_DST"
 fi
 
 echo "  ✓ Installed: com.extractor.inbox-check"

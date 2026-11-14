@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-route-task.sh — изолированные regression-кейсы для route-task.sh (WP-350 Ф14)
+# test-route-task.sh — isolated regression cases for route-task.sh (WP-350 Phase 14)
 # routing: executor=script deterministic=true
 set -euo pipefail
 
@@ -34,7 +34,7 @@ chmod +x "$FIXTURE_IWE/scripts/consent-fixture.sh" "$FIXTURE_IWE/scripts/agent-f
 cat > "$FIXTURE_IWE/$FIXTURE_GOV/scripts/executor-catalog.yaml" <<'YAML'
 schema_version: '1.0'
 generated_at: '2026-08-24T00:00:00Z'
-total_entries: 3
+total_entries: 4
 entries:
   - name: consent
     routing:
@@ -46,6 +46,11 @@ entries:
       executor: script
       script_path: scripts/intentionally-missing.sh
       deterministic: true
+  - name: connect-guide-flex
+    routing:
+      executor: script
+      script_path: scripts/intentionally-missing.sh
+      deterministic: false
   - name: agent-fault
     routing:
       executor: script
@@ -58,6 +63,16 @@ export IWE_GOVERNANCE_REPO="$FIXTURE_GOV"
 export IWE_EXECUTOR_CATALOG="$FIXTURE_IWE/$FIXTURE_GOV/scripts/executor-catalog.yaml"
 export IWE_ROUTER_AUDIT="$FIXTURE_IWE/$FIXTURE_GOV/logs/routing-path-distribution.tsv"
 export IWE_ROUTER_ERRORS="$FIXTURE_IWE/$FIXTURE_GOV/logs/routing-errors.log"
+# route-task.sh resolves relative script_path against $IWE_TEMPLATE (issue
+# #634: catalog entries are template-root-relative, not workspace-root-
+# relative), not against $IWE_DIR. Left unset here it defaulted to
+# $FIXTURE_IWE/FMT-exocortex-template/, a path this fixture never creates —
+# every dispatch silently hit "script not found" and only produced the
+# expected exit code by coincidence (deterministic:true → EXEC_FAILED exit 2
+# is the same exit code consent-fixture.sh itself returns, T1/T4/T14 never
+# told the two apart). T13 is the one case where "not found" (exit 2) and
+# "found and ran" (exit 0) actually differ, which is what exposed this.
+export IWE_TEMPLATE="$FIXTURE_IWE"
 
 PASS=0
 FAIL=0
@@ -92,8 +107,16 @@ run_test "T3: --tag unknown_skill (flex → fallback Sonnet, exit 0)" 0 --tag un
 # 4. Missing script — strict (--skill)
 run_test "T4: --skill connect-guide (missing script → exit 2)" 2 --skill connect-guide
 
-# 5. Missing script — flex (--tag)
-run_test "T5: --tag connect-guide (missing script → fallback Haiku, exit 0)" 0 --tag connect-guide
+# 5. Missing script, non-deterministic — flex (--tag)
+run_test "T5: --tag connect-guide-flex (missing script, deterministic:false → fallback Haiku, exit 0)" 0 --tag connect-guide-flex
+
+# 5b. Missing script, deterministic:true — flex (--tag). issue #679: the
+# catalog's deterministic flag must block LLM fallback regardless of which
+# CLI flag invoked the router, not only under --skill (which already forced
+# allow_fallback=false before this fix existed and so never exercised the
+# bug — a f-string bug printed Python's True/False instead of true/false,
+# so the bash-side comparison never matched a real YAML boolean).
+run_test "T5b: --tag connect-guide (missing script, deterministic:true → EXEC_FAILED, exit 2)" 2 --tag connect-guide
 
 # 6. Empty tag
 run_test "T6: --tag '' (empty → unknown → fallback Sonnet, exit 0)" 0 --tag ""
@@ -101,8 +124,30 @@ run_test "T6: --tag '' (empty → unknown → fallback Sonnet, exit 0)" 0 --tag 
 # 7. --list
 run_test "T7: --list (exit 0)" 0 --list
 
-# 8. --validate
-run_test "T8: --validate (exit 0)" 0 --validate
+# 8. --validate. issue #894: --validate now runs the generator's own rules,
+# which include "script_path must exist" — the dispatch fixture above holds
+# two entries with an intentionally missing script, so it must be rejected.
+run_test "T8: --validate rejects the fixture's missing scripts (exit 1)" 1 --validate
+
+# 8b. The same fixture without the missing-script entries validates.
+T8B_CATALOG="$HARNESS_TMP/valid-catalog.yaml"
+cat > "$T8B_CATALOG" <<'YAML'
+schema_version: '1.0'
+generated_at: '2026-08-24T00:00:00Z'
+total_entries: 2
+entries:
+  - name: consent
+    routing:
+      executor: script
+      script_path: scripts/consent-fixture.sh
+      deterministic: true
+  - name: agent-fault
+    routing:
+      executor: script
+      script_path: scripts/agent-fault-fixture.sh
+      deterministic: true
+YAML
+IWE_EXECUTOR_CATALOG="$T8B_CATALOG" run_test "T8b: --validate on existing scripts only (exit 0)" 0 --validate
 
 # 9. Broken YAML catalog → exit 1 (error)
 echo "=== T9: broken YAML catalog → exit 1 ==="
@@ -194,6 +239,52 @@ else
 fi
 echo ""
 
+echo "=== T18: IWE_DIR self-location fallback, no env vars at all (issue #1094) ==="
+# Windows report: IWE_SCRIPTS pointed at a workspace other than $HOME/IWE, none
+# of IWE_DIR/IWE_ROOT/IWE_WORKSPACE were set, and the old code guessed
+# $HOME/IWE unconditionally. This reproduces that exact shape: a real nested
+# install (<root>/FMT-exocortex-template/scripts/route-task.sh) invoked with
+# no override vars at all, so the fix must derive <root> from the script's
+# own location instead of guessing.
+NOENV_ROOT="$HARNESS_TMP/noenv"
+# The fixture must match whatever route-task.sh itself resolves to once its
+# own subprocess below strips IWE_GOVERNANCE_REPO (env -u) -- not whatever
+# this harness's own ambient shell happens to export -- so compute it the
+# same way, in the same stripped subshell, rather than reading the ambient
+# value directly here.
+NOENV_GOV_REPO=$(env -u IWE_GOVERNANCE_REPO bash -c 'echo "${IWE_GOVERNANCE_REPO:-DS-strategy}"')
+mkdir -p "$NOENV_ROOT/FMT-exocortex-template/scripts/lib" "$NOENV_ROOT/$NOENV_GOV_REPO/scripts"
+ln -s "$SCRIPT_DIR/route-task.sh" "$NOENV_ROOT/FMT-exocortex-template/scripts/route-task.sh"
+ln -s "$SCRIPT_DIR/lib/common.sh" "$NOENV_ROOT/FMT-exocortex-template/scripts/lib/common.sh"
+ln -s "$SCRIPT_DIR/lib/find-python3.sh" "$NOENV_ROOT/FMT-exocortex-template/scripts/lib/find-python3.sh"
+cp "$FIXTURE_IWE/scripts/consent-fixture.sh" "$NOENV_ROOT/FMT-exocortex-template/scripts/"
+cat > "$NOENV_ROOT/$NOENV_GOV_REPO/scripts/executor-catalog.yaml" <<'YAML'
+schema_version: '1.0'
+generated_at: '2026-08-24T00:00:00Z'
+total_entries: 1
+entries:
+  - name: consent
+    routing:
+      executor: script
+      script_path: scripts/consent-fixture.sh
+      deterministic: true
+YAML
+set +e
+T18_OUT=$(env -u IWE_DIR -u IWE_ROOT -u IWE_WORKSPACE -u IWE_TEMPLATE -u IWE_GOVERNANCE_REPO \
+    -u IWE_EXECUTOR_CATALOG -u IWE_ROUTER_AUDIT -u IWE_ROUTER_ERRORS \
+    bash "$NOENV_ROOT/FMT-exocortex-template/scripts/route-task.sh" --skill consent --args "status" 2>&1)
+actual=$?
+set -e
+rm -rf "$NOENV_ROOT"
+if [[ "$actual" -eq 2 ]] && ! echo "$T18_OUT" | grep -q "not found"; then
+    echo "PASS (exit $actual — self-located its own nested root, found the real catalog, never guessed \$HOME/IWE)"
+    ((PASS++)) || true
+else
+    echo "FAIL: expected exit 2 (catalog found via self-location), got $actual: $T18_OUT"
+    ((FAIL++)) || true
+fi
+echo ""
+
 # 15-17. The generator's compound executor taxonomy must be executable by the
 # consumer, not merely accepted into a catalog that route-task cannot use.
 echo "=== T15-T17: agent and script+judgment executor modes ==="
@@ -212,6 +303,8 @@ entries:
     routing:
       executor: script+judgment
       deterministic: false
+      # issue #894: a mixed executor names the step that needs the model.
+      model_step: judge the script findings
 YAML
 if IWE_EXECUTOR_CATALOG="$TMP_MODE_CATALOG" bash "$SCRIPT" --validate >/dev/null 2>&1; then
     echo "PASS: generated taxonomy validates"
@@ -231,7 +324,7 @@ else
 fi
 HYBRID_MODE_OUT=$(IWE_EXECUTOR_CATALOG="$TMP_MODE_CATALOG" \
     bash "$SCRIPT" --skill hybrid-mode 2>&1 || true)
-if echo "$HYBRID_MODE_OUT" | grep -q 'mode=script+judgment'; then
+if echo "$HYBRID_MODE_OUT" | grep -q 'ROUTE_TO_JUDGMENT skill=hybrid-mode mode=script+judgment'; then
     echo "PASS: script+judgment executor routes to the judgment layer"
     ((PASS++)) || true
 else

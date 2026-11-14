@@ -2,7 +2,7 @@
 # ledger-append.sh <scale> <period> <kind> <json-data> [<source>] [--dedup-by-kind|--dedup-by-kind-and-date]
 #
 # Appends one event to machine/ledger/<scale>-<period>.yaml (append-only, flock-protected).
-# WP-484 Ф16.1 — designed in peer-session 2026-07-24-10-wp484-ledger-implementation
+# WP-484 Phase 16.1 — designed in peer-session 2026-07-24-10-wp484-ledger-implementation
 # (Claude writer, Kimi peer critic — 8 fixes from turn 1, confirmed turn 3 CONSENSUS).
 #
 # --dedup-by-kind (added 28.07, night-cycle-day.sh independent review): callers whose
@@ -61,33 +61,41 @@ case "$SCALE" in
   *) echo "ERROR: invalid scale '$SCALE' (must be day|week|month)" >&2; exit 1 ;;
 esac
 
-# session_reflection/conversational_close_done (WP-484 Ф18/Ф19, 29.07): пилотный
-# ответ на вопрос рефлексии сессии и явный признак разговорной части Day Close.
-# deferred_work_done (WP-484 Ф16.7/Ф18, CONCEPT-night-cycle.md §19 п.3): закрывает
-# in_progress_background из session_closed -- без него Background Gate в
-# protocol-open.md не может отличить "хвост доделан" от "хвост ещё идёт".
-# reflection (WP-484 Ф20, 29.07, peer-session с Kimi): единый приёмник рефлексии
-# поверх 3 производителей (session_reflection/pilot_answer/bot-poll) — pointer-модель
-# {repo, path, sha}, не копия текста (OwnerIntegrity). Отдельный kind от
-# session_reflection/pilot_answer — те остаются как есть, reflection их не заменяет.
-# session_recovered_closed (WP-484 Ф49, 04.08, контракт из peer-session
-# 2026-08-04-13-session-ttl-f47-draft, ход 1: Codex В4): восстановление
-# карантинного семафора через session-guard.sh recover-orphaned. Отдельный
-# kind от session_closed — сознательно: карантин не переименовывается обратно
-# в .open и не проходит штатный Close, session_closed для него был бы ложью.
-# close_ticket_issued / close_ticket_consumed / close_obligation (WP-484 Ф74б,
-# 07.08, peer-session 2026-08-07-08-quick-close-runner-bypass, CONSENSUS ход 6):
-# аудит-трейл ticket'ов запуска Quick Close (пара issued/consumed выявляет ticket
-# без зарегистрированной выдачи = сфабрикованный) и аудируемые переходы
-# обязательства Close (cancel-close / close-override — обход по явной команде
-# пилота виден, не молчаливый).
+# session_reflection/conversational_close_done (WP-484 Phase 18/Phase 19, 29.07): the pilot's
+# answer to the session reflection question and an explicit marker of the conversational part of Day Close.
+# deferred_work_done (WP-484 Phase 16.7/Phase 18, CONCEPT-night-cycle.md §19 item 3): closes
+# in_progress_background from session_closed -- without it the Background Gate in
+# protocol-open.md cannot tell "the tail is finished" from "the tail is still running".
+# reflection (WP-484 Phase 20, 29.07, peer-session with Kimi): a single sink for reflection
+# on top of 3 producers (session_reflection/pilot_answer/bot-poll) — a pointer model
+# {repo, path, sha}, not a copy of the text (OwnerIntegrity). A separate kind from
+# session_reflection/pilot_answer — those stay as they are, reflection does not replace them.
+# session_recovered_closed (WP-484 Phase 49, 04.08, contract from peer-session
+# 2026-08-04-13-session-ttl-f47-draft, turn 1: Codex B4): recovery of a
+# quarantined semaphore via session-guard.sh recover-orphaned. A separate
+# kind from session_closed — deliberately: the quarantine is not renamed back
+# to .open and does not go through the regular Close, session_closed would be a lie for it.
+# close_ticket_issued / close_ticket_consumed / close_obligation (WP-484 Phase 74b,
+# 07.08, peer-session 2026-08-07-08-quick-close-runner-bypass, CONSENSUS turn 6):
+# audit trail of Quick Close launch tickets (an issued/consumed pair reveals a ticket
+# without a registered issuance = forged) and auditable transitions of the
+# Close obligation (cancel-close / close-override — a bypass on the pilot's explicit command
+# is visible, not silent).
 # session_closed_no_reflection (WP-484, 08.08, session-guard.sh close
-# --force-no-reflection): та же логика, что у session_recovered_closed —
-# семафор закрылся без штатного шага session-reflection-append, session_closed
-# для него был бы ложью. Отдельный kind от session_recovered_closed: разный
-# исходный сбой (witness недоступен пилоту физически, не мёртвый держатель).
+# --force-no-reflection): the same logic as session_recovered_closed —
+# the semaphore closed without the regular session-reflection-append step, session_closed
+# would be a lie for it. A separate kind from session_recovered_closed: a different
+# root failure (the witness is physically unavailable to the pilot, not a dead holder).
+# multiplier_backfill_attempt (WP-484 Phase 117, 2026-09-01, peer-session
+# 2026-09-01-18-wp484-backlog-continue): telemetry for day-open-multiplier-
+# backfill-patch.py -- one event per Open run attempting to backfill
+# yesterday's WakaTime multiplier, success or not. Derives the "source
+# absent for N days" classification from ledger history alone, same
+# no-mutable-counter principle as day-open-r23-series-patch.py's R23 series.
 case "$KIND" in
-  facts_digest|pilot_answer|wp_status_change|blocked_question|close_day_done|open_day_done|close_week_done|open_week_done|session_closed|session_reflection|conversational_close_done|deferred_work_done|pending|day_rollup|wp_drift_found|pool_candidate_selected|pool_tiebreak_resolved|pool_execution_finished|reflection|week_summary|night_cycle_complete|night_cycle_verified|session_recovered_closed|sync_skipped|close_ticket_issued|close_ticket_consumed|close_obligation|session_closed_no_reflection) ;;
+  # WP-561: the delivered session guard emits this on peer/bypass close.
+  session_closed_direct) ;;
+  facts_digest|pilot_answer|wp_status_change|blocked_question|close_day_done|open_day_done|close_week_done|open_week_done|session_closed|session_reflection|conversational_close_done|deferred_work_done|pending|day_rollup|wp_drift_found|pool_candidate_selected|pool_tiebreak_resolved|pool_execution_finished|reflection|week_summary|night_cycle_complete|night_cycle_verified|session_recovered_closed|sync_skipped|close_ticket_issued|close_ticket_consumed|close_obligation|session_closed_no_reflection|multiplier_backfill_attempt) ;;
   *) echo "ERROR: invalid kind '$KIND'" >&2; exit 1 ;;
 esac
 
@@ -135,7 +143,7 @@ echo "$DATA_JSON" | "$RESOLVED_PYTHON3" -c "import json,sys; json.load(sys.stdin
 }
 rm -f "$JSON_ERR"
 
-# --- session_closed schema (WP-484 Ф38, peer-session 2026-08-02-19) ---
+# --- session_closed schema (WP-484 Phase 38, peer-session 2026-08-02-19) ---
 # The ledger is the cross-installation source of hours, so a session_closed whose
 # author is absent or whose wp is free-form is a record every per-WP and per-agent
 # sweep silently drops: 02.08 mixed `wp: WP-510` with `wp: '510'`, 01.08 held two
@@ -297,6 +305,26 @@ if any(not isinstance(existing, dict) for existing in doc["events"]):
     print("ERROR: existing ledger contains a non-mapping event", file=sys.stderr)
     sys.exit(1)
 
+# A resumed terminal transition may retry its projection after publication.
+# Deduplicate that durable attempt under the writer lock; older callers without
+# an attempt id remain append-only, and distinct sessions keep distinct events.
+close_attempt_id = data.get("close_attempt_id") if isinstance(data, dict) else None
+session_id = data.get("session_id") if isinstance(data, dict) else None
+if (
+    "$KIND" == "session_closed_direct"
+    and isinstance(close_attempt_id, str) and close_attempt_id
+    and isinstance(session_id, str) and session_id
+):
+    if any(
+        existing.get("kind") == "session_closed_direct"
+        and isinstance(existing.get("data"), dict)
+        and existing["data"].get("session_id") == session_id
+        and existing["data"].get("close_attempt_id") == close_attempt_id
+        for existing in doc["events"]
+    ):
+        print("SKIP: session_closed_direct for this close attempt already exists")
+        sys.exit(2)
+
 # --dedup-by-kind (28.07): re-check for an existing event of this kind INSIDE the
 # flock we already hold — closes the race a caller-side check-then-append left open
 # (two near-simultaneous callers could both see "not there yet" outside the lock).
@@ -336,7 +364,7 @@ PYEOF
   rm -f "$DATA_TMP"
 
   if [ $PY_EXIT -eq 2 ]; then
-    # --dedup-by-kind skip — no OUT_TMP was created, nothing to rename or clean up
+    # Duplicate skip — no OUT_TMP was created, nothing to rename or clean up.
     return 0
   fi
 

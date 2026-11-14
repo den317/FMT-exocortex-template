@@ -6,9 +6,16 @@ description: "One line — used in CLAUDE.md system-reminder and the skill catal
 version: 1.0.0                    # semver; увеличивать при изменении обещания
 layer: L3                         # L1 = платформенный (FMT); L3 = авторский (личный)
 status: active                    # active | experimental | deprecated
+browser_safe: true
 triggers:
   slash: [/skill-id]              # slash-команды (/skill-id)
   phrases: []                     # фразы для авто-детекции (опционально)
+# routing обязателен (issue #894): verify-skill.sh и CI без него падают
+routing:
+  executor: sonnet                # script | mcp-direct (без модели) · haiku | sonnet | opus | agent (+ model:) · script+judgment (+ model_step:)
+  deterministic: false            # true — только для script / mcp-direct
+  # script_path: scripts/<file>   # обязателен при executor: script
+  # model_step: "<шаг, где нужна модель>"  # обязателен при executor: script+judgment
 
 # Опциональные поля — заполнять если применимо
 # depends_on: []                  # id других скиллов (прямые зависимости)

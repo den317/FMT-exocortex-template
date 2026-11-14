@@ -4,6 +4,7 @@ description: "IWE extensibility catalog: what can be customized, which extension
 argument-hint: "[название протокола или пустое для полного каталога]"
 user_invocable: true
 version: 1.0.0
+browser_safe: false
 routing:
   executor: sonnet
   deterministic: false
@@ -109,6 +110,8 @@ point. Используйте один из явно перечисленных 
 Frontmatter: `name`, `description`, `user_invocable: true`.
 `update.sh` не трогает пользовательские skills (не в манифесте).
 
+**Сохранность.** Штатного механизма сохранности своих скиллов нет: каталог `.claude/skills/<name>/` обычно не под git (корень рабочей папки — не репозиторий), закрытие дня (`day-close.sh`, шаг «Backup») копирует память, инструкции и правила агента, но не скиллы, `update.sh` скилл не стирает, но и не переносит, а `/iwe-restore` его не восстановит. Пока модель бэкапа не выбрана владельцем шаблона, держите копию своих скиллов в git-репозитории под вашим контролем (например, в приватном `{{GOVERNANCE_REPO}}`) — иначе переезд на другую машину или переустановка потеряют их молча.
+
 ### 4. Предложить следующий шаг
 
 На основе того что уже настроено — предложить что добавить дальше.
@@ -133,7 +136,7 @@ Frontmatter: `name`, `description`, `user_invocable: true`.
 Расширения IWE — обычные Markdown-файлы. Установка:
 
 ```bash
-cp ~/Downloads/day-close.after.health.md ~/IWE/extensions/
+cp ~/Downloads/day-close.after.health.md ${IWE_WORKSPACE:-$HOME/IWE}/extensions/
 ```
 
 **Конфликт имён** (два файла одного hook):
@@ -151,6 +154,6 @@ my-extension-pack/
 
 Установка bundle:
 ```bash
-cp my-extension-pack/extensions/* ~/IWE/extensions/
-# Просмотреть params-defaults.yaml и добавить нужные параметры в ~/IWE/params.yaml вручную
+cp my-extension-pack/extensions/* ${IWE_WORKSPACE:-$HOME/IWE}/extensions/
+# Просмотреть params-defaults.yaml и добавить нужные параметры в ${IWE_WORKSPACE:-$HOME/IWE}/params.yaml вручную
 ```

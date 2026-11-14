@@ -110,6 +110,15 @@ def merge_hook_entries(user_entries, template_entries, report, event):
     for idx, entry in enumerate(merged):
         by_key.setdefault(_hook_commands_key(entry), []).append(idx)
 
+    # issue #1089 cold review (Fable, 2026-10-05): count entries the user has
+    # under this event that the CURRENT template doesn't mention at all --
+    # computed from the original user-only by_key, before the loop below
+    # starts appending template-only entries into the same dict. A workspace
+    # entry the template dropped is not an addition and not a value conflict
+    # (both already counted below), so without this it was invisible.
+    template_keys = {_hook_commands_key(te) for te in template_entries}
+    orphaned = sum(len(idxs) for key, idxs in by_key.items() if key not in template_keys)
+
     added = deduped = 0
     for template_entry in template_entries:
         key = _hook_commands_key(template_entry)
@@ -126,7 +135,7 @@ def merge_hook_entries(user_entries, template_entries, report, event):
             by_key[key].append(len(merged))
             merged.append(template_entry)
             added += 1
-    return merged, added, deduped
+    return merged, added, deduped, orphaned
 
 
 def merge_hooks(user_hooks, template_hooks, report):
@@ -139,9 +148,16 @@ def merge_hooks(user_hooks, template_hooks, report):
         if not isinstance(user_entries, list):
             report["conflicts"].append(f"hooks.{event}")
             continue
-        merged[event], added, deduped = merge_hook_entries(user_entries, template_entries, report, event)
+        merged[event], added, deduped, orphaned = merge_hook_entries(user_entries, template_entries, report, event)
         report["hooks_added_from_template"] += added
         report["hooks_deduped"] += deduped
+        report["hooks_only_in_workspace"] += orphaned
+    # An event the template dropped ENTIRELY (not just some entries within
+    # it) never enters the loop above, since that loop only walks events the
+    # template still mentions -- count those user events separately.
+    for event, user_entries in user_hooks.items():
+        if event not in template_hooks and isinstance(user_entries, list):
+            report["hooks_only_in_workspace"] += len(user_entries)
     return merged
 
 
@@ -157,6 +173,24 @@ def merge_permissions(user_perms, template_perms, report):
             report["keys_added_from_template"] += 1
         elif canonical(user_value) != canonical(template_value):
             report["conflicts"].append(f"permissions.{key}")
+    return merged
+
+
+def merge_env(user_env, template_env, report):
+    # issue #1216: an env var the template ships (e.g. CLAUDE_CODE_ENABLE_TODO_TOOLS,
+    # needed on models newer than Sonnet 4.6) used to be stuck on "whole-object
+    # conflict" the moment a workspace's env dict wasn't byte-identical to the
+    # template's — the common case, since a workspace settings.json routinely has
+    # its own unrelated env keys. Per-key, same semantics as merge_permissions:
+    # a missing key is added, an existing key with a different value is flagged,
+    # never silently overwritten.
+    merged = dict(user_env)
+    for key, template_value in template_env.items():
+        if key not in merged:
+            merged[key] = template_value
+            report["keys_added_from_template"] += 1
+        elif canonical(merged[key]) != canonical(template_value):
+            report["conflicts"].append(f"env.{key}")
     return merged
 
 
@@ -176,6 +210,13 @@ def merge_settings(template, workspace, report):
                 merged["permissions"] = merge_permissions(user_value, template_value, report)
             else:
                 report["conflicts"].append("permissions")
+            continue
+        if key == "env" and isinstance(template_value, dict):
+            user_value = merged.get("env", {})
+            if isinstance(user_value, dict):
+                merged["env"] = merge_env(user_value, template_value, report)
+            else:
+                report["conflicts"].append("env")
             continue
         if key not in merged:
             merged[key] = template_value
@@ -209,6 +250,7 @@ def main(argv):
         "keys_kept_user_only": 0,
         "hooks_added_from_template": 0,
         "hooks_deduped": 0,
+        "hooks_only_in_workspace": 0,
         "permissions_added_from_template": 0,
         "conflicts": [],
     }

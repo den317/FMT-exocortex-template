@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Idempotency + arbitrary-directory contract for create-wp.sh (Ф-script-contract-gate,
-# Этап 2). create-wp.sh has no idempotency key or retry token — two calls with
+# Idempotency + arbitrary-directory contract for create-wp.sh (Phase script-contract-gate,
+# Stage 2). create-wp.sh has no idempotency key or retry token — two calls with
 # the same title are two distinct, intentional WPs by design, not a duplicate
 # to collapse. The contract that actually matters: (1) it works when invoked
 # from a directory that is not the governance repo itself, and (2) repeated
@@ -9,9 +9,14 @@
 
 set -euo pipefail
 
-TEMPLATE_ROOT="${IWE_TEMPLATE:-$HOME/IWE/FMT-exocortex-template}"
+# Template root comes from this file's own location, never from $HOME (CI checks
+# the repository out elsewhere); HOME and TMPDIR stay inside the test's temp dir.
+TEMPLATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
+export TMPDIR
+export HOME="$TMPDIR/home"
+mkdir -p "$HOME"
 
 cp -R "$TEMPLATE_ROOT/seed/strategy" "$TMPDIR/strategy"
 mkdir -p "$TMPDIR/unrelated/cwd"
@@ -20,6 +25,8 @@ export IWE_TEMPLATE="$TEMPLATE_ROOT"
 export IWE_ROOT="$TMPDIR"
 export IWE_GOVERNANCE_REPO="strategy"
 
+# --no-artifactor-check: the Artifactor Gate is covered by
+# test_create_wp_artifactor_gate.sh; this test is about repeat calls and cwd.
 run_create() {
   (
     cd "$TMPDIR/unrelated/cwd"
@@ -27,7 +34,9 @@ run_create() {
       --title "Retry Contract" \
       --budget 1h \
       --priority P4 \
-      --no-consent-check
+      --verification-class closed-loop \
+      --no-consent-check \
+      --no-artifactor-check
   )
 }
 

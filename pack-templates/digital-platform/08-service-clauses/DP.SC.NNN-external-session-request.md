@@ -156,7 +156,7 @@ Claude: inbox/WP-361.md создан с Ф1 IntegrationGate (~2h): SC + Role + s
 
 | # | Шаг | Кто | Результат |
 |---|-----|-----|----------|
-| 1 | Отправить сообщение в @aist_pilot_bot | Пилот | — |
+| 1 | Отправить сообщение в `@<ваш_бот>` | Пилот | — |
 | 2 | Проверить `tg_chat_id ∈ allowed_list` + найти активную сессию | Ingress Adapter | ack или «не авторизован» |
 | 3 | Дописать ход в `SESSION-<id>-thread.md` через GitHub API | Ingress Adapter | Новый ход в thread |
 | 4 | Ответить «Работаю…» в Telegram | Ingress Adapter | Acknowledgment ≤10с |
@@ -230,17 +230,17 @@ finalized_at: ISO8601
 | Вариант | Где запускается Egress | Подходит для | Ограничение |
 |---------|----------------------|-------------|------------|
 | **Mac-local (MVP)** | launchd на машине пилота | Пилот за компьютером | Требует открытый Mac |
-| **tsekh-1 (пилот, Post-MVP)** | systemd на сервере пилота (всегда включён) | Пилот в дороге без Mac | `claude -p` (headless, без VS Code Local Gateway) |
+| **Удалённый сервер (пилот, Post-MVP)** | systemd на сервере пилота (всегда включён) | Пилот в дороге без Mac | `claude -p` (headless, без VS Code Local Gateway) |
 | **Per-machine (community)** | launchd/systemd на машине пользователя | Каждый пользователь IWE | Инсталляция per-machine |
 
-**Примечание:** tsekh-1-вариант теряет Local Gateway (открытые файлы, peer-координация) — только headless `claude -p`. Для пилота это приемлемо (полная среда — на Mac). ArchGate при переходе к community-tier.
+**Примечание:** вариант с удалённым сервером теряет Local Gateway (открытые файлы, peer-координация) — только headless `claude -p`. Для пилота это приемлемо (полная среда — на Mac). ArchGate при переходе к community-tier.
 
 ---
 
 ## Post-MVP (Future)
 
 - **Eager-pull:** GitHub webhook → tailscale funnel → локальный HTTP endpoint. Снижает git-sync latency с avg 7.5с до <1с.
-- **tsekh-1 always-on Egress** для пилота: systemd unit вместо launchd, без зависимости от включённого Mac.
+- **Удалённый always-on Egress** для пилота: systemd unit вместо launchd, без зависимости от включённого Mac.
 - **Голосовые ходы:** Telegram voice message → STT → ход в thread.
 
 ---

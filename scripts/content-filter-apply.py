@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# content-filter-apply.py — WP-394 Ф3.2 (дизайн: Kimi; реализация+правки: Claude)
+# content-filter-apply.py — WP-394 Phase 3.2 (design: Kimi; implementation+edits: Claude)
 #
-# Переформулирует слова-маркеры чувствительных данных во входящем промпте ДО подачи
-# в движок Kimi/Moonshot, чтобы defensive content policy не давала ложный block
-# (HTTP 400 high risk) на легитимных peer-сессиях про auth/secrets.
-# См. memory/lessons_kimi_content_filter.md, DP.SC.154.
+# Rephrases marker words for sensitive data in the incoming prompt BEFORE it is fed
+# to the Kimi/Moonshot engine, so that the defensive content policy does not give a false block
+# (HTTP 400 high risk) on legitimate peer sessions about auth/secrets.
+# See memory/lessons_kimi_content_filter.md, DP.SC.154.
 #
-# Использование: cat prompt | python3 content-filter-apply.py <map.tsv>
-#   map.tsv: пары "marker<TAB>replacement", по одной на строку.
-#   Пустые строки и строки с # игнорируются. Файл отсутствует/пуст → identity passthrough.
+# Usage: cat prompt | python3 content-filter-apply.py <map.tsv>
+#   map.tsv: pairs "marker<TAB>replacement", one per line.
+#   Empty lines and lines with # are ignored. File missing/empty → identity passthrough.
+#   --strict-map: for peer adapters the map is mandatory; a map error → exit 2.
 #
-# Правки Claude поверх дизайна Kimi:
-#   1. re.IGNORECASE — Moonshot триггерит независимо от регистра.
-#   2. \b...\b — границы слова, чтобы не калечить идентификаторы (tokenizer, secretary).
-#   3. longest-first — корректная обработка перекрывающихся маркеров (private key ⊃ key).
-#   4. lambda-замена — спецсимволы в replacement не трактуются как regex backref.
+# Claude's edits on top of Kimi's design:
+#   1. re.IGNORECASE — Moonshot triggers regardless of case.
+#   2. \b...\b — word boundaries, so as not to mangle identifiers (tokenizer, secretary).
+#   3. longest-first — correct handling of overlapping markers (private key ⊃ key).
+#   4. lambda replacement — special characters in the replacement are not treated as a regex backref.
 
 import sys
 import re
 
 
-def load_pairs(map_path):
+def load_pairs(map_path, strict=False):
     pairs = []
     try:
         with open(map_path, "r", encoding="utf-8") as f:
@@ -30,12 +31,18 @@ def load_pairs(map_path):
                 if not line or line.lstrip().startswith("#"):
                     continue
                 parts = line.split("\t", 1)
-                if len(parts) == 2 and parts[0]:
+                if len(parts) == 2 and parts[0] and (parts[1] or not strict):
                     pairs.append((parts[0], parts[1]))
-    except Exception:
-        # OSError (нет файла) ИЛИ UnicodeDecodeError (битый UTF-8 в map) → no-op
+                elif strict:
+                    raise ValueError("invalid map entry")
+    except (OSError, UnicodeError):
+        if strict:
+            raise
+        # Legacy callers allow an absent or unreadable map as a no-op.
         return []
-    # longest-first: длинные маркеры заменяются раньше коротких-подстрок
+    if strict and not pairs:
+        raise ValueError("map has no replacement pairs")
+    # longest-first: longer markers are replaced before shorter substrings
     pairs.sort(key=lambda p: len(p[0]), reverse=True)
     return pairs
 
@@ -50,12 +57,19 @@ def apply_filter(payload, pairs):
 
 
 def main():
+    strict = len(sys.argv) == 3 and sys.argv[2] == "--strict-map"
+    if len(sys.argv) > 2 and not strict:
+        raise SystemExit("ERROR: usage: content-filter-apply.py <map.tsv> [--strict-map]")
     if len(sys.argv) < 2:
-        # нет map-аргумента → passthrough
+        # no map argument → passthrough
         sys.stdout.buffer.write(sys.stdin.buffer.read())
         return
     payload = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    pairs = load_pairs(sys.argv[1])
+    try:
+        pairs = load_pairs(sys.argv[1], strict=strict)
+    except (OSError, UnicodeError, ValueError):
+        print("ERROR: content filter map is invalid or unavailable", file=sys.stderr)
+        raise SystemExit(2)
     if pairs:
         payload = apply_filter(payload, pairs)
     sys.stdout.buffer.write(payload.encode("utf-8"))

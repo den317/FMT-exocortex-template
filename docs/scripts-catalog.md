@@ -12,7 +12,7 @@
 | `agent-status-report.sh` | `scripts/agent-status-report.sh` | РП-395 Ф3 fail-safe writer. |
 | `agent_fault_remind.sh` | `scripts/agent_fault_remind.sh` | WP-316: Agent Fault Profile reminder wrapper |
 | `archive-done-wp.sh` | `scripts/archive-done-wp.sh` | атомарная архивация завершённого РП |
-| `backup-icloud.sh` | `scripts/backup-icloud.sh` | Бэкап IWE в iCloud Drive (без .git, node_modules, .venv) |
+| `backup-icloud.sh` | `scripts/backup-icloud.sh` | Бэкап IWE в архив (без .git, node_modules, .venv) |
 | `changelog-append.sh` | `scripts/changelog-append.sh` | идемпотентное обновление секции [Unreleased] в CHANGELOG.md |
 | `changelog-flush.sh` | `scripts/changelog-flush.sh` | переименовывает [Unreleased] → конкретную версию в CHANGELOG.md |
 | `check-component-parity.sh` | `scripts/check-component-parity.sh` | asserts setup.sh (fresh install) and update.sh |
@@ -66,7 +66,6 @@
 | `kimi-session-watchdog.sh` | `scripts/kimi-session-watchdog.sh` | kimi-session-watchdog.sh |
 | `kimi-standalone-preflight.sh` | `scripts/kimi-standalone-preflight.sh` | kimi-standalone-preflight.sh |
 | `kimi-whisper-safe.sh` | `scripts/kimi-whisper-safe.sh` | безопасная обёртка для whisper с защитой от |
-| `lesson-close.sh` | `scripts/lesson-close.sh` | закрыть занятие в дневном файле (lesson/<date>.md) |
 | `llm-proxy-launcher.sh` | `scripts/llm-proxy-launcher.sh` | обёртка для запуска llm-proxy.py с OpenRouter secrets (WP-366 Ф4.A) |
 | `load-extensions.sh` | `.claude/scripts/load-extensions.sh` | unified loader для suffix extensions (R4.4 fix, WP-273 Этап 2). |
 | `memory-active-wp-update.sh` | `scripts/memory-active-wp-update.sh` | обновление секции «Текущие РП» в MEMORY.md |

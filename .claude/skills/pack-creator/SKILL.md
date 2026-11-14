@@ -13,6 +13,7 @@ related_methods:
 version: 1.0.0
 layer: L3
 status: active
+browser_safe: false
 triggers:
   slash: [/pack-creator]
   phrases:
@@ -106,7 +107,7 @@ routing:
 
 Скилл устанавливает переменную окружения `PACK_CREATOR_ACTIVE=1` на время сессии.
 Hook `pack-creator-spf-guard.sh` блокирует Write/Edit/NotebookEdit в путях
-`~/IWE/SPF/*` и `~/IWE/FPF/*`. При срабатывании hook возвращает exit 2 с
+`${IWE_WORKSPACE:-$HOME/IWE}/SPF/*` и `${IWE_WORKSPACE:-$HOME/IWE}/FPF/*`. При срабатывании hook возвращает exit 2 с
 объяснением.
 
 **Что делать при срабатывании:**
@@ -140,7 +141,7 @@ Hook `pack-creator-spf-guard.sh` блокирует Write/Edit/NotebookEdit в �
 Аргумент: pack <путь-к-PACK-X>
 ```
 
-Проверяет 11 координат Domain Adequacy (D1-D11) по артефактам фаз Ф1-Ф3 (SoTA-лист, decision-record, seed-маркер). Вердикт: PASS/CONDITIONAL/FAIL. Проверка честная для seed-статуса: отсутствие педагогики, практик, трансфера и т.д. отмечается как `missing(seed-expected)`, не блокирует PASS, если критичные координаты (D1, D7, D11) в порядке.
+Проверяет 11 координат Domain Adequacy (D1-D11) по артефактам фаз Ф1-Ф3 (SoTA-лист, decision-record, seed-маркер) на порядковой шкале 0-5 с порогом допуска (floor 4, или 3 при явной заготовке — WP-474 Ф8.1). Вердикт: `DPFPackageAdequacyStatus` (`admissibleForDeclaredDPFUse` / `seedOnly` / `repairBeforeDPFUse`, плюс эскалационные значения). Проверка честная для заготовки: низкие значения по координатам зрелости (педагогика, практики, трансфер и т.д.) не блокируют `seedOnly` — приоритет ремонта задаётся сортировкой строк результата по значению, не списком «критичных» координат (WP-474 Ф8.3, пир-сессия 2026-09-05-27).
 
 При расхождении эталону (любой проверке): скилл получает отчёт, возвращается на нарушенную фазу, повторяет.
 

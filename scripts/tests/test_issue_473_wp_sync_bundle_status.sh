@@ -12,22 +12,22 @@ set -euo pipefail
 # wp-sync-bundle.sh setup this test does not need.
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-SCRIPT="$ROOT/.claude/scripts/wp-sync-bundle.sh"
+SCRIPT_UNDER_TEST="${SCRIPT_UNDER_TEST:-$ROOT/.claude/scripts/wp-sync-bundle.sh}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/docs"
 cat > "$TMP/docs/WP-REGISTRY.md" <<'REGISTRY'
-| # | Название | Статус | Цель | Создан | P | Репо | Бюджет |
+| # | Название | Цель | Создан | P | Репо | Бюджет | Статус |
 |---|---|---|---|---|---|---|---|
-| 47 | Тест Б | ✅ | цель | 01.01 | P1 | repo/ | 4h |
-| 49 | Тест В | ⏳ | открыт как спин-офф WP-47 | 02.01 | P2 | repo2/ | 3h |
-| 26 | Снятый | ⏹ | - | 01.01 | P3 | repo3/ | 1h |
-| 25 | Спринт | 🔁 | - | 01.01 | P3 | repo4/ | 1h |
+| 47 | Тест Б | цель | 01.01 | P1 | repo/ | 4h | ✅ |
+| 49 | Тест В ✅ | открыт как спин-офф WP-47 | 02.01 | P2 | repo2/ | 3h | ⏳ |
+| 26 | Снятый | - | 01.01 | P3 | repo3/ | 1h | ⏹ |
+| 25 | Спринт | - | 01.01 | P3 | repo4/ | 1h | 🔁 |
 REGISTRY
 
-START=$(grep -n '^registry_status_column()' "$SCRIPT" | head -1 | cut -d: -f1)
-END_MARKER=$(grep -n '^git_log_for_file()' "$SCRIPT" | head -1 | cut -d: -f1)
+START=$(grep -n '^registry_status_column()' "$SCRIPT_UNDER_TEST" | head -1 | cut -d: -f1)
+END_MARKER=$(grep -n '^git_log_for_file()' "$SCRIPT_UNDER_TEST" | head -1 | cut -d: -f1)
 if [[ -z "$START" || -z "$END_MARKER" ]]; then
     echo "FAIL: не нашёл границы registry_status()/registry_status_column() — маркеры сдвинулись?"
     exit 1
@@ -36,14 +36,14 @@ fi
 {
     echo '#!/usr/bin/env bash'
     echo "REGISTRY_FILE=\"$TMP/docs/WP-REGISTRY.md\""
-    sed -n "${START},$((END_MARKER - 2))p" "$SCRIPT"
+    sed -n "${START},$((END_MARKER - 2))p" "$SCRIPT_UNDER_TEST"
     echo 'echo "47:$(registry_status 47)"'
     echo 'echo "49:$(registry_status 49)"'
     echo 'echo "26:$(registry_status 26)"'
     echo 'echo "25:$(registry_status 25)"'
     echo 'echo "999:$(registry_status 999)"'
-    # Codex code review (ход 3, эта же сессия): $num раньше подставлялся в
-    # grep без нормализации/валидации — "WP-47" тихо не находил бы строку.
+    # Codex code review (turn 3, this same session): $num used to be substituted into
+    # grep without normalization/validation — "WP-47" would silently not find the row.
     echo 'echo "WPPREFIX:$(registry_status WP-47)"'
     echo 'echo "BOGUS:$(registry_status abc)"'
 } > "$TMP/driver.sh"

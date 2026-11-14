@@ -5,6 +5,7 @@ argument-hint: "<описание задачи> | --list | --interrupt <session_
 version: 1.3.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/peer-writer]
   phrases: ["начни peer-сессию", "запусти диалог с Клодом", "peer-сессия", "вместе с Клодом", "с Клодом", "привлеки Клода"]
@@ -53,13 +54,13 @@ Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напар�
 
 ## Шаг 0а. Preflight Gate (WP-484 Ф33 item Г, обязательно ДО любых других действий)
 
-Та же проверка, что `~/.kimi-code/skills/session-open/SKILL.md` уже делает для standalone-сессий Kimi (Ф33, 31.07) — до этой правки у пир-сессий Kimi-писателя не было НИКАКОЙ проверки, что сессия открыта честно (тот же класс дыры, что Ф28: закрытие пир-сессии сочло «у пир-сессии свой протокол» достаточным основанием и обошло вопрос-рефлексию):
+Та же проверка, что `~/.kimi-code/skills/session-open/SKILL.md` уже делает для standalone-сессий Kimi (Ф33, 31.07) — до этой правки у пир-сессий Kimi-писателя не было НИКАКОЙ проверки, что сессия открыта честно (тот же класс дыры, что Ф28). Скрипт поставляется шаблоном; звать по конвенции путей (#566 — фантомным был только хардкод `$HOME/IWE/scripts/...`, сам скрипт существует и входит в манифест):
 
 ```bash
-bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh"
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/kimi-standalone-preflight.sh"
 ```
 
-- Exit ≠ 0 (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду из stderr скрипта (`session-guard.sh open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
+- Exit ≠ 0 (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду открытия из stderr скрипта (`bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
 - Exit 0 (в т.ч. с предупреждением про устаревшую/stale-сессию) → продолжать к Шагу 0б.
 
 ## Шаг 0б. Открытие (WP Gate — только для новой сессии)
@@ -85,7 +86,7 @@ bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh"
 ## Шаг 1. Инициализация
 
 ```bash
-SESSIONS_DIR="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
+SESSIONS_DIR="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
@@ -220,7 +221,7 @@ ESCALATE_TO_USER: <причина> — если писатель игнорир�
 Вызов Claude через Bash:
 ```bash
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
-echo "<промпт>" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
+echo "<промпт>" | bash "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
   > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 ```
 
@@ -392,7 +393,7 @@ Cold-context code review результатов peer-сессии <SESSION_ID>.
 EOF
 )
 
-echo "$REVIEW_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
+echo "$REVIEW_PROMPT" | bash "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
   > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
 ```
 
@@ -440,7 +441,7 @@ VERIFY_PROMPT=$(cat <<EOF
 EOF
 )
 
-echo "$VERIFY_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
+echo "$VERIFY_PROMPT" | bash "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
   > "$VERIFY_FILE" 2> "${VERIFY_FILE%.md}.err"
 ```
 
@@ -457,7 +458,7 @@ Claude в этом вызове не запускает smoke-тесты: он �
 Для каждого репо в списке изменённых файлов:
 
 ```bash
-cd <repo path>
+(cd <repo path>
 git status --short
 # pathspec после `--`: commit ТОЛЬКО свои файлы. Bare `git commit` сметает
 # чужое pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
@@ -468,6 +469,7 @@ Refs: peer-session <SESSION_ID>
 Review iters: <REVIEW_ITER>
 Verify: PASS" -- <те же specific files>
 git push
+)
 ```
 
 Записать commit SHA для каждого репо в `DEPLOY_SHAS` (map: repo → sha).
@@ -523,7 +525,7 @@ DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
 2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно Ф18, `CONCEPT-night-cycle.md §18`).
 3. Записать ответ (issue #409: скрипт есть не на каждой установке — не блокировать при отсутствии):
    ```bash
-   LEDGER_SCRIPT="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ledger-append.sh"
+   LEDGER_SCRIPT="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ledger-append.sh"
    if [ -f "$LEDGER_SCRIPT" ]; then
      bash "$LEDGER_SCRIPT" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" kimi-peer-writer
    else
@@ -853,7 +855,7 @@ wp: <WP-NNN или unknown>
 ### 4.5 Commit + push
 
 ```bash
-cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+(cd "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 
 # Pre-commit guard
 test ! -f "$SESSION_DIR/report-draft.md" \
@@ -879,6 +881,7 @@ gh pr create --title "feat(peer): $SESSION_ID" \
   --body "Peer-сессия DP.SC.154. Kimi (writer) + Claude (peer)." \
   --base main --auto-merge 2>/dev/null \
   || echo "WARN: gh pr create failed — merge manually or check gh auth"
+)
 ```
 
 Показать пилоту: «Сессия завершена. Отчёт: `sessions/$MONTH/$DAY/$SESSION_ID/report.md`»

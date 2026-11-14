@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WP-5 Ф38 / #430 and #523: every Hindsight consumer must preserve the same
+# WP-5 Phase 38 / #430 and #523: every Hindsight consumer must preserve the same
 # optional, explicit-opt-in and no-autostart contract.
 set -euo pipefail
 
@@ -183,7 +183,7 @@ require_text "$LEARNING_PATH" '`FPF/FPF-Spec.md`'
 require_text "$SETUP_GUIDE" 'Корень IWE (`~/IWE`) как Obsidian vault'
 require_text "$SETUP_GUIDE" 'governance-репозиторий `DS-strategy`'
 require_text "$SETUP_GUIDE" '`FPF/FPF-Spec.md`'
-require_text "$SETUP_GUIDE" '**публичный** GitHub-репозиторий `personal-guide`'
+require_text "$SETUP_GUIDE" '**публичный** GitHub-репозиторий `DS-personal-guide`'
 require_text "$SETUP_GUIDE" 'не задаёт'
 require_text "$SETUP_GUIDE" 'уточняющих вопросов'
 require_text "$SETUP_GUIDE" '`create_repository` и `github_status`'

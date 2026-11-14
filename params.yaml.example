@@ -5,10 +5,33 @@
 #
 # Формат: YAML. Протоколы читают params.yaml и адаптируют поведение.
 
+# === Общее ===
+
+# Часовой пояс установки (issue #1410): IANA-имя, например Asia/Vladivostok,
+# Europe/Moscow. Пусто или ключ не задан — системный часовой пояс машины
+# (/etc/localtime). Задавать, если планировщик работает на сервере в другом поясе.
+# Им считают время протоколы (memory/protocol-work.md §2) и утренний сборщик.
+timezone:
+
 # === Протоколы ===
 
 # Day Open: проверка видео за предыдущий день
 video_check: true
+
+# Day Open: источник календаря (issue #942)
+#   connector — календарный коннектор claude.ai, затем scripts/server-calendar.sh (по умолчанию, ключ не задан = connector)
+#   script    — только scripts/server-calendar.sh (нужен файл ключей Google)
+#   none      — календарь не используется: без проверки, без секции в DayPlan, коннектор не подключается
+calendar_source: connector
+
+# Day Open: стиль заголовков секций в DayPlan (issue #496)
+#   details  — <details><summary> (по умолчанию; сворачивается в GitHub/VS Code,
+#               раскрывается как HTML-текст в Obsidian и похожих markdown-вьюерах)
+#   markdown — заголовки `## ` (не сворачиваются нигде, но читаемы везде)
+# Валидатор (.claude/hooks/protocol-artifact-validate.sh) принимает оба варианта.
+# Пока применяется только к day-open-scaffold.sh; build-active-wp.py и
+# day-open-llm-fill.py всё ещё печатают details независимо от этого параметра.
+dayplan_weekplan_heading_style: details
 
 # Day Close: расчёт мультипликатора IWE (требует WakaTime API key)
 multiplier_enabled: true
@@ -18,6 +41,30 @@ reflection_enabled: false
 
 # Week Close: ротация уроков в MEMORY.md
 lesson_rotation: true
+
+# Week Close §7a/7b: место бэкапа (issue #880)
+#   Пусто (ключ не задан) — дефолт: iCloud Drive на macOS, нет бэкапа на других ОС.
+#   Непустое значение — свой путь; перекрывает iCloud-дефолт. Встроенный бэкап
+#   и проверка его свежести работают с ним на любой ОС (macOS, Linux, WSL);
+#   папка создаётся при первом бэкапе (issue #1349).
+#   Пример: "~/Dropbox/IWE-backups"
+backup_dir: ""
+
+# Week Close §7a/7b: встроенный бэкап и его проверка (issue #880).
+#   true  — встроенная проверка + бэкап выполняются (по умолчанию)
+#   false — пропустить оба шага целиком (свой бэкап через расширение
+#           week-close.after.*.md — встроенный шаг тогда не нужен и не мешает)
+backup_enabled: true
+
+# Чем делать бэкап (WP-7 Ф267). Ключ не задан = tar (архивы), переключения на restic само не будет.
+#   tar    — архив всего каталога IWE; куда — backup_dir (либо iCloud на macOS).
+#   restic — зашифрованные снимки источников из scripts/iwe-backup-sources.yaml в защитное
+#            хранилище ~/.iwe-backup/protect-repo; backup_dir для restic НЕ используется.
+#            Нужна установленная программа restic. Файл ключа должен быть вашим и закрытым
+#            для других (chmod 600), иначе бэкап остановится, не трогая restic.
+# Запуск и расписание: scripts/iwe-backup.sh; ежедневно его вызывает планировщик роли
+# Synchronizer (если роль установлена). Раскомментируйте строку, чтобы выбрать движок явно:
+# backup_engine: tar
 
 # === Верификация ===
 
@@ -68,6 +115,17 @@ external_tracker:
     owner: ""
     repositories: []
 
+# === Стратег: модели фоновых сценариев (issue #1092) ===
+
+# Алиасы модели для фоновых сценариев Стратега (roles/strategist/scripts/strategist.sh).
+# Отсутствующий ключ = прежнее поведение (значения ниже и есть эти прежние дефолты).
+# Пустое значение — ошибка конфигурации, не тихий откат к дефолту.
+scheduler_model_week_review: claude-opus-4-7
+scheduler_model_session_prep: claude-sonnet-4-6
+scheduler_model_day_plan: claude-sonnet-4-6
+scheduler_model_day_close: claude-sonnet-4-6
+scheduler_model_note_review: claude-haiku-4-5-20251001
+
 # === Расширения ===
 
 # Директория с пользовательскими расширениями протоколов
@@ -81,6 +139,21 @@ extensions_dir: extensions
 # Пустая строка → скрипты пропускаются (фича не активирована).
 # Пример: knowledge_repo: "DS-Knowledge-Index"
 knowledge_repo: ""
+
+# === Windows / Git Bash: пропуск проверки сессии (issue #1281) ===
+
+# Хук session-open-gate.sh блокирует git commit/push без открытой сессии с номером РП.
+# В Git Bash сессию с номером РП открыть нельзя (session-guard.sh там не работает),
+# поэтому коммиты блокируются. Если вы работаете в Git Bash и понимаете последствия,
+# человек (не агент) может временно снять проверку, указав последний день пропуска:
+#   session_open_gate_skip_until: 2026-11-05
+# Правила: формат ГГГГ-ММ-ДД, значение без кавычек, не дальше 30 дней вперёд.
+# Ключ не действует на Linux, macOS и WSL2. Любая ошибка в записи оставляет проверку
+# включённой. Каждый пропущенный коммит выводит предупреждение и пишет строку в
+# .iwe-runtime/session-open-gate-skip.log. Агент с правом записи в этот файл может
+# сам поставить или продлить ключ: периодически сверяйте params.yaml и журнал.
+# По умолчанию (ключа нет) проверка обязательна.
+# session_open_gate_skip_until:
 
 # === Автор шаблона ===
 
